@@ -60,7 +60,7 @@ jobs:
           docker compose -f compose/compose.yaml -f compose/build-local.yaml config --quiet
 
       - name: Build HACS package
-        run: scripts/package-hacs.sh
+        run: bash scripts/package-hacs.sh
 
       - name: Upload HACS package test artifact
         uses: actions/upload-artifact@v4
