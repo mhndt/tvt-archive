@@ -1,0 +1,17 @@
+.git
+.github
+.env
+*.zip
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+dist
+assets
+custom_components
+docs
+tests
+README.md
+hacs.json
+setup.sh
+compose*.yaml
