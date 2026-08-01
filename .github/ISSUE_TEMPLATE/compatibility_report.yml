@@ -1,0 +1,49 @@
+name: Compatibility report
+description: Report a working or non-working camera, recorder, GPU, or platform
+title: "[Compatibility]: "
+labels: [compatibility]
+body:
+  - type: checkboxes
+    attributes:
+      label: Privacy
+      options:
+        - label: I removed credentials, tokens, private addresses, and recordings.
+          required: true
+  - type: input
+    attributes:
+      label: Device model and firmware
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Host OS and architecture
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: CPU and GPU
+  - type: dropdown
+    attributes:
+      label: Device arrangement
+      options:
+        - Separate IP camera, channel 0
+        - Separate IP camera, another channel
+        - NVR/DVR channel
+        - Other
+    validations:
+      required: true
+  - type: checkboxes
+    attributes:
+      label: Results
+      options:
+        - label: Native metadata/timeline works
+        - label: Native recorded video works
+        - label: Native recorded audio works
+        - label: Recorded RTSP works
+        - label: Original playback works
+        - label: Balanced 720p works
+        - label: Data Saver 480p works
+        - label: MP4 export works
+  - type: textarea
+    attributes:
+      label: Notes and sanitized diagnostics
