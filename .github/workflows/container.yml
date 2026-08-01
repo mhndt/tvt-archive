@@ -1,0 +1,83 @@
+name: Container
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - docker/**
+      - host/**
+      - compose/**
+      - .github/workflows/container.yml
+  pull_request:
+    paths:
+      - Dockerfile
+      - docker/**
+      - host/**
+      - compose/**
+      - .github/workflows/container.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build local amd64 image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          platforms: linux/amd64
+          tags: tvt-archive:ci
+          cache-from: type=gha,scope=container-amd64
+          cache-to: type=gha,mode=max,scope=container-amd64
+          build-args: |
+            APP_VERSION=0.8.1
+            VCS_REF=${{ github.sha }}
+
+      - name: Start software-only container
+        run: |
+          docker volume create tvt-archive-ci-config
+          docker volume create tvt-archive-ci-state
+          docker volume create tvt-archive-ci-cache
+          docker run -d --name tvt-archive-ci \
+            -p 127.0.0.1:18099:8099 \
+            -e TVT_ARCHIVE_ACCELERATOR=software \
+            -v tvt-archive-ci-config:/config \
+            -v tvt-archive-ci-state:/state \
+            -v tvt-archive-ci-cache:/cache \
+            tvt-archive:ci
+
+      - name: Wait for health
+        run: |
+          for attempt in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:18099/api/health > health.json; then
+              cat health.json
+              exit 0
+            fi
+            if [[ "$(docker inspect -f '{{.State.Status}}' tvt-archive-ci)" != running ]]; then
+              docker logs tvt-archive-ci
+              exit 1
+            fi
+            sleep 2
+          done
+          docker logs tvt-archive-ci
+          exit 1
+
+      - name: Verify token and diagnostics commands
+        run: |
+          test -n "$(docker exec tvt-archive-ci /opt/tvt-archive/entrypoint.sh show-token)"
+          docker exec tvt-archive-ci /opt/tvt-archive/entrypoint.sh accelerator-info
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker logs tvt-archive-ci || true
