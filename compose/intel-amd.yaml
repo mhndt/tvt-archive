@@ -1,0 +1,7 @@
+services:
+  tvt-archive:
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "${TVT_ARCHIVE_RENDER_GID:-109}"
+      - "${TVT_ARCHIVE_VIDEO_GID:-44}"
