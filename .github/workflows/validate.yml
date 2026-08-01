@@ -1,0 +1,26 @@
+name: HACS and Hassfest
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  hacs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: HACS validation
+        uses: hacs/action@main
+        with:
+          category: integration
+
+  hassfest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Hassfest validation
+        uses: home-assistant/actions/hassfest@master
