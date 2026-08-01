@@ -6,7 +6,6 @@ find . -type d -name __pycache__ -prune -exec rm -rf {} +
 find . -type f \( -name "*.pyc" -o -name "*.pyo" \) -delete
 python3 scripts/check-version.py
 rm -rf dist
-dir="custom_components/tvt_archive"
 mkdir -p dist
 python3 - "$ROOT" <<'PY'
 from __future__ import annotations
