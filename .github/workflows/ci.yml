@@ -63,7 +63,7 @@ jobs:
         run: scripts/package-hacs.sh
 
       - name: Upload HACS package test artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tvt-archive-hacs
           path: dist/
