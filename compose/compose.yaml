@@ -1,0 +1,40 @@
+services:
+  tvt-archive:
+    image: ${TVT_ARCHIVE_IMAGE:-ghcr.io/mhndt/tvt-archive:0.8.1}
+    container_name: tvt-archive
+    restart: unless-stopped
+    ports:
+      - "${TVT_ARCHIVE_HOST:-0.0.0.0}:${TVT_ARCHIVE_PORT:-8099}:8099"
+    environment:
+      TVT_ARCHIVE_TOKEN: "${TVT_ARCHIVE_TOKEN:-}"
+      TVT_ARCHIVE_ACCELERATOR: "${TVT_ARCHIVE_ACCELERATOR:-auto}"
+      TVT_ARCHIVE_DRI_DEVICE: "${TVT_ARCHIVE_DRI_DEVICE:-/dev/dri/renderD128}"
+      TVT_ARCHIVE_VAAPI_DRIVER: "${TVT_ARCHIVE_VAAPI_DRIVER:-auto}"
+      TVT_ARCHIVE_STREAM_AUDIO_DELAY_MS: "${TVT_ARCHIVE_STREAM_AUDIO_DELAY_MS:-0}"
+    volumes:
+      - tvt-archive-config:/config
+      - tvt-archive-state:/state
+      - tvt-archive-cache:/cache
+      - /etc/localtime:/etc/localtime:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 15s
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import json,urllib.request; json.load(urllib.request.urlopen('http://127.0.0.1:8099/api/health', timeout=3))"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 120s
+
+volumes:
+  tvt-archive-config:
+    name: tvt-archive-config
+  tvt-archive-state:
+    name: tvt-archive-state
+  tvt-archive-cache:
+    name: tvt-archive-cache

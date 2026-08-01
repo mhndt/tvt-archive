@@ -1,0 +1,10 @@
+# Developer/test override. Normal users should pull the published GHCR image
+# with compose/compose.yaml and should not compile the media stack locally.
+services:
+  tvt-archive:
+    image: ${TVT_ARCHIVE_LOCAL_IMAGE:-tvt-archive:0.8.1-local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        INTEL_MEDIA_DRIVER_VERSION: "25.1.2"
