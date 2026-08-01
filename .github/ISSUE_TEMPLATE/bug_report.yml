@@ -1,0 +1,48 @@
+name: Bug report
+description: Report a reproducible bridge, integration, playback, or export problem
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: checkboxes
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed passwords, bridge tokens, public addresses, and recordings from this report.
+          required: true
+  - type: input
+    attributes:
+      label: TVT Archive version
+      placeholder: 0.8.1
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Home Assistant version
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Camera or recorder model and firmware
+    validations:
+      required: true
+  - type: dropdown
+    attributes:
+      label: Archive backend
+      options:
+        - Native TCP/9008
+        - Recorded RTSP
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: What happened?
+      description: Include exact steps and the expected result.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Sanitized diagnostics and logs
+      render: text
+  - type: input
+    attributes:
+      label: Host OS, architecture, CPU, and GPU
