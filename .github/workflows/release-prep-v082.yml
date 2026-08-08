@@ -21,99 +21,39 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          cat > /tmp/tvt-v082-payload.b64 <<'PAYLOAD'
-H4sIANhxdmoC/+1963rbRpLo/OZTdJBkRE5IkNTFlqkoObREx9qRZR1J9myO7aUgAhQxJgEOAOoyir5vH2KfcJ/k1KW70QABknJk
-Zy/mTCwS6Gt13bq6usqZTse3jWE4C1wn8cPAnt7+6bE/Lfg83dqiv/DJ/d1cb69vqmf8vN1+0n7yJ9H60xf4zOLEiaD7P/3v/Hz7
-TXMWR80LP2h6wZWY3iajMNioDKNwIvr94SyZRV6/L/zJNIwS4QRBmBCexJWKfBZ56lt8G3PFqZOMxv6FqnUMPyuVKAwTsUs/qlDS
-dqLLq3ftDzU78uJwfOVVaxV/KKB9UaWiTWGNwjhpOtNp8yLy3UsPcNOq2X7cH/pjKN6pCPhEjh974vQ2TrxJ78ZPqkPrCGo74uzt
-mehGg5F/5Yk4nEUDTySR53XEHTZ/b9UqlYrrDWH8jlvFEXdEnEQ10fgJ/8rGPZh/oAeEpXC8jttPvJuk6gWD0PWDy11rlgwb27rJ
-68hPvLTNusDSafNHYeBx+1MAiNE2P7OnTuQFiT356PpRlX/Eu2fRzKsL78aPk374kX7WZHnqjkeE/0CpknFF3nTsDLx+GAy8qh5T
-XYRjV34LvGv5bexceOMCkAyAVeA6YnWbflShOg8F1o9ff7Mr2ly8ZInuqPn7Dkxo6g0Sz4UvziAZ3wqAjZg4yWBUF8SVxB01ietl
-rAj1LqeD/dPI66KNM/1WnAJJJ+LaT0YwniAGkAEIxdAPnLG48qIY8BcaGnoA2YEXC5/ba0LZoX85iwjBBSJZbFfwTT+eDYf+DRTd
-FXcWomFdWPbfY/knDOjLrTMZ8xf5d+LSn+Qmob/xyLqvDMOIlho7xZW3o8txeFG1/mJJfJY0gGVSVBdQy7Iv/cTCevQO8CKJhWzN
-5gHa4/Dai6A4tiBnpceergfMM/GDmUcPkug2fYMVYI7U5CI0x7LezcCbJuJN4MNbb9/Df3tRFEYlHc2mIGFgoXezi2e17G27jQDC
-L+uWxiRV/huukLZKozNwXhYsRHumROtt7+T04PWR7uV9gC+/FS8IJS69wIucsf9P6G06uxj7A7EfDj56EQK/A/0NPjqX8G7fu/Cd
-QEw813eAIOAxoF0oBiBCgOkdBIk3hilPpv6YRWnF1a0gna+trX0LPDJInJtdftNMC3Tale7JL2K/9/yge9SX491NIv/G9xrx2J9U
-Ki9OXr8SLo2h891dtuS96J6K0Tj+e9y4mPlj14uouZeHp/1/OdXNte0ndvuJ+ease/K8e3jYP33Z3Wqv725tra+3287mxVO3PVjf
-Qrm9+WR9uD1YX9/0vKcbbffZ+tN2e9t55mxsPn3muptbrS3nYuvJs431i6cDd/gEinqt9c0tb90ZXDxpPblwBtvb21vbW09bbccb
-bl5sbLe3PW9r6A42Np49a2+0vc2229p8dgGttyonb46EM00al14iEUD8+c/6iR8A1Mdj0bgVjUYQNuTvRgTIN5l4gRuLgdMYeFHi
-D/0BVIbfs2iMTbxn7jERjWgomldO1AQBBbIlgb9xEjf/khYivisaU9EE5oTyq5lMpk0CblqI2m0M49NDEFNJMo07zWbkXUJb0a0d
-TCd/j+0wusRawCCaDfml8d1ddknu7eTyn5ZohEYn+CjtyBuMQmHpetkFuxe5epb4TcQjB17FM5jrQDTSloApisbNP4f5rhp7hTPU
-wJ6I1pPNTaNMU1JE04Xp0swmfgCzUwAzHz2kucODvd7RaU83A1P+l9OGfIps1JiLFycAler1ACf5Y0HPNYDqZSI2SaVcQjxEEd3j
-Y00oxCTo6du90/5J78XuLPgYhNcBPXv+5uBwv7/fPevpx5XD7vPeIbDjSzucIh8CKveBq8S2P4Gp2YmfjL1dy9BJLDkTUV7J9eJB
-5E+Rl+xaL8OJJ7oxCjMHhJkjNRtgordAYx9BNUMZSvjK2pJAUYPsCJjRBXAg6LsxdCY+yNiBMwGGF68wBMDyXY3fIH9GswsQ+pPm
-ZBS4STO5ShrOytNhJezRmgPeOQOaZ3X00VoF5u8FsRfvWq8OzlYoL9WJXaBQA4HuV6gZeVe+qiqxbJVqA5DLIO2wVoqH91al0jt6
-q8QHIPvRWe9ofzcIAx/EUgSqFSILN37869nL10dvjp6/efGid9Lb321nXuxD3b+dHJz1nv961tt7vd/T7wGD+t2TvZcHb3v9593T
-3m4znGbgW1Bu7/XRi4Nf+vsHJ729s9cnv+5KLUsWPT2D0ZtvAbsT1c5ed+9l5uXAGYyKOjmA2R72X/X2D7r9/RN4cqIpmUm+wYK0
-oGqxhKzsvT7+FWQM7mZ2M2JVcxqRnzwN3R80ua7iZWcvD072+8fdk7NfQR8UtNkCBh15KPsz1VEf+avnTUkDNlUSWvcOvG2kqsjb
-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[/truncated due to tool parameter limit]
+          cat .release-prep/payload-*.txt | tr -d '\n' | base64 -d >/tmp/tvt-v082-payload.tar.gz
+          mkdir -p /tmp/tvt-v082
+          tar -xzf /tmp/tvt-v082-payload.tar.gz -C /tmp/tvt-v082
+          python3 /tmp/tvt-v082/apply-foundation.py "$GITHUB_WORKSPACE"
+          python3 /tmp/tvt-v082/apply-final.py "$GITHUB_WORKSPACE"
+          python3 /tmp/tvt-v082/fix-v2.py "$GITHUB_WORKSPACE"
+          python3 /tmp/tvt-v082/fix-docs.py "$GITHUB_WORKSPACE"
+          python3 /tmp/tvt-v082/remove-security.py "$GITHUB_WORKSPACE"
+          test ! -e SECURITY.md
+
+      - name: Validate release source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 -m py_compile host/app/*.py custom_components/tvt_archive/*.py tests/*.py
+          node --check custom_components/tvt_archive/frontend/tvt-archive-panel.js
+          python3 -m unittest discover -s tests -v
+          if grep -RIE --exclude-dir=.git --exclude='*.png' --exclude='*.jpg' --exclude='*.jpeg' --exclude='*.zip' '(ChatGPT|OpenAI|AI-generated|generated by AI|GPT-[0-9])' .; then
+            echo 'Unexpected attribution found in release tree.' >&2
+            exit 1
+          fi
+          if grep -RIE --exclude-dir=.git '(freeze-on-starvation-test|startup-smoothing-test|player-smoothing-test|0\.8\.2-test)' .; then
+            echo 'Test-build naming remains in release tree.' >&2
+            exit 1
+          fi
+
+      - name: Commit reviewed release source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git rm -r -- .github/workflows/release-prep-v082.yml .release-prep
+          git add -A
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Prepare v0.8.2 release'
+          git push origin HEAD:release/v0.8.2
