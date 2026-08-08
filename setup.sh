@@ -35,8 +35,8 @@ fi
 
 HOST_BIND="${TVT_ARCHIVE_HOST:-0.0.0.0}"
 HOST_PORT="${TVT_ARCHIVE_PORT:-8099}"
-IMAGE="${TVT_ARCHIVE_IMAGE:-ghcr.io/mhndt/tvt-archive:0.8.2}"
-LOCAL_IMAGE="${TVT_ARCHIVE_LOCAL_IMAGE:-tvt-archive:0.8.2-local}"
+IMAGE="${TVT_ARCHIVE_IMAGE:-ghcr.io/mhndt/tvt-archive:0.8.3}"
+LOCAL_IMAGE="${TVT_ARCHIVE_LOCAL_IMAGE:-tvt-archive:0.8.3-local}"
 TOKEN="${TVT_ARCHIVE_TOKEN:-}"
 AUDIO_DELAY="${TVT_ARCHIVE_STREAM_AUDIO_DELAY_MS:-0}"
 COMPOSE_FILES=(compose/compose.yaml)
@@ -100,7 +100,7 @@ LAN_IP="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i==
 [[ -n "$LAN_IP" ]] || LAN_IP="<docker-host-ip>"
 
 echo
-echo "TVT Archive 0.8.2 is ready."
+echo "TVT Archive 0.8.3 is ready."
 echo "Bridge URL: http://$LAN_IP:$HOST_PORT"
 echo "Access token: $TOKEN"
 echo "Retrieve it later: docker compose exec tvt-archive /opt/tvt-archive/entrypoint.sh show-token"

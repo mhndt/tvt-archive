@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from hashlib import sha256
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -19,7 +20,6 @@ from .const import (
     DOMAIN,
     PANEL_LOGO_PATH,
     PANEL_MODULE_PATH,
-    PANEL_MODULE_URL,
     PANEL_URL_PATH,
 )
 from .coordinator import TVTArchiveCoordinator
@@ -31,11 +31,14 @@ async def _async_register_frontend(hass: HomeAssistant) -> None:
     if domain_data.get(DATA_FRONTEND_REGISTERED):
         return
     base = Path(__file__).parent
+    panel_path = base / "frontend" / "tvt-archive-panel.js"
+    panel_digest = sha256(panel_path.read_bytes()).hexdigest()[:12]
+    panel_module_url = f"{PANEL_MODULE_PATH}?v={panel_digest}"
     await hass.http.async_register_static_paths(
         [
             StaticPathConfig(
                 PANEL_MODULE_PATH,
-                str(base / "frontend" / "tvt-archive-panel.js"),
+                str(panel_path),
                 cache_headers=False,
             ),
             StaticPathConfig(
@@ -51,7 +54,7 @@ async def _async_register_frontend(hass: HomeAssistant) -> None:
         webcomponent_name="tvt-archive-panel",
         sidebar_title="Recordings",
         sidebar_icon="mdi:cctv",
-        module_url=PANEL_MODULE_URL,
+        module_url=panel_module_url,
         config={},
         require_admin=False,
     )

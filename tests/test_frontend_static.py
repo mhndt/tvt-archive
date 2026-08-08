@@ -61,7 +61,10 @@ class FrontendStaticTests(unittest.TestCase):
         self.assertIn('this._state("opening")', PANEL)
         self.assertIn('video.controls = false', PANEL)
         self.assertIn('video.autoplay = false', PANEL)
-        self.assertNotIn('video.autoplay = true', PANEL)
+        recording_player = PANEL[
+            PANEL.index("class TVTFmp4Player"):PANEL.index("class TVTLiveCameraPlayer")
+        ]
+        self.assertNotIn('video.autoplay = true', recording_player)
         self.assertIn('this.startBufferSeconds - this.startBufferToleranceSeconds', PANEL)
         self.assertIn('ahead + 0.05 < startupThreshold', PANEL)
         prime = PANEL[PANEL.index("  prime() {"):PANEL.index("  async start() {")]
@@ -115,6 +118,13 @@ class FrontendStaticTests(unittest.TestCase):
         self.assertNotIn("this.resume();", recover)
 
 
+    def test_player_nudges_decoder_when_playing_position_stops(self) -> None:
+        self.assertIn("_watchPlaybackProgress(window, ahead, now)", PANEL)
+        self.assertIn("now - this.playbackProgressAt < 2.5", PANEL)
+        self.assertIn("current + 0.08", PANEL)
+        self.assertIn("this.hls?.startLoad(target)", PANEL)
+        self.assertIn("this._currentPlaybackTime() - 0.25", PANEL)
+
     def test_initial_spinner_does_not_return_during_starvation(self) -> None:
         self.assertIn("player-spinner", PANEL)
         self.assertIn('<span class="player-spinner"></span><span>${label}</span>', PANEL)
@@ -136,6 +146,18 @@ class FrontendStaticTests(unittest.TestCase):
         self.assertIn(".tick:first-child span", PANEL)
         self.assertIn(".tick:last-child span", PANEL)
 
+    def test_mobile_timeline_labels_do_not_collide(self) -> None:
+        self.assertIn('class="timeline-inner zoom-${this._zoom}"', PANEL)
+        self.assertIn('const mobileMinor = hour % 4 ? " mobile-minor" : "";', PANEL)
+        self.assertIn(".timeline-inner.zoom-1 .tick.mobile-minor span{display:none}", PANEL)
+
+    def test_internal_rebuffer_does_not_surface_native_controls(self) -> None:
+        self.assertIn("this.initialControlsShown = false", PANEL)
+        self.assertIn("if (!this.initialControlsShown)", PANEL)
+        enter = PANEL[PANEL.index('  _enterRebuffer(reason = "starvation") {'):PANEL.index("  _maybeRecover() {")]
+        self.assertIn("this.video.controls = false", enter)
+        self.assertLess(enter.index("this.video.controls = false"), enter.index("this.video.pause()"))
+
     def test_firefox_startup_gate_allows_timestamp_alignment_shortfall(self) -> None:
         self.assertIn("this.startBufferToleranceSeconds = 0.45", PANEL)
         self.assertIn("const startupThreshold = Math.max(2.25, this.startBufferSeconds - this.startBufferToleranceSeconds)", PANEL)
@@ -147,6 +169,18 @@ class FrontendStaticTests(unittest.TestCase):
         self.assertIn('retrying ${this._playbackRetryCount}/3', PANEL)
         self.assertIn('this._playRecording(true)', PANEL)
         self.assertIn('await this._stopPlaybackSession()', PANEL)
+
+    def test_live_player_is_standalone_from_lovelace(self) -> None:
+        self.assertIn("class TVTLiveCameraPlayer", PANEL)
+        self.assertIn('type:"camera/capabilities"', PANEL)
+        self.assertIn('type:"camera/webrtc/get_client_config"', PANEL)
+        self.assertIn('type:"camera/webrtc/offer"', PANEL)
+        self.assertIn('type:"camera/webrtc/candidate"', PANEL)
+        self.assertIn('type:"camera/stream"', PANEL)
+        self.assertIn("/api/camera_proxy_stream/", PANEL)
+        self.assertNotIn("window.loadCardHelpers", PANEL)
+        self.assertNotIn('document.createElement("hui-picture-entity-card")', PANEL)
+        self.assertNotIn("helpers.createCardElement", PANEL)
 
     def test_error_renderer_does_not_fall_back_to_object_object(self) -> None:
         self.assertIn("JSON.stringify(error)", PANEL)

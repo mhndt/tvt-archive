@@ -30,6 +30,7 @@ CONF_CAMERA_ID = "camera_id"
 CONF_CHANNEL = "channel"
 CONF_CONFIRM = "confirm"
 CONF_ARCHIVE_BACKEND = "archive_backend"
+CONF_RECORDING_AUDIO = "recording_audio"
 CONF_RTSP_PORT = "rtsp_port"
 CONF_RTSP_STREAM_TYPE = "rtsp_stream_type"
 CONF_RTSP_TRANSPORT = "rtsp_transport"
@@ -44,6 +45,7 @@ BACKENDS = {
     "native_9008": "Native TCP/9008",
     "rtsp": "Recorded RTSP",
 }
+RECORDING_AUDIO_MODES = {"auto": "Auto (recommended)", "on": "Always expect audio", "off": "Disabled"}
 RTSP_STREAMS = {"main": "Main stream", "sub": "Sub stream"}
 RTSP_TRANSPORTS = {"tcp": "TCP", "udp": "UDP"}
 
@@ -65,6 +67,7 @@ def _camera_schema(
             CONF_ARCHIVE_BACKEND,
             default=defaults.get(CONF_ARCHIVE_BACKEND, "native_9008"),
         ): vol.In(BACKENDS),
+        vol.Required(CONF_RECORDING_AUDIO, default=defaults.get(CONF_RECORDING_AUDIO, "auto")): vol.In(RECORDING_AUDIO_MODES),
         vol.Required(CONF_PORT, default=int(defaults.get(CONF_PORT, 9008))): vol.All(
             vol.Coerce(int), vol.Range(min=1, max=65535)
         ),
@@ -109,6 +112,7 @@ def _camera_defaults(camera: dict[str, Any]) -> dict[str, Any]:
         CONF_NAME: camera.get("name", camera.get("id", "")),
         CONF_HOST: camera.get("host", ""),
         CONF_ARCHIVE_BACKEND: camera.get("archive_backend", "native_9008"),
+        CONF_RECORDING_AUDIO: camera.get("recording_audio", "auto"),
         CONF_PORT: camera.get("port", 9008),
         CONF_CHANNEL: camera.get("channel", 0),
         CONF_USERNAME: camera.get("username", "admin"),
