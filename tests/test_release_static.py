@@ -28,11 +28,11 @@ class ReleaseStaticTests(unittest.TestCase):
         self.assertIn('"hls_first_media_timeout_seconds": 30.0', entrypoint)
         self.assertIn('"hls_first_media_retries": 1', entrypoint)
         self.assertIn('"hls_timing_max_seconds": 2.5', entrypoint)
-        self.assertIn('"hls_audio_detect_seconds": 1.0', entrypoint)
+        self.assertIn('"hls_audio_probe_media_seconds": 2.0', entrypoint)
         self.assertIn('PROCESSING.get("hls_first_media_timeout_seconds", 30.0)', bridge)
         self.assertIn('PROCESSING.get("hls_first_media_retries", 1)', bridge)
         self.assertIn('PROCESSING.get("hls_timing_max_seconds", 2.5)', bridge)
-        self.assertIn('PROCESSING.get("hls_audio_detect_seconds", 1.0)', bridge)
+        self.assertIn('PROCESSING.get("hls_audio_probe_media_seconds", HLS_START_BUFFER_SECONDS)', bridge)
 
     def test_home_assistant_job_errors_are_translated(self) -> None:
         text = (ROOT / "custom_components" / "tvt_archive" / "http.py").read_text(
@@ -51,7 +51,6 @@ class ReleaseStaticTests(unittest.TestCase):
         self.assertNotIn("AS intel-media-builder", text)
         self.assertNotIn("INTEL_GMMLIB_VERSION", text)
         self.assertNotIn("ENABLE_NONFREE_KERNELS", text)
-
 
     def test_hlsjs_is_pinned_verified_and_served_locally(self) -> None:
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
@@ -77,14 +76,16 @@ class ReleaseStaticTests(unittest.TestCase):
 
     def test_prepared_file_disconnects_are_handled_cleanly(self) -> None:
         text = (ROOT / "host" / "app" / "bridge.py").read_text(encoding="utf-8")
-        self.assertIn('server_version = "TVTArchiveBridge/0.8.2"', text)
+        version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+        self.assertIn(f'server_version = "TVTArchiveBridge/{version}"', text)
         self.assertIn('except (BrokenPipeError, ConnectionResetError):', text)
         self.assertIn('Prepared-file client disconnected', text)
 
     def test_normal_compose_pulls_prebuilt_image(self) -> None:
         compose = (ROOT / "compose" / "compose.yaml").read_text(encoding="utf-8")
         build_override = (ROOT / "compose" / "build-local.yaml").read_text(encoding="utf-8")
-        self.assertIn("ghcr.io/mhndt/tvt-archive:0.8.2", compose)
+        version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+        self.assertIn(f"ghcr.io/mhndt/tvt-archive:{version}", compose)
         self.assertNotIn("build:", compose)
         self.assertIn("build:", build_override)
 
@@ -114,7 +115,6 @@ class ReleaseStaticTests(unittest.TestCase):
         self.assertNotIn('self._error(500, str(error)', bridge)
         self.assertIn('${$esc(this._selectedLiveProfile().name)}', panel)
         self.assertIn('`${$esc(this._date)} ${$esc(selected)}`', panel)
-
 
 
 if __name__ == "__main__":

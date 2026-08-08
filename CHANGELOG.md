@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.8.3
+
+### Mobile playback
+
+- Improve mobile timeline spacing and keep native playback controls hidden during internal buffering pauses.
+
+### Reliability
+
+- Recover recording playback after mid-stream archive stalls instead of treating partial HLS output as a completed recording.
+
+### Recording audio
+
+- Added per-camera Native TCP/9008 recording-audio modes: Auto, Always expect audio, and Disabled.
+- Made Auto learn only positive archive-audio capability and persist it independently for each configured camera.
+- Replaced the one-second wall-clock audio decision with recording-timestamp-aware probing inside the existing startup timing window.
+- Added media-timeline silence alignment so known late-starting G.711 A-law audio can be exposed from the beginning of HLS playback without duplicating the source offset.
+- Preserved learned audio capability when ordinary camera details are edited and removed it when the camera is deleted.
+
+### Home Assistant and packaging
+
+- Fixed the HACS release ZIP layout so integration files and local brand assets are at the expected ZIP root.
+- Corrected container diagnostic commands and clarified the update workflow.
+- Sanitized bridge proxy errors returned to clients while retaining detailed failures in Home Assistant logs.
+
+### Player
+
+- Recording player controls now hide automatically after two seconds of inactivity and reappear when the pointer moves over the player.
+
 ## 0.8.2
 
 ### Playback and reliability

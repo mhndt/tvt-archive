@@ -1,4 +1,4 @@
-const VERSION = "0.8.2";
+const VERSION = "0.8.3";
 const $esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const pad = (n) => String(n).padStart(2, "0");
 const localDate = (d = new Date()) => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
@@ -98,6 +98,11 @@ class TVTFmp4Player {
     this.freezeReason = null;
     this.mediaRecoveryAttempts = 0;
     this.networkRecoveryTimer = null;
+    this.playbackProgressPosition = null;
+    this.playbackProgressAt = null;
+    this.controlsHideTimer = null;
+    this.controlsHideDelayMs = 2000;
+    this.initialControlsShown = false;
     this.startBufferSeconds = Math.max(2, Math.min(12, Number(startBufferSeconds || 3)));
     // Firefox's decoded range can be a few hundred milliseconds shorter than
     // the playlist duration because of fMP4 timestamp and audio alignment.
@@ -105,6 +110,8 @@ class TVTFmp4Player {
     this.resumeBufferSeconds = 0.6;
     this._boundSeeking = () => {
       this.rebuffering = false;
+      this.playbackProgressPosition = null;
+      this.playbackProgressAt = null;
       this._setPlaybackRate(1);
       this._state("seeking");
     };
@@ -122,12 +129,36 @@ class TVTFmp4Player {
         try { this.video.pause(); } catch (_) {}
         return;
       }
-      if (this.started) this._state("playing");
+      if (this.started) {
+        this.playbackProgressPosition = Number(this.video.currentTime || 0);
+        this.playbackProgressAt = performance.now() / 1000;
+        this._state("playing");
+        if (!this.initialControlsShown) {
+          this.initialControlsShown = true;
+          this._showControlsTemporarily();
+        }
+      }
     };
+    this._boundControlsActivity = () => this._showControlsTemporarily();
     this._boundProgress = () => this._bufferChanged();
   }
 
   _state(name, detail = {}) { this.onState?.(name, detail); }
+
+  _scheduleControlsHide() {
+    clearTimeout(this.controlsHideTimer);
+    if (this.destroyed || !this.started || this.video.paused) return;
+    this.controlsHideTimer = setTimeout(() => {
+      if (this.destroyed || !this.started || this.video.paused || this.video.seeking) return;
+      this.video.controls = false;
+    }, this.controlsHideDelayMs);
+  }
+
+  _showControlsTemporarily() {
+    if (this.destroyed || !this.started) return;
+    this.video.controls = true;
+    this._scheduleControlsHide();
+  }
 
   _bindVideoEvents() {
     if (this.videoEventsBound) return;
@@ -138,6 +169,9 @@ class TVTFmp4Player {
     this.video.addEventListener("stalled", this._boundStalled);
     this.video.addEventListener("ended", this._boundEnded);
     this.video.addEventListener("playing", this._boundPlaying);
+    this.video.addEventListener("pointerenter", this._boundControlsActivity);
+    this.video.addEventListener("pointermove", this._boundControlsActivity);
+    this.video.addEventListener("pointerdown", this._boundControlsActivity);
     this.video.addEventListener("progress", this._boundProgress);
     this.video.addEventListener("durationchange", this._boundProgress);
     this.video.addEventListener("loadedmetadata", this._boundProgress);
@@ -290,7 +324,6 @@ class TVTFmp4Player {
     this.started = true;
     this.rebuffering = false;
     try { this.video.currentTime = window.start + 0.03; } catch (_) {}
-    this.video.controls = true;
     this._startAdaptiveClock();
     this.onReady?.();
     this.resume();
@@ -336,6 +369,8 @@ class TVTFmp4Player {
     this.freezeReason = reason;
     const current = Number(this.video.currentTime || 0);
     this.freezeTime = Number.isFinite(current) ? Math.max(0, current) : 0;
+    clearTimeout(this.controlsHideTimer);
+    this.video.controls = false;
     try { this.video.pause(); } catch (_) {}
     this._setPlaybackRate(1);
     this.hls?.startLoad(this.freezeTime);
@@ -377,6 +412,35 @@ class TVTFmp4Player {
     }
   }
 
+  _watchPlaybackProgress(window, ahead, now) {
+    if (!window || this.video.paused || this.video.seeking || this.rebuffering) {
+      this.playbackProgressPosition = null;
+      this.playbackProgressAt = null;
+      return;
+    }
+    const current = Number(this.video.currentTime || 0);
+    if (!Number.isFinite(current)) return;
+    if (
+      this.playbackProgressPosition == null ||
+      this.playbackProgressAt == null ||
+      current > this.playbackProgressPosition + 0.03 ||
+      current + 0.15 < this.playbackProgressPosition
+    ) {
+      this.playbackProgressPosition = current;
+      this.playbackProgressAt = now;
+      return;
+    }
+    if (ahead < 0.5 || now - this.playbackProgressAt < 2.5) return;
+    const target = Math.min(window.end - 0.05, current + 0.08);
+    this.playbackProgressPosition = target;
+    this.playbackProgressAt = now;
+    if (target <= current + 0.01) return;
+    try { this.video.currentTime = target; } catch (_) {}
+    this.hls?.startLoad(target);
+    const result = this.video.play();
+    if (result?.catch) result.catch(() => {});
+  }
+
   _adaptiveTick() {
     if (this.destroyed || !this.started) return;
     if (this.rebuffering) { this._maybeRecover(); return; }
@@ -393,6 +457,7 @@ class TVTFmp4Player {
     const window = this._bufferWindow();
     const ahead = window?.ahead || 0;
     const now = performance.now() / 1000;
+    this._watchPlaybackProgress(window, ahead, now);
     if (!this.serverComplete && !this.video.paused && ahead < 0.20) {
       this._enterRebuffer("low-buffer");
       return;
@@ -452,6 +517,7 @@ class TVTFmp4Player {
     this.destroyed = true;
     clearInterval(this.rateTimer);
     clearTimeout(this.networkRecoveryTimer);
+    clearTimeout(this.controlsHideTimer);
     if (this.videoEventsBound) {
       this.video.removeEventListener("seeking", this._boundSeeking);
       this.video.removeEventListener("seeked", this._boundSeeked);
@@ -459,6 +525,9 @@ class TVTFmp4Player {
       this.video.removeEventListener("stalled", this._boundStalled);
       this.video.removeEventListener("ended", this._boundEnded);
       this.video.removeEventListener("playing", this._boundPlaying);
+      this.video.removeEventListener("pointerenter", this._boundControlsActivity);
+      this.video.removeEventListener("pointermove", this._boundControlsActivity);
+      this.video.removeEventListener("pointerdown", this._boundControlsActivity);
       this.video.removeEventListener("progress", this._boundProgress);
       this.video.removeEventListener("durationchange", this._boundProgress);
       this.video.removeEventListener("loadedmetadata", this._boundProgress);
@@ -696,9 +765,10 @@ class TVTArchivePanel extends HTMLElement {
   _timelineHtml() {
     if (!this._timeline) return `<div class="empty">Loading timeline…</div>`;
     const width = this._zoom * 100;
-    let html = `<div class="timeline-inner" style="width:${width}%">`;
+    let html = `<div class="timeline-inner zoom-${this._zoom}" style="width:${width}%">`;
     for (let hour = 0; hour <= 24; hour += 2) {
-      html += `<div class="tick" style="left:${(hour / 24) * 100}%"><span>${pad(hour)}:00</span></div>`;
+      const mobileMinor = hour % 4 ? " mobile-minor" : "";
+      html += `<div class="tick${mobileMinor}" style="left:${(hour / 24) * 100}%"><span>${pad(hour)}:00</span></div>`;
     }
     for (const range of this._timeline.merged_ranges || []) {
       const startDate = new Date(range.start), stopDate = new Date(range.stop);
@@ -820,7 +890,7 @@ class TVTArchivePanel extends HTMLElement {
       @media(max-width:900px){.shell{grid-template-columns:1fr}.sidebar{grid-template-columns:repeat(2,minmax(0,1fr))}.lower{grid-template-columns:1fr}.player,.player video,.live-host{min-height:42vh;height:42vh}.page{padding:10px}}
       @media(max-width:560px){
         .top{display:block}.heading{margin-bottom:16px}.controls{width:100%;display:grid;grid-template-columns:1fr;gap:10px}.controls label,.controls input,.controls select,.controls button{width:100%}
-        .player-head{display:grid;grid-template-columns:1fr auto;align-items:center}.player-head>b{grid-column:1/-1}.player-head>.subtle{grid-column:1/-1}.sidebar{grid-template-columns:1fr 1fr}.timeline-title{align-items:flex-start}.timeline-title span{max-width:68%}
+        .player-head{display:grid;grid-template-columns:1fr auto;align-items:center}.player-head>b{grid-column:1/-1}.player-head>.subtle{grid-column:1/-1}.sidebar{grid-template-columns:1fr 1fr}.timeline-title{align-items:flex-start}.timeline-title span{max-width:68%}.timeline-inner.zoom-1 .tick.mobile-minor span{display:none}
         .selection-controls{grid-template-columns:1fr 1fr}.selection-controls label{grid-column:1/-1;width:100%;overflow:hidden}.selection-controls input{width:100%;max-width:100%}.selection-controls button{width:100%}
         .range{grid-template-columns:1fr 1fr}.range button,.range .download-link{grid-column:1/-1;width:100%}.box{padding:11px}.page{overflow-x:hidden}
       }
@@ -1100,7 +1170,7 @@ class TVTArchivePanel extends HTMLElement {
     const text = String(message || "The recording could not be opened.");
     if (this._playbackRetryPending) return;
     if (this._mode === "recording" && this._recoverablePlaybackError(text) && this._playbackRetryCount < 3) {
-      const played = Math.max(0, Math.floor(this._currentPlaybackTime() - 1));
+      const played = Math.max(0, this._currentPlaybackTime() - 0.25);
       if (played > 0) {
         this._selectedSec = Math.min(86399, this._selectedSec + played);
         this._rangeStart = secToClock(this._selectedSec);

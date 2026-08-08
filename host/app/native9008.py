@@ -36,6 +36,12 @@ KIND_PLAYBACK_START = 0x0000090B
 KIND_PLAYBACK_START_RESPONSE = 0x01000909
 KIND_PLAYBACK_CONTINUE = 0x0000090A
 CONTINUATION_INTERVAL_FRAMES = 25
+NATIVE_VIDEO_STALL_SECONDS = max(
+    5.0, min(float(os.environ.get("TVT_ARCHIVE_NATIVE_VIDEO_STALL_SECONDS", "15")), 120.0)
+)
+NATIVE_CAPTURE_DEADLINE_FACTOR = max(
+    2.0, min(float(os.environ.get("TVT_ARCHIVE_NATIVE_CAPTURE_DEADLINE_FACTOR", "6")), 10.0)
+)
 KIND_RECORDED_MEDIA = 0x01000C05
 
 LOGIN_REQUEST_ID = 0x00000105
@@ -476,8 +482,12 @@ class TVT9008Client:
         self.send(KIND_PLAYBACK_START, request_id, self._playback_body(start_epoch, stop_epoch))
         self.wait_for(KIND_PLAYBACK_START_RESPONSE, request_id, self.timeout)
         target_end_us = stop_epoch * 1_000_000
-        deadline = time.monotonic() + duration * 2 + 20
+        # Archive delivery on real cameras can be substantially slower than realtime.
+        # A generous overall deadline avoids killing a healthy slow stream, while the
+        # mid-stream video watchdog below catches a connection that is actually stuck.
+        deadline = time.monotonic() + duration * NATIVE_CAPTURE_DEADLINE_FACTOR + 60
         next_continue_frame = CONTINUATION_INTERVAL_FRAMES
+        last_video_wall: float | None = None
 
         def write_timing() -> None:
             value = summary.as_dict()
@@ -504,6 +514,16 @@ class TVT9008Client:
         write_timing()
         with video_path.open("wb", buffering=0) as video, audio_path.open("wb", buffering=0) as audio:
             while time.monotonic() < deadline:
+                now = time.monotonic()
+                if (
+                    summary.video_frames
+                    and last_video_wall is not None
+                    and now - last_video_wall >= NATIVE_VIDEO_STALL_SECONDS
+                ):
+                    raise TimeoutError(
+                        f"Archive video stalled for {NATIVE_VIDEO_STALL_SECONDS:.0f} seconds "
+                        "after playback had already started"
+                    )
                 if stop_requested is not None and stop_requested():
                     break
                 try:
@@ -515,6 +535,7 @@ class TVT9008Client:
                 media_type, payload, timestamp_us, keyframe = self._extract_media(frame)
                 if media_type == "video":
                     video.write(payload)
+                    last_video_wall = time.monotonic()
                     summary.video_frames += 1
                     summary.video_bytes += len(payload)
                     summary.keyframes += int(keyframe)

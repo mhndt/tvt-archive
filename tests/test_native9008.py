@@ -60,6 +60,32 @@ class NativePlaybackTests(unittest.TestCase):
         self.assertNotIn(0x00000907, kinds)
         self.assertFalse(hasattr(native9008, "KIND_PLAYBACK_FLOW"))
 
+    def test_midstream_video_stall_raises_timeout(self) -> None:
+        client = native9008.TVT9008Client("camera", 9008, "user", "password")
+        client.send = lambda *args, **kwargs: None  # type: ignore[method-assign]
+        client.wait_for = lambda kind, request_id, timeout: native9008.InnerFrame(kind, request_id or 0, 3, b"")  # type: ignore[method-assign]
+
+        start = datetime(2026, 7, 30, 6, 49, 14)
+        start_epoch = int(time.mktime(start.timetuple()))
+        first = True
+
+        def read_frame():
+            nonlocal first
+            if first:
+                first = False
+                return video_frame(start_epoch * 1_000_000)
+            raise native9008.socket.timeout()
+
+        client.read_frame = read_frame  # type: ignore[method-assign]
+        original = native9008.NATIVE_VIDEO_STALL_SECONDS
+        native9008.NATIVE_VIDEO_STALL_SECONDS = 0.02
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                with self.assertRaisesRegex(TimeoutError, "Archive video stalled"):
+                    client.capture(start, 10, Path(directory))
+        finally:
+            native9008.NATIVE_VIDEO_STALL_SECONDS = original
+
     def test_connect_closes_socket_when_login_fails(self) -> None:
         class FakeSocket:
             def __init__(self) -> None:
