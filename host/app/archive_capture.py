@@ -199,6 +199,10 @@ def capture_native(start: datetime, duration: int, directory: Path) -> int:
         try:
             with TVT9008Client(host, port, username, password, timeout=timeout) as client:
                 result = client.capture(start, duration, directory, stop_requested=lambda: STOP)
+            if result.timed_out:
+                raise TimeoutError(
+                    "Native TCP/9008 capture timed out before the requested recording range completed"
+                )
             if result.video_frames < 2 or result.video_bytes <= 0:
                 raise RuntimeError(
                     f"Native TCP/9008 capture returned {result.video_frames} video frames"

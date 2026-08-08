@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     test "$(wc -c < /export/hls.min.js)" -gt 400000
 
 FROM debian:${DEBIAN_VERSION}
-ARG APP_VERSION=0.8.2
+ARG APP_VERSION=0.8.3
 ARG VCS_REF=unknown
 ARG BUILD_DATE=unknown
 

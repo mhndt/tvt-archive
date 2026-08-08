@@ -20,7 +20,8 @@
           "username": "Username",
           "password": "Password",
           "live_name": "Initial live profile name (optional)",
-          "live_entity": "Initial Home Assistant camera entity (optional)"
+          "live_entity": "Initial Home Assistant camera entity (optional)",
+          "recording_audio": "Recording audio"
         }
       },
       "camera_rtsp": {
@@ -67,7 +68,8 @@
           "username": "Username",
           "password": "Password",
           "live_name": "Initial live profile name (optional)",
-          "live_entity": "Initial Home Assistant camera entity (optional)"
+          "live_entity": "Initial Home Assistant camera entity (optional)",
+          "recording_audio": "Recording audio"
         }
       },
       "edit_camera": {
@@ -85,7 +87,8 @@
           "archive_backend": "Recording media mode",
           "port": "TVT TCP/9008 port",
           "username": "Username",
-          "password": "New password"
+          "password": "New password",
+          "recording_audio": "Recording audio"
         }
       },
       "manage_live_profiles": {

@@ -24,11 +24,17 @@ with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compressleve
     for path in sorted(source.rglob("*")):
         if not path.is_file() or "__pycache__" in path.parts or path.suffix in {".pyc", ".pyo"}:
             continue
-        relative = path.relative_to(root).as_posix()
+        relative = path.relative_to(source).as_posix()
         info = zipfile.ZipInfo(relative, fixed_time)
         mode = 0o755 if os.access(path, os.X_OK) else 0o644
         info.external_attr = mode << 16
         archive.writestr(info, path.read_bytes())
+
+with zipfile.ZipFile(output, "r") as archive:
+    names = set(archive.namelist())
+if "manifest.json" not in names: raise SystemExit("HACS package is missing manifest.json at the ZIP root")
+if any(name.startswith("custom_components/") for name in names): raise SystemExit("HACS package incorrectly contains a custom_components/ prefix")
+if "brand/icon.png" not in names or "brand/logo.png" not in names: raise SystemExit("HACS package is missing local integration brand assets")
 
 digest = hashlib.sha256(output.read_bytes()).hexdigest()
 (root / "dist" / "SHA256SUMS.txt").write_text(

@@ -46,8 +46,6 @@ cp .env.example .env
 
 The Compose files are kept together here:
 
-The base file defines the container. Choose at most one hardware override. Docker merges the selected files into one container configuration; it does not create several TVT Archive containers.
-
 - [Base / CPU setup](compose/compose.yaml)
 - [Intel and AMD VAAPI override](compose/intel-amd.yaml)
 - [NVIDIA override](compose/nvidia.yaml)
@@ -117,13 +115,13 @@ http://<docker-host-lan-ip>:8099
 Print the generated bridge token:
 
 ```bash
-docker compose exec tvt-archive /opt/tvt-archive/entrypoint.sh show-token
+docker exec tvt-archive /opt/tvt-archive/entrypoint.sh show-token
 ```
 
 Check the selected playback accelerator:
 
 ```bash
-docker compose exec tvt-archive /opt/tvt-archive/entrypoint.sh accelerator-info
+docker exec tvt-archive /opt/tvt-archive/entrypoint.sh accelerator-info
 ```
 
 ### Optional setup script
@@ -176,6 +174,7 @@ After Home Assistant connects to the bridge, the TVT Archive setup flow asks for
 - the camera or recorder's local IP address or hostname;
 - the camera's own local username and password;
 - the archive backend, normally **Native TCP/9008**;
+- recording-audio handling for Native TCP/9008: **Auto** (recommended), **Always expect audio**, or **Disabled**;
 - optionally, an existing Home Assistant camera entity for Live view.
 
 The setup flow sends the camera details to the bridge, which stores them in the `tvt-archive-config` Docker volume. Home Assistant keeps the bridge URL and token in its config entry.
@@ -187,7 +186,7 @@ The integration automatically adds **Recordings** to the Home Assistant sidebar.
 Open **Settings → Devices & services**, find **TVT Archive**, and select **Configure**. The management menu provides:
 
 - **Add camera** — connect another camera or recorder and optionally assign its first Live profile.
-- **Edit camera** — change its name, address, recording mode, port, username, or password. Leave the password blank to keep the current password.
+- **Edit camera** — change its name, address, recording mode, recording-audio handling, port, username, or password. Leave the password blank to keep the current password.
 - **Manage live profiles** — add profiles, rename or reorder them, choose a different existing Home Assistant camera entity, set the default profile, or remove a profile.
 - **Remove camera** — remove it from TVT Archive. This does not delete recordings from the camera or recorder.
 
@@ -227,7 +226,11 @@ Those names are only examples. The source can be ONVIF, Generic Camera, go2rtc, 
 |---|
 | TVT TD-C12 using Native TCP/9008 on an Intel HD Graphics 530 iGPU with Debian Trixie FFmpeg 7.1.5, libva 2.22.0, and Intel iHD 25.2.3 |
 
+**Recording audio:** Auto learns positive archive-audio capability separately for each camera. For an unknown camera, startup uses the recording's own video timestamps during the existing timing window instead of assuming wall-clock delivery is real time. If audio appears later, that positive capability is remembered for future playback. Always expect audio provisions the browser audio track immediately; Disabled forces video-only playback.
+
 # Updating
+
+Change into the directory where you cloned TVT Archive, then update the checkout and container:
 
 ```bash
 git pull

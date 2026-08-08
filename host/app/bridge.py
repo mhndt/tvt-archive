@@ -29,7 +29,7 @@ from typing import Any, Callable
 
 from native9008 import TVT9008Client
 
-APP_VERSION = "0.8.2"
+APP_VERSION = "0.8.3"
 BASE = Path(os.environ.get("TVT_ARCHIVE_BASE", "/opt/tvt-archive"))
 CONFIG_DIRECTORY = Path(
     os.environ.get(
@@ -68,6 +68,7 @@ def camera_index_directory(camera_id: str) -> Path:
 
 
 CONFIG_LOCK = threading.RLock()
+CAPABILITIES_LOCK = threading.RLock()
 with CONFIG_PATH.open("r", encoding="utf-8") as handle:
     CONFIG = json.load(handle)
 
@@ -162,12 +163,9 @@ HLS_FIRST_MEDIA_RETRIES = max(
 HLS_TIMING_MAX_SECONDS = max(
     0.75, min(float(PROCESSING.get("hls_timing_max_seconds", 2.5)), 10.0)
 )
-HLS_AUDIO_DETECT_SECONDS = max(
+HLS_AUDIO_PROBE_MEDIA_SECONDS = max(
     0.25,
-    min(
-        float(PROCESSING.get("hls_audio_detect_seconds", 1.0)),
-        HLS_TIMING_MAX_SECONDS,
-    ),
+    min(float(PROCESSING.get("hls_audio_probe_media_seconds", HLS_START_BUFFER_SECONDS)), 10.0),
 )
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -253,6 +251,7 @@ class PlaybackSession:
     source_fps: float = 25.0
     audio_offset_ms: int = 0
     has_audio: bool = True
+    audio_alignment_in_feeder: bool = False
     playlist_announced: bool = False
 
     def segment_count(self) -> int:
@@ -331,6 +330,38 @@ def camera(camera_id: str) -> dict[str, Any]:
         return dict(CAMERAS[camera_id])
 
 
+RECORDING_AUDIO_MODES = {"auto", "on", "off"}
+ALAW_SAMPLE_RATE = 8000
+ALAW_SILENCE_BYTE = b"\xd5"
+
+def recording_audio_mode(camera_id: str) -> str:
+    mode = str(camera(camera_id).get("recording_audio", "auto")).strip().lower()
+    if mode not in RECORDING_AUDIO_MODES:
+        raise ValueError("Recording audio mode must be auto, on, or off")
+    return mode
+
+def _camera_capabilities_path(camera_id: str) -> Path:
+    return camera_index_directory(camera_id) / "capabilities.json"
+
+def _read_camera_capabilities(camera_id: str) -> dict[str, Any]:
+    try: value=json.loads(_camera_capabilities_path(camera_id).read_text(encoding="utf-8"))
+    except (OSError,json.JSONDecodeError): return {}
+    return value if isinstance(value,dict) else {}
+
+def _learned_archive_audio(camera_id: str) -> bool:
+    return bool(_read_camera_capabilities(camera_id).get("recording_audio",False))
+
+def _remember_archive_audio(camera_id: str) -> None:
+    # Positive-only, per-camera learning. Never persist a negative capability.
+    with CAPABILITIES_LOCK:
+        path=_camera_capabilities_path(camera_id); path.parent.mkdir(parents=True,exist_ok=True)
+        value=_read_camera_capabilities(camera_id)
+        if value.get("recording_audio") is True: return
+        value["recording_audio"]=True
+        tmp=path.with_name(path.name+".tmp"); tmp.write_text(json.dumps(value,indent=2)+"\n",encoding="utf-8")
+        os.chmod(tmp,0o600); os.replace(tmp,path)
+        LOG.info("Learned that camera %s provides archive audio",camera_id)
+
 def camera_lock(camera_id: str) -> threading.Lock:
     with CONFIG_LOCK:
         if camera_id not in CAMERA_LOCKS:
@@ -390,6 +421,7 @@ def safe_camera(camera_id: str) -> dict[str, Any]:
         "channel": int(item.get("channel", 0)),
         "username": str(item.get("username", "")),
         "archive_backend": str(item.get("archive_backend", "native_9008")),
+        "recording_audio": recording_audio_mode(camera_id),
         "rtsp_port": int(item.get("rtsp_port", 554)),
         "rtsp_stream_type": str(item.get("rtsp_stream_type", "main")),
         "rtsp_transport": str(item.get("rtsp_transport", "tcp")),
@@ -487,6 +519,9 @@ def normalize_camera_definition(payload: dict[str, Any], existing: dict[str, Any
     backend = str(payload.get("archive_backend", existing.get("archive_backend", "native_9008")))
     if backend not in ("native_9008", "rtsp"):
         raise ValueError("Archive backend must be native_9008 or rtsp")
+    recording_audio = str(payload.get("recording_audio", existing.get("recording_audio", "auto"))).strip().lower()
+    if recording_audio not in RECORDING_AUDIO_MODES:
+        raise ValueError("Recording audio mode must be auto, on, or off")
     port = int(payload.get("port", existing.get("port", 9008)))
     rtsp_port = int(payload.get("rtsp_port", existing.get("rtsp_port", 554)))
     channel = int(payload.get("channel", existing.get("channel", 0)))
@@ -518,6 +553,7 @@ def normalize_camera_definition(payload: dict[str, Any], existing: dict[str, Any
         "username": username,
         "password": password,
         "archive_backend": backend,
+        "recording_audio": recording_audio,
         "rtsp_stream_type": rtsp_stream_type,
         "rtsp_transport": rtsp_transport,
         "rtsp_fps": rtsp_fps,
@@ -809,7 +845,14 @@ def update_camera_definition(camera_id: str, payload: dict[str, Any]) -> dict[st
             raise KeyError(f"Unknown camera: {camera_id}")
         updated[camera_id] = item
     persist_camera_map(updated)
-    shutil.rmtree(camera_index_directory(camera_id), ignore_errors=True)
+    camera_index = camera_index_directory(camera_id)
+    if camera_index.exists():
+        for cached in camera_index.iterdir():
+            if cached.name == "capabilities.json": continue
+            try:
+                shutil.rmtree(cached, ignore_errors=True) if cached.is_dir() else cached.unlink(missing_ok=True)
+            except OSError:
+                LOG.warning("Could not clear cached camera metadata: %s", cached)
     return {"camera": safe_camera(camera_id), "test": test}
 
 
@@ -1749,6 +1792,84 @@ def _feed_growing_file(source: Path, write_fd: int, capture_process: subprocess.
             pass
 
 
+def _timing_has_audio(value: dict[str, Any]) -> bool:
+    return bool(value.get("has_audio",False) or int(value.get("audio_frames",0) or 0)>0 or int(value.get("first_audio_time_us",0) or 0)>0)
+
+def _video_media_elapsed_seconds(value: dict[str, Any]) -> float:
+    first=int(value.get("first_video_time_us",0) or 0); last=int(value.get("last_video_time_us",0) or 0)
+    return max(0.0,(last-first)/1_000_000) if first>0 and last>first else 0.0
+
+def _audio_video_elapsed_samples(value: dict[str, Any]) -> int:
+    explicit=float(value.get("captured_seconds",0) or 0)
+    if explicit>0: return max(0,round(explicit*ALAW_SAMPLE_RATE))
+    first=int(value.get("first_video_time_us",0) or 0); last=int(value.get("last_video_time_us",0) or 0)
+    return max(0,round((last-first)*ALAW_SAMPLE_RATE/1_000_000)) if first>0 and last>first else 0
+
+def _audio_offset_samples(value: dict[str, Any]) -> int:
+    v=int(value.get("first_video_time_us",0) or 0); a=int(value.get("first_audio_time_us",0) or 0)
+    return round((a-v)*ALAW_SAMPLE_RATE/1_000_000) if v and a else 0
+
+def _write_pipe_bytes(fd:int,payload:bytes,stop:threading.Event)->bool:
+    view=memoryview(payload)
+    while view and not stop.is_set():
+        try: n=os.write(fd,view)
+        except (BrokenPipeError,OSError): return False
+        view=view[n:]
+    return not stop.is_set()
+
+def _feed_expected_archive_audio(source:Path,directory:Path,write_fd:int,capture_process:subprocess.Popen[bytes],stop_event:threading.Event,camera_id:str)->None:
+    handle=None; emitted=0; offset=None; real_started=False
+    try:
+        while not stop_event.is_set():
+            timing=_read_live_timing(directory) or {}
+            if _timing_has_audio(timing): _remember_archive_audio(camera_id)
+            if handle is None and source.exists() and _timing_has_audio(timing):
+                try:
+                    if source.stat().st_size>0:
+                        handle=source.open("rb",buffering=0); offset=_audio_offset_samples(timing)
+                        if offset<0: handle.seek(-offset)
+                        elif emitted>offset: handle.seek(emitted-offset)
+                except OSError: handle=None
+            if handle is None:
+                target=_audio_video_elapsed_samples(timing)
+                if target>emitted:
+                    count=min(4096,target-emitted)
+                    if not _write_pipe_bytes(write_fd,ALAW_SILENCE_BYTE*count,stop_event): return
+                    emitted+=count; continue
+            else:
+                assert offset is not None
+                if offset>emitted:
+                    count=min(4096,offset-emitted)
+                    if not _write_pipe_bytes(write_fd,ALAW_SILENCE_BYTE*count,stop_event): return
+                    emitted+=count; continue
+                chunk=handle.read(256*1024)
+                if chunk:
+                    if not _write_pipe_bytes(write_fd,chunk,stop_event): return
+                    emitted+=len(chunk); real_started=True; continue
+                if not real_started:
+                    target=_audio_video_elapsed_samples(timing)
+                    if target>emitted:
+                        count=min(4096,target-emitted)
+                        if not _write_pipe_bytes(write_fd,ALAW_SILENCE_BYTE*count,stop_event): return
+                        emitted+=count
+                        try: handle.seek(max(0,emitted-offset))
+                        except OSError: pass
+                        continue
+            if capture_process.poll() is not None: break
+            stop_event.wait(0.02)
+    finally:
+        if handle is not None: handle.close()
+        try: os.close(write_fd)
+        except OSError: pass
+
+def _watch_for_archive_audio(directory:Path,capture_process:subprocess.Popen[bytes],stop_event:threading.Event,camera_id:str)->None:
+    while not stop_event.is_set():
+        timing=_read_live_timing(directory)
+        if timing and _timing_has_audio(timing): _remember_archive_audio(camera_id); return
+        if capture_process.poll() is not None: return
+        stop_event.wait(0.04)
+
+
 def _session(session_id: str, *, touch: bool = True) -> PlaybackSession:
     with SESSIONS_LOCK:
         value = SESSIONS.get(session_id)
@@ -1784,6 +1905,7 @@ def _wait_for_capture_timing(
     capture_process: subprocess.Popen[bytes],
     stop_event: threading.Event,
     *,
+    probe_audio: bool = True,
     phase_callback: Callable[[str], None] | None = None,
 ) -> tuple[float, int, bool]:
     """Wait for first video, then briefly measure cadence and audio timing.
@@ -1798,7 +1920,6 @@ def _wait_for_capture_timing(
     opening_deadline = time.monotonic() + HLS_FIRST_MEDIA_TIMEOUT_SECONDS
     probe_deadline: float | None = None
     latest: dict[str, Any] | None = None
-    video_ready_since: float | None = None
 
     def measured_fps(value: dict[str, Any]) -> float:
         frames = int(value.get("video_frames", 0) or 0)
@@ -1845,9 +1966,7 @@ def _wait_for_capture_timing(
                 if frames >= HLS_TIMING_SAMPLE_FRAMES and fps:
                     if has_audio:
                         return result_from(latest)
-                    if video_ready_since is None:
-                        video_ready_since = now
-                    elif now - video_ready_since >= HLS_AUDIO_DETECT_SECONDS:
+                    if not probe_audio or _video_media_elapsed_seconds(latest) >= HLS_AUDIO_PROBE_MEDIA_SECONDS:
                         return fps, 0, False
                 if now >= probe_deadline:
                     LOG.warning(
@@ -1911,7 +2030,7 @@ def _hls_command(video_input: str, audio_input: str | None,
     command += video_output
     if audio_input is not None:
         filters: list[str] = []
-        total_offset = session.audio_offset_ms + STREAM_AUDIO_DELAY_MS
+        total_offset = ((0 if session.audio_alignment_in_feeder else session.audio_offset_ms) + STREAM_AUDIO_DELAY_MS)
         if total_offset > 0:
             filters.append(f"adelay={total_offset}:all=1")
         elif total_offset < 0:
@@ -1951,6 +2070,10 @@ def generate_hls_session(session: PlaybackSession) -> None:
         with capture_log_path.open("wb") as capture_log, ffmpeg_log_path.open("wb") as ffmpeg_log:
             startup_error: RuntimeError | None = None
             measured_offset = 0
+            audio_mode = recording_audio_mode(session.camera_id)
+            native_audio = str(item.get("archive_backend", "native_9008")) == "native_9008"
+            learned_audio = _learned_archive_audio(session.camera_id)
+            probe_audio = bool(native_audio and audio_mode == "auto" and not learned_audio)
             for startup_attempt in range(HLS_FIRST_MEDIA_RETRIES + 1):
                 if startup_attempt:
                     session.phase = (
@@ -1982,6 +2105,7 @@ def generate_hls_session(session: PlaybackSession) -> None:
                         directory,
                         session.capture_process,
                         session.stop_event,
+                        probe_audio=probe_audio,
                         phase_callback=lambda phase: setattr(session, "phase", phase),
                     )
                     startup_error = None
@@ -2003,10 +2127,18 @@ def generate_hls_session(session: PlaybackSession) -> None:
                     f"({HLS_FIRST_MEDIA_TIMEOUT_SECONDS:.0f} seconds each)."
                 ) from startup_error
 
+            detected_audio = bool(session.has_audio)
+            if detected_audio and native_audio:
+                _remember_archive_audio(session.camera_id); learned_audio = True
+            if not native_audio or audio_mode == "off": expected_audio = False
+            elif audio_mode == "on": expected_audio = True
+            else: expected_audio = detected_audio or learned_audio
+            session.has_audio = expected_audio
             session.audio_offset_ms = measured_offset
+            session.audio_alignment_in_feeder = bool(expected_audio and native_audio)
             LOG.info(
-                "Playback session %s measured %.4f fps, %d ms audio offset, audio=%s",
-                session.id, session.source_fps, session.audio_offset_ms, session.has_audio,
+                "Playback session %s measured %.4f fps, %d ms audio offset, detected_audio=%s expected_audio=%s mode=%s",
+                session.id, session.source_fps, session.audio_offset_ms, detected_audio, session.has_audio, audio_mode,
             )
             video_read, video_write = os.pipe()
             audio_read = audio_write = None
@@ -2033,11 +2165,12 @@ def generate_hls_session(session: PlaybackSession) -> None:
                 name=f"{session.camera_id}-hls-video", daemon=True,
             ))
             if session.has_audio and audio_write is not None:
-                feeder_threads.append(threading.Thread(
-                    target=_feed_growing_file,
-                    args=(audio_path, audio_write, session.capture_process, stop_feeders),
-                    name=f"{session.camera_id}-hls-audio", daemon=True,
-                ))
+                if session.audio_alignment_in_feeder:
+                    feeder_threads.append(threading.Thread(target=_feed_expected_archive_audio,args=(audio_path,directory,audio_write,session.capture_process,stop_feeders,session.camera_id),name=f"{session.camera_id}-hls-audio",daemon=True))
+                else:
+                    feeder_threads.append(threading.Thread(target=_feed_growing_file,args=(audio_path,audio_write,session.capture_process,stop_feeders),name=f"{session.camera_id}-hls-audio",daemon=True))
+            elif native_audio and audio_mode == "auto" and not learned_audio:
+                feeder_threads.append(threading.Thread(target=_watch_for_archive_audio,args=(directory,session.capture_process,stop_feeders,session.camera_id),name=f"{session.camera_id}-audio-capability",daemon=True))
             for thread in feeder_threads:
                 thread.start()
             assert session.ffmpeg_process is not None
@@ -2054,20 +2187,41 @@ def generate_hls_session(session: PlaybackSession) -> None:
                     session.phase = "Ready to play"
             ffmpeg_rc = session.ffmpeg_process.poll()
             capture_rc = session.capture_process.poll() if session.capture_process else None
+            if (
+                not session.stop_event.is_set()
+                and ffmpeg_rc is not None
+                and capture_rc is None
+                and session.capture_process is not None
+            ):
+                # FFmpeg can observe EOF a fraction before the capture helper exits.
+                # Give the helper a moment so its real exit status wins over the
+                # superficially successful HLS finalization.
+                try:
+                    capture_rc = session.capture_process.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    capture_rc = None
+
             if session.stop_event.is_set():
                 session.status = "stopped"
                 session.phase = "Stopped"
-            elif ffmpeg_rc == 0 and session.playlist_ready():
-                session.status = "complete"
-                session.phase = "Recording range ready"
             else:
                 capture_detail = _tail_text(capture_log_path)
                 if capture_rc not in (None, 0):
                     raise RuntimeError(_friendly_capture_error(capture_detail, capture_rc))
-                detail = _stream_failure_detail(directory)
-                raise RuntimeError(
-                    f"Archive playback pipeline failed (ffmpeg={ffmpeg_rc}).\n{detail}"
-                )
+                if capture_rc is None:
+                    raise RuntimeError(
+                        "Camera archive capture failed. "
+                        "The media pipeline ended before archive capture completed."
+                    )
+                if ffmpeg_rc == 0 and capture_rc == 0 and session.playlist_ready():
+                    session.status = "complete"
+                    session.phase = "Recording range ready"
+                else:
+                    detail = _stream_failure_detail(directory)
+                    raise RuntimeError(
+                        f"Archive playback pipeline failed "
+                        f"(ffmpeg={ffmpeg_rc}, capture={capture_rc}).\n{detail}"
+                    )
     except Exception as error:
         LOG.exception("Playback session %s failed", session.id)
         session.status = "error"
@@ -2141,7 +2295,7 @@ def cleanup_loop() -> None:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "TVTArchiveBridge/0.8.2"
+    server_version = "TVTArchiveBridge/0.8.3"
 
     def log_message(self, fmt: str, *args: Any) -> None:
         LOG.info("%s %s", self.address_string(), fmt % args)

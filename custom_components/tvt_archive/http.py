@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import re
 import time
 from typing import Any
@@ -12,6 +13,8 @@ from homeassistant.core import HomeAssistant
 
 from .api import TVTArchiveApiError
 from .const import DOMAIN
+
+_LOGGER = logging.getLogger(__name__)
 
 _STREAM_QUALITIES = {"original", "balanced", "data_saver"}
 _HLS_ASSET_RE = re.compile(r"(?:index\.m3u8|init\.mp4|segment-\d{5}\.m4s)")
@@ -152,7 +155,8 @@ class CreateSessionView(HomeAssistantView):
         try:
             session = await data["api"].create_session(camera_id, await request.json())
         except TVTArchiveApiError as error:
-            raise web.HTTPBadGateway(text=str(error)) from error
+            _LOGGER.warning("TVT Archive bridge request failed: %s", error)
+            raise web.HTTPBadGateway(text="TVT Archive request failed") from error
         return self.json(_add_hls_url(entry_id, data, session), status_code=202)
 
 
@@ -166,7 +170,8 @@ class SessionView(HomeAssistantView):
         try:
             session = await data["api"].playback_session(session_id)
         except TVTArchiveApiError as error:
-            raise web.HTTPBadGateway(text=str(error)) from error
+            _LOGGER.warning("TVT Archive bridge request failed: %s", error)
+            raise web.HTTPBadGateway(text="TVT Archive request failed") from error
         return self.json(_add_hls_url(entry_id, data, session))
 
     async def delete(self, request, entry_id, session_id):
@@ -174,7 +179,8 @@ class SessionView(HomeAssistantView):
         try:
             session = await data["api"].stop_session(session_id)
         except TVTArchiveApiError as error:
-            raise web.HTTPBadGateway(text=str(error)) from error
+            _LOGGER.warning("TVT Archive bridge request failed: %s", error)
+            raise web.HTTPBadGateway(text="TVT Archive request failed") from error
         return self.json(_add_hls_url(entry_id, data, session))
 
 
@@ -195,7 +201,8 @@ class HLSLibraryView(HomeAssistantView):
         try:
             upstream = await data["api"].open_player_script()
         except TVTArchiveApiError as error:
-            raise web.HTTPBadGateway(text=str(error)) from error
+            _LOGGER.warning("TVT Archive bridge request failed: %s", error)
+            raise web.HTTPBadGateway(text="TVT Archive request failed") from error
         body = await upstream.read()
         upstream.release()
         return web.Response(
@@ -228,7 +235,8 @@ class HLSAssetView(HomeAssistantView):
                 session_id, asset, range_header=request.headers.get("Range")
             )
         except TVTArchiveApiError as error:
-            raise web.HTTPBadGateway(text=str(error)) from error
+            _LOGGER.warning("TVT Archive bridge request failed: %s", error)
+            raise web.HTTPBadGateway(text="TVT Archive request failed") from error
         response = web.StreamResponse(status=upstream.status)
         for header in (
             "Content-Type",
@@ -278,7 +286,8 @@ class CreateJobView(HomeAssistantView):
         try:
             job = await data["api"].create_job(camera_id, await request.json())
         except TVTArchiveApiError as error:
-            raise web.HTTPBadGateway(text=str(error)) from error
+            _LOGGER.warning("TVT Archive bridge request failed: %s", error)
+            raise web.HTTPBadGateway(text="TVT Archive request failed") from error
         return self.json(
             _add_media_urls(entry_id, data, job),
             status_code=202 if not job.get("ready") else 200,
@@ -295,7 +304,8 @@ class JobView(HomeAssistantView):
         try:
             job = await data["api"].job(job_id)
         except TVTArchiveApiError as error:
-            raise web.HTTPBadGateway(text=str(error)) from error
+            _LOGGER.warning("TVT Archive bridge request failed: %s", error)
+            raise web.HTTPBadGateway(text="TVT Archive request failed") from error
         return self.json(_add_media_urls(entry_id, data, job))
 
 
@@ -322,7 +332,8 @@ class MediaView(HomeAssistantView):
                 download=download,
             )
         except TVTArchiveApiError as error:
-            raise web.HTTPBadGateway(text=str(error)) from error
+            _LOGGER.warning("TVT Archive bridge request failed: %s", error)
+            raise web.HTTPBadGateway(text="TVT Archive request failed") from error
         response = web.StreamResponse(status=upstream.status)
         for header in (
             "Content-Type",

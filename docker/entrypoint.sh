@@ -27,7 +27,7 @@ config = {
         "hls_first_media_timeout_seconds": 30.0,
         "hls_first_media_retries": 1,
         "hls_timing_max_seconds": 2.5,
-        "hls_audio_detect_seconds": 1.0,
+        "hls_audio_probe_media_seconds": 2.0,
         "hls_idle_seconds": 300,
         "hls_retain_seconds": 1800,
         "accelerator": os.environ.get("TVT_ARCHIVE_ACCELERATOR", "auto"),
@@ -46,7 +46,7 @@ print("TVT Archive created a new bridge configuration.")
 print(f"Access token: {token}")
 print("Save this token for Home Assistant.")
 print("Retrieve it later with:")
-print("docker compose exec tvt-archive /opt/tvt-archive/entrypoint.sh show-token")
+print("docker exec tvt-archive /opt/tvt-archive/entrypoint.sh show-token")
 print("============================================================")
 print("Add the TVT Archive integration in Home Assistant, then manage cameras from its Configure menu.")
 PY
@@ -70,6 +70,9 @@ for key, value in {
 if "qsv_device" in processing:
     processing.pop("qsv_device", None)
     changed = True
+if "hls_audio_detect_seconds" in processing:
+    processing.pop("hls_audio_detect_seconds", None)
+    changed = True
 if processing.get("hls_start_buffer_seconds") != 2:
     processing["hls_start_buffer_seconds"] = 2
     changed = True
@@ -80,7 +83,7 @@ for key, value in {
     "hls_first_media_timeout_seconds": 30.0,
     "hls_first_media_retries": 1,
     "hls_timing_max_seconds": 2.5,
-    "hls_audio_detect_seconds": 1.0,
+    "hls_audio_probe_media_seconds": 2.0,
 }.items():
     if processing.get(key) != value:
         processing[key] = value
@@ -93,6 +96,7 @@ def slug(value):
 for camera in data.get("cameras", []):
     defaults = {
         "archive_backend": "native_9008",
+        "recording_audio": "auto",
         "port": 9008,
         "rtsp_port": 554,
         "rtsp_stream_type": "main",
