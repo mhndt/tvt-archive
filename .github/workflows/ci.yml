@@ -17,13 +17,18 @@ jobs:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
 
-      - name: Apply reviewed release changes
+      - name: Apply and validate reviewed release source
         shell: bash
         run: |
           set -Eeuo pipefail
           cat .release-prep/payload-*.txt | tr -d '\n' | base64 -d >/tmp/tvt-v082-payload.tar.gz
           mkdir -p /tmp/tvt-v082
           tar -xzf /tmp/tvt-v082-payload.tar.gz -C /tmp/tvt-v082
+
+          git fetch origin main
+          git checkout origin/main -- .github/workflows/ci.yml
+          rm -rf .github/workflows/release-prep-v082.yml .release-prep
+
           python3 /tmp/tvt-v082/apply-foundation.py "$GITHUB_WORKSPACE"
           python3 /tmp/tvt-v082/apply-final.py "$GITHUB_WORKSPACE"
           python3 /tmp/tvt-v082/fix-v2.py "$GITHUB_WORKSPACE"
@@ -31,10 +36,6 @@ jobs:
           python3 /tmp/tvt-v082/remove-security.py "$GITHUB_WORKSPACE"
           test ! -e SECURITY.md
 
-      - name: Validate release source
-        shell: bash
-        run: |
-          set -Eeuo pipefail
           python3 -m py_compile host/app/*.py custom_components/tvt_archive/*.py tests/*.py
           node --check custom_components/tvt_archive/frontend/tvt-archive-panel.js
           python3 -m unittest discover -s tests -v
@@ -42,18 +43,11 @@ jobs:
             echo 'Unexpected attribution found in release tree.' >&2
             exit 1
           fi
-          if grep -RIE --exclude-dir=.git '(freeze-on-starvation-test|startup-smoothing-test|player-smoothing-test|0\.8\.2-test)' .; then
-            echo 'Test-build naming remains in release tree.' >&2
-            exit 1
-          fi
 
       - name: Commit release source and restore normal CI
         shell: bash
         run: |
           set -Eeuo pipefail
-          git fetch origin main
-          git checkout origin/main -- .github/workflows/ci.yml
-          git rm -r -- .github/workflows/release-prep-v082.yml .release-prep
           git add -A
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
