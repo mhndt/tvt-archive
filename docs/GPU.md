@@ -1,10 +1,10 @@
 # GPU acceleration
 
-TVT Archive is designed to run with Intel, AMD, NVIDIA, or no supported GPU. This means it provides generalized probes and a software fallback; it does not mean every GPU/driver combination is already verified.
+TVT Archive can run with Intel, AMD, NVIDIA, or no supported GPU. Hardware acceleration is selected only when a complete decode, resize, and encode probe succeeds.
 
 ## Selection order
 
-Automatic mode tests complete pipelines and prefers:
+Automatic mode prefers working pipelines in this order:
 
 1. full VAAPI decode, scale, and encode;
 2. full Intel QSV;
@@ -18,15 +18,23 @@ A path is not selected merely because FFmpeg lists an encoder or a device node e
 
 Use `compose/intel-amd.yaml` to pass `/dev/dri` and the host render/video group IDs.
 
-The x86-64 image includes a pinned Intel iHD 25.1.2 compatibility driver because that exact stack passed full VAAPI scaling and encoding on the verified Skylake HD 530 host. Debian's other VAAPI drivers remain available and are selected only when their probe succeeds.
+The container uses Debian Trixie's packaged FFmpeg, libva, and VAAPI drivers. On `linux/amd64`, `intel-media-va-driver-non-free` is also installed for Intel iHD support.
 
-Other Intel generations, QSV, and AMD VAAPI are experimental until compatibility reports are received.
+The verified Intel HD Graphics 530 setup reports:
+
+```text
+FFmpeg 7.1.5
+libva 2.22.0
+Intel iHD media-driver 25.2.3
+```
+
+Other Intel generations, Intel QSV, and AMD VAAPI depend on their driver and FFmpeg support and remain subject to the runtime pipeline probe.
 
 ## NVIDIA
 
-Use `compose/nvidia.yaml` with NVIDIA Container Toolkit. The bridge checks for the CUDA/NVENC path and falls back when it is not usable.
+Use `compose/nvidia.yaml` with NVIDIA Container Toolkit. The bridge checks the CUDA/NVENC path and falls back when it is not usable.
 
-NVIDIA support is currently experimental because the development environment did not include an NVIDIA Docker host.
+NVIDIA driver libraries are supplied by the host through NVIDIA Container Toolkit rather than bundled into the TVT Archive image.
 
 ## CPU fallback
 
@@ -50,16 +58,16 @@ The report includes available candidates, selected path, driver information, FFm
 
 ### Permission denied on `/dev/dri`
 
-Set the group IDs from the host in `.env` and recreate the container.
+Set the render/video group IDs from the host in `.env`, then recreate the container.
 
-### VAAPI initializes but scaling fails
+### VAAPI initializes but scaling or encoding fails
 
-This is exactly why TVT Archive runs a complete pipeline probe. The bridge should fall back rather than use a partially functional path.
+The complete pipeline probe rejects partially working paths and falls back to another usable path.
 
 ### NVIDIA is detected but software is selected
 
-Check NVIDIA Container Toolkit, mounted driver libraries, `NVIDIA_DRIVER_CAPABILITIES`, and whether the packaged FFmpeg exposes `h264_nvenc`.
+Check NVIDIA Container Toolkit, mounted driver libraries, `NVIDIA_DRIVER_CAPABILITIES`, and whether FFmpeg exposes `h264_nvenc`.
 
 ### Unsupported architecture
 
-Published images target `linux/amd64` and `linux/arm64`. The Intel compatibility build is x86-64 only. Other platforms use packaged drivers and software fallback.
+Published images target `linux/amd64` and `linux/arm64`. Hardware support depends on the drivers and encoders available for that architecture; software x264 remains the fallback.

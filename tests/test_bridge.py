@@ -219,9 +219,19 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(phases, ["Measuring archive frame timing"])
 
     def test_timing_probe_defaults_are_short_after_first_video(self) -> None:
-        self.assertEqual(bridge.HLS_FIRST_MEDIA_TIMEOUT_SECONDS, 15.0)
+        self.assertEqual(bridge.HLS_FIRST_MEDIA_TIMEOUT_SECONDS, 30.0)
         self.assertEqual(bridge.HLS_TIMING_MAX_SECONDS, 2.5)
         self.assertEqual(bridge.HLS_AUDIO_DETECT_SECONDS, 1.0)
+
+    def test_v082_hls_startup_defaults_and_retry_are_persisted(self) -> None:
+        text = (ROOT / "host" / "app" / "bridge.py").read_text(encoding="utf-8")
+        self.assertIn('PROCESSING.get("hls_start_buffer_seconds", 2)', text)
+        self.assertIn('PROCESSING.get("hls_timing_sample_frames", 8)', text)
+        self.assertIn('PROCESSING.get("hls_first_media_timeout_seconds", 30.0)', text)
+        self.assertIn('PROCESSING.get("hls_first_media_retries", 1)', text)
+        self.assertIn('"split_by_time+temp_file"', text)
+        self.assertIn("Retrying camera archive", text)
+
 
 
 if __name__ == "__main__":

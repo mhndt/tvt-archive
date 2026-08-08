@@ -1,4 +1,4 @@
-const VERSION = "0.8.1";
+const VERSION = "0.8.2";
 const $esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const pad = (n) => String(n).padStart(2, "0");
 const localDate = (d = new Date()) => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
@@ -92,6 +92,10 @@ class TVTFmp4Player {
     this.videoEventsBound = false;
     this.rateTimer = null;
     this.adaptiveRate = 1;
+    this.bufferSupplyRate = null;
+    this.bufferSupplySamples = [];
+    this.freezeTime = null;
+    this.freezeReason = null;
     this.mediaRecoveryAttempts = 0;
     this.networkRecoveryTimer = null;
     this.startBufferSeconds = Math.max(2, Math.min(12, Number(startBufferSeconds || 3)));
@@ -111,10 +115,14 @@ class TVTFmp4Player {
     this._boundWaiting = () => this._handleWaiting();
     this._boundStalled = () => this._handleWaiting();
     this._boundEnded = () => {
-      if (!this.serverComplete && !this.destroyed) this._enterRebuffer();
+      if (!this.serverComplete && !this.destroyed) this._enterRebuffer("event");
     };
     this._boundPlaying = () => {
-      if (this.started && !this.rebuffering) this._state("playing");
+      if (this.rebuffering && !this.serverComplete) {
+        try { this.video.pause(); } catch (_) {}
+        return;
+      }
+      if (this.started) this._state("playing");
     };
     this._boundProgress = () => this._bufferChanged();
   }
@@ -211,7 +219,7 @@ class TVTFmp4Player {
   _handleHlsError(Hls, data) {
     if (this.destroyed || !data) return;
     if (!data.fatal) {
-      if (data.type === Hls.ErrorTypes.NETWORK_ERROR && this.started && this._bufferedAhead() < 0.15) this._enterRebuffer();
+      if (data.type === Hls.ErrorTypes.NETWORK_ERROR && this.started && this._bufferedAhead() < 0.15) this._enterRebuffer("event");
       return;
     }
     if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
@@ -290,6 +298,10 @@ class TVTFmp4Player {
 
   resume() {
     if (this.destroyed || !this.started) return;
+    if (this.rebuffering && !this.serverComplete) {
+      this._maybeRecover();
+      return;
+    }
     const next = this._nextPlayableTime();
     if (next != null && (this.video.ended || this._bufferedAhead() < 0.05)) {
       try { this.video.currentTime = next; } catch (_) {}
@@ -304,7 +316,7 @@ class TVTFmp4Player {
   }
 
   _setPlaybackRate(rate) {
-    const normalized = Math.max(0.65, Math.min(1.03, Number(rate || 1)));
+    const normalized = Math.max(0.45, Math.min(1.03, Number(rate || 1)));
     if (Math.abs(normalized - this.adaptiveRate) < 0.005) return;
     this.adaptiveRate = normalized;
     try {
@@ -315,52 +327,102 @@ class TVTFmp4Player {
 
   _handleWaiting() {
     if (this.destroyed || !this.started || this.serverComplete || this.video.seeking) return;
-    this._enterRebuffer();
+    this._enterRebuffer("event");
   }
 
-  _enterRebuffer() {
+  _enterRebuffer(reason = "starvation") {
     if (this.destroyed || this.rebuffering || this.serverComplete) return;
     this.rebuffering = true;
-    this._setPlaybackRate(0.65);
-    // Do not deliberately pause for another three seconds. The browser is
-    // already starved; resume as soon as the next short fragment arrives.
-    this.hls?.startLoad(Math.max(0, Number(this.video.currentTime || 0)));
-    this._state("rebuffering", {ahead:this._bufferedAhead(), target:this.resumeBufferSeconds});
+    this.freezeReason = reason;
+    const current = Number(this.video.currentTime || 0);
+    this.freezeTime = Number.isFinite(current) ? Math.max(0, current) : 0;
+    try { this.video.pause(); } catch (_) {}
+    this._setPlaybackRate(1);
+    this.hls?.startLoad(this.freezeTime);
+    this._state("rebuffering", {
+      ahead:this._bufferedAhead(),
+      target:Math.max(0.9, this.resumeBufferSeconds),
+      frozenAt:this.freezeTime,
+      reason,
+    });
   }
 
   _maybeRecover() {
     if (!this.rebuffering || this.destroyed) return;
-    const ahead = this._bufferedAhead();
-    this._state("rebuffering", {ahead, target:this.resumeBufferSeconds});
-    if (ahead + 0.03 < this.resumeBufferSeconds && !this.serverComplete) return;
-    if (ahead <= 0.05) return;
+    const frozenAt = this.freezeTime == null ? Number(this.video.currentTime || 0) : Number(this.freezeTime);
+    const window = this._bufferWindow();
+    const bufferedEnd = window?.end || 0;
+    const newAhead = Math.max(0, bufferedEnd - frozenAt);
+    const target = Math.max(0.9, this.resumeBufferSeconds);
+    this._state("rebuffering", {ahead:newAhead, target, frozenAt, reason:this.freezeReason});
+    if (newAhead + 0.03 < target && !this.serverComplete) return;
+    if (newAhead <= 0.05) return;
+    const now = Number(this.video.currentTime || 0);
+    if (Number.isFinite(now) && now + 0.08 < frozenAt) {
+      try { this.video.currentTime = frozenAt; } catch (_) {}
+    }
     this.rebuffering = false;
-    this.resume();
+    this.freezeTime = null;
+    this.freezeReason = null;
+    this._setPlaybackRate(0.45);
+    const result = this.video.play();
+    if (result?.then) {
+      result.then(() => { this._state("playing"); this._adaptiveTick(); }).catch(() => {
+        this.video.controls = true;
+        this._state("play-required");
+      });
+    } else {
+      this._state("playing");
+      this._adaptiveTick();
+    }
   }
 
   _adaptiveTick() {
     if (this.destroyed || !this.started) return;
     if (this.rebuffering) { this._maybeRecover(); return; }
     if (this.video.seeking || !this.video.buffered.length) {
+      this.bufferSupplySamples = [];
+      this.bufferSupplyRate = null;
       this._setPlaybackRate(1);
       return;
     }
     if (this.video.ended && !this.serverComplete) {
-      this._enterRebuffer();
+      this._enterRebuffer("ended");
       return;
     }
-    if (this.video.paused) return;
-    const ahead = this._bufferedAhead();
+    const window = this._bufferWindow();
+    const ahead = window?.ahead || 0;
+    const now = performance.now() / 1000;
+    if (!this.serverComplete && !this.video.paused && ahead < 0.20) {
+      this._enterRebuffer("low-buffer");
+      return;
+    }
+    if (window) {
+      this.bufferSupplySamples.push({at:now, end:window.end});
+      while (this.bufferSupplySamples.length > 2 && now - this.bufferSupplySamples[0].at > 8) {
+        this.bufferSupplySamples.shift();
+      }
+      const oldest = this.bufferSupplySamples[0];
+      const span = oldest ? now - oldest.at : 0;
+      if (oldest && span >= 6) {
+        const observed = Math.max(0, Math.min(2, (window.end - oldest.end) / span));
+        this.bufferSupplyRate = this.bufferSupplyRate == null
+          ? observed
+          : this.bufferSupplyRate * 0.72 + observed * 0.28;
+      }
+    }
     let target = 1;
     if (!this.serverComplete) {
-      // NVMS-like clock control: slow down before starvation instead of
-      // repeatedly consuming the whole local buffer at a rigid 1.00x.
-      if (ahead < 0.7) target = 0.65;
-      else if (ahead < 1.3) target = 0.74;
-      else if (ahead < 2.2) target = 0.84;
-      else if (ahead < 3.5) target = 0.92;
+      if (ahead < 0.7) target = 0.45;
+      else if (ahead < 1.3) target = 0.62;
+      else if (ahead < 2.2) target = 0.78;
+      else if (ahead < 3.5) target = 0.90;
       else if (ahead < 5.5) target = 0.97;
       else if (ahead > 10) target = 1.02;
+      if (ahead < 3.5 && this.bufferSupplyRate != null && this.bufferSupplyRate < 0.98) {
+        const sustainable = Math.max(0.45, Math.min(0.97, this.bufferSupplyRate * 0.94));
+        target = Math.min(target, sustainable);
+      }
     }
     this._setPlaybackRate(target);
   }
@@ -767,7 +829,7 @@ class TVTArchivePanel extends HTMLElement {
       <div class="top"><div class="heading"><div><h1>Recordings</h1><div class="subtle version-text">TVT Archive · v${VERSION}</div></div></div>
         <div class="controls"><label>Camera<select id="camera">${cameras}</select></label><label>Date<input id="date" type="date" value="${$esc(this._date)}"></label><label>${qualityLabel}<select id="quality">${qualities}</select></label><label>Timeline<select id="zoom"><option value="1">24 hours</option><option value="2">12-hour</option><option value="4">6-hour</option></select></label><button id="refresh" class="secondary">Refresh</button></div>
       </div>
-      <div class="shell"><div class="card"><div class="player-head"><div class="mode"><button id="live" class="secondary ${this._mode === "live" ? "active" : ""}">● Live</button><button id="recording" class="secondary ${this._mode === "recording" ? "active" : ""}">Recording</button></div><b>${$esc(this._camera?.name || "Camera")}</b><span class="subtle">${this._mode === "recording" ? `${this._date} ${selected}` : `Live now${this._selectedLiveProfile()?.name ? ` · ${this._selectedLiveProfile().name}` : ""}`}</span></div><div id="player" class="player"></div></div>
+      <div class="shell"><div class="card"><div class="player-head"><div class="mode"><button id="live" class="secondary ${this._mode === "live" ? "active" : ""}">● Live</button><button id="recording" class="secondary ${this._mode === "recording" ? "active" : ""}">Recording</button></div><b>${$esc(this._camera?.name || "Camera")}</b><span class="subtle">${this._mode === "recording" ? `${$esc(this._date)} ${$esc(selected)}` : `Live now${this._selectedLiveProfile()?.name ? ` · ${$esc(this._selectedLiveProfile().name)}` : ""}`}</span></div><div id="player" class="player"></div></div>
         <div class="card sidebar">
           <div class="stat"><span>Recording</span><b id="stat-recording">${$esc(values.recording)}</b></div><div class="stat"><span>Recorded today</span><b id="stat-today">${$esc(values.today)}</b></div>
           <div class="stat"><span>Available history</span><b id="stat-history">${$esc(values.history)}</b></div><div class="stat"><span>Archive media</span><b id="stat-archive">${$esc(values.archive)}</b></div>
@@ -878,8 +940,10 @@ class TVTArchivePanel extends HTMLElement {
   _setRecordingPlayerState(state, detail = {}) {
     const overlay = this.shadowRoot.getElementById("player-state");
     if (!overlay) return;
-    const content = overlay.querySelector(".player-state-content");
-    if (state === "playing" || state === "seeking") {
+    const alreadyStarted = Boolean(this._recordingController?.started);
+    const transientPlaybackWait = alreadyStarted &&
+      (state === "buffering" || state === "rebuffering" || state === "opening");
+    if (state === "playing" || state === "seeking" || transientPlaybackWait) {
       overlay.className = "player-state";
       overlay.replaceChildren();
       return;
@@ -890,11 +954,8 @@ class TVTArchivePanel extends HTMLElement {
       overlay.querySelector("#resume-recording")?.addEventListener("click", () => this._recordingController?.resume());
       return;
     }
-    const label = state === "rebuffering" ? "Catching up" : state === "opening" ? "Opening recording" : "Buffering recording";
-    const ahead = Number(detail.ahead || 0), target = Number(detail.target || 0);
-    const suffix = target > 0 ? ` · ${Math.min(target, ahead).toFixed(1)}/${target.toFixed(0)}s` : "";
-    overlay.innerHTML = `<div class="player-state-content"><span class="player-spinner"></span><span>${label}${suffix}</span></div>`;
-    if (content) content.textContent = label;
+    const label = state === "opening" ? "Opening recording" : "Buffering recording";
+    overlay.innerHTML = `<div class="player-state-content"><span class="player-spinner"></span><span>${label}</span></div>`;
   }
 
   _createRecordingPlayer(host, url = null) {

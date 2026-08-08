@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/TVTArchiveLogo.png" alt="TVT Archive logo" width="180">
+  <img src="https://raw.githubusercontent.com/mhndt/tvt-archive/main/assets/TVTArchiveLogo.png" alt="TVT Archive logo" width="180">
 </p>
 
 # TVT Archive for Home Assistant
@@ -46,10 +46,14 @@ cp .env.example .env
 
 The Compose files are kept together here:
 
+The base file defines the container. Choose at most one hardware override. Docker merges the selected files into one container configuration; it does not create several TVT Archive containers.
+
 - [Base / CPU setup](compose/compose.yaml)
 - [Intel and AMD VAAPI override](compose/intel-amd.yaml)
 - [NVIDIA override](compose/nvidia.yaml)
 - [Local source-build override](compose/build-local.yaml) — development only
+
+The base Compose file defines the container. Choose at most one hardware override. Docker merges the selected files into one container configuration; it does not create multiple TVT Archive containers.
 
 ### CPU-only
 
@@ -221,7 +225,7 @@ Those names are only examples. The source can be ONVIF, Generic Camera, go2rtc, 
 
 | Verified setup |
 |---|
-| TVT TD-C12 using Native TCP/9008 on an Intel HD Graphics 530 iGPU with VAAPI and the bundled Intel iHD 25.1.2 driver |
+| TVT TD-C12 using Native TCP/9008 on an Intel HD Graphics 530 iGPU with Debian Trixie FFmpeg 7.1.5, libva 2.22.0, and Intel iHD 25.2.3 |
 
 # Updating
 
@@ -250,8 +254,6 @@ FFmpeg → short-fragment HLS/fMP4 playback or MP4 export
 ```
 
 The bridge talks directly to the camera on the LAN. It asks for the dates that contain recordings, searches a selected time window for exact recorded ranges, and then requests the chosen historical interval. The camera returns interleaved raw video, audio, and media timestamps from its SD-card archive. Home Assistant proxies the resulting playlists, fragments, and completed downloads to the Recordings panel.
-
-Archive delivery speed can vary. The browser creates a small local buffer and adjusts playback speed slightly before it reaches the downloaded edge, similar to the behavior observed in NVMS. Already received footage remains seekable while later footage continues arriving.
 
 ## Why native TCP/9008?
 

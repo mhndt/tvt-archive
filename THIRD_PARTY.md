@@ -6,21 +6,11 @@ TVT Archive is licensed under the MIT License. The container and integration als
 
 The runtime image installs FFmpeg, FFprobe, libva tools, and general VAAPI drivers from Debian 13 (Trixie). These packages and any enabled codec components remain subject to their own upstream and Debian licensing terms. TVT Archive invokes the packaged executables and libraries; it does not copy their source into this repository.
 
-The exact package versions in a published image are available through the container diagnostics and image SBOM.
+On `linux/amd64`, the image also installs Debian's `intel-media-va-driver-non-free` package for Intel iHD support. The verified Intel HD Graphics 530 environment reports FFmpeg 7.1.5, libva 2.22.0, and Intel media-driver 25.2.3.
 
-## Intel gmmlib 22.7.1 and media-driver 25.1.2
+Exact package versions for a published image are available through container diagnostics and the image SBOM.
 
-On `linux/amd64`, the Docker build compiles Intel gmmlib `22.7.1` and Intel media-driver `25.1.2` from their versioned upstream source releases. Their upstream licenses are retained inside the image under:
-
-```text
-/usr/share/doc/tvt-archive/third-party/
-```
-
-Intel media-driver is distributed upstream under MIT and BSD-3-Clause terms. The selected full-feature build enables Intel's closed-source media-kernel binaries through `ENABLE_NONFREE_KERNELS=ON`. Those binaries are part of the upstream media-driver release and remain governed by the upstream notices and terms. Review the upstream licensing information before redistributing a modified image.
-
-The pinned driver exists because that exact userspace stack passed the complete decode, scale, and encode pipeline on the verified Skylake host. Other architectures skip this source-build stage and use their platform packages.
-
-The runtime does not assume Intel hardware. It probes complete VAAPI, QSV, NVIDIA, hybrid, and software pipelines before selecting one.
+NVIDIA driver libraries are supplied by the host through NVIDIA Container Toolkit when the NVIDIA Compose override is used.
 
 ## hls.js 1.6.16
 
@@ -39,4 +29,3 @@ The custom integration uses Home Assistant's public integration, config-flow, en
 ## Names and trademarks
 
 TVT Archive is an unofficial community project. Product names and trademarks belong to their respective owners.
-

@@ -13,7 +13,7 @@ timing.json  rolling timestamps, offsets, FPS, and progress
 summary.json final capture statistics
 ```
 
-The bridge waits only long enough to establish the source frame rate and initial audio timing before starting FFmpeg, so playback can begin while the native files continue growing.
+The bridge waits only long enough to establish source timing before starting FFmpeg. The timing probe uses eight video frames, and playback is normally exposed once about two seconds of HLS media exist. A native archive session may wait up to 30 seconds for its first video. If the session opens but produces no first video, the bridge can make one completely fresh startup retry.
 
 ## Browser playback
 
@@ -50,9 +50,11 @@ GPU selection and probing are described in [GPU pipeline](GPU.md).
 
 ## Buffering and playback rate
 
-Archive data may arrive above or below real time. The player starts with a small local buffer and adjusts playback rate slightly according to the amount of media available ahead of the playhead.
+Archive data may arrive above or below real time. The player estimates incoming archive supply from buffered-media growth and progressively reduces playback speed as the buffer becomes thin, down to a 0.45x floor.
 
-Previously generated footage remains seekable. When the camera-side capture is complete, the playlist is finalized and the requested interval becomes fully seekable.
+If playback reaches the growing edge, the browser pauses on the last decoded frame while native capture, FFmpeg, hls.js, and fragment downloads continue in the background. Playback resumes automatically after new forward media has been buffered beyond the held position.
+
+Previously generated footage remains seekable. When camera-side capture is complete, the playlist is finalized and the requested interval becomes fully seekable.
 
 ## MP4 exports
 

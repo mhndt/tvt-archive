@@ -41,7 +41,7 @@ jobs:
           cache-from: type=gha,scope=container-amd64
           cache-to: type=gha,mode=max,scope=container-amd64
           build-args: |
-            APP_VERSION=0.8.1
+            APP_VERSION=0.8.2
             VCS_REF=${{ github.sha }}
 
       - name: Start software-only container
