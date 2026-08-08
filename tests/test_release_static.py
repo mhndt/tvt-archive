@@ -21,14 +21,16 @@ class ReleaseStaticTests(unittest.TestCase):
     def test_low_latency_archive_defaults_are_persisted(self) -> None:
         entrypoint = (ROOT / "docker" / "entrypoint.sh").read_text(encoding="utf-8")
         bridge = (ROOT / "host" / "app" / "bridge.py").read_text(encoding="utf-8")
-        self.assertIn('"hls_start_buffer_seconds": 3', entrypoint)
-        self.assertIn('PROCESSING.get("hls_start_buffer_seconds", 3)', bridge)
-        self.assertIn('"hls_timing_sample_frames": 10', entrypoint)
-        self.assertIn('PROCESSING.get("hls_timing_sample_frames", 10)', bridge)
-        self.assertIn('"hls_first_media_timeout_seconds": 15.0', entrypoint)
+        self.assertIn('"hls_start_buffer_seconds": 2', entrypoint)
+        self.assertIn('PROCESSING.get("hls_start_buffer_seconds", 2)', bridge)
+        self.assertIn('"hls_timing_sample_frames": 8', entrypoint)
+        self.assertIn('PROCESSING.get("hls_timing_sample_frames", 8)', bridge)
+        self.assertIn('"hls_first_media_timeout_seconds": 30.0', entrypoint)
+        self.assertIn('"hls_first_media_retries": 1', entrypoint)
         self.assertIn('"hls_timing_max_seconds": 2.5', entrypoint)
         self.assertIn('"hls_audio_detect_seconds": 1.0', entrypoint)
-        self.assertIn('PROCESSING.get("hls_first_media_timeout_seconds", 15.0)', bridge)
+        self.assertIn('PROCESSING.get("hls_first_media_timeout_seconds", 30.0)', bridge)
+        self.assertIn('PROCESSING.get("hls_first_media_retries", 1)', bridge)
         self.assertIn('PROCESSING.get("hls_timing_max_seconds", 2.5)', bridge)
         self.assertIn('PROCESSING.get("hls_audio_detect_seconds", 1.0)', bridge)
 
@@ -41,17 +43,14 @@ class ReleaseStaticTests(unittest.TestCase):
         self.assertGreaterEqual(text.count("except TVTArchiveApiError as error:"), 6)
         self.assertIn("_MEDIA_URL_TTL_SECONDS = 2 * 60 * 60", text)
 
-    def test_optional_intel_driver_build_does_not_block_other_architectures(self) -> None:
+    def test_packaged_media_stack_is_generalized(self) -> None:
         text = (ROOT / "Dockerfile").read_text(encoding="utf-8")
-        self.assertIn("INTEL_MEDIA_DRIVER_VERSION=25.1.2", text)
-        self.assertNotIn("INTEL_MEDIA_DRIVER_VERSION=25.1.4", text)
-        self.assertIn('if [ "$(uname -m)" = "x86_64" ]', text)
-        self.assertIn('Skipping optional Intel media-driver build', text)
-        self.assertIn('sysconfig.get_config_var("MULTIARCH")', text)
-        self.assertNotIn('LIBVA_DRIVERS_PATH=/usr/lib/x86_64-linux-gnu/dri', text)
-        self.assertIn('driver_path="/opt/intel/lib/${multiarch}/dri/iHD_drv_video.so"', text)
-        self.assertIn('driver_path="/usr/lib/${multiarch}/dri/iHD_drv_video.so"', text)
-        self.assertIn('libigfxcmrt.so*', text)
+        self.assertIn("intel-media-va-driver-non-free", text)
+        self.assertIn("va-driver-all", text)
+        self.assertIn('dpkg --print-architecture', text)
+        self.assertNotIn("AS intel-media-builder", text)
+        self.assertNotIn("INTEL_GMMLIB_VERSION", text)
+        self.assertNotIn("ENABLE_NONFREE_KERNELS", text)
 
 
     def test_hlsjs_is_pinned_verified_and_served_locally(self) -> None:
@@ -78,14 +77,14 @@ class ReleaseStaticTests(unittest.TestCase):
 
     def test_prepared_file_disconnects_are_handled_cleanly(self) -> None:
         text = (ROOT / "host" / "app" / "bridge.py").read_text(encoding="utf-8")
-        self.assertIn('server_version = "TVTArchiveBridge/0.8.1"', text)
+        self.assertIn('server_version = "TVTArchiveBridge/0.8.2"', text)
         self.assertIn('except (BrokenPipeError, ConnectionResetError):', text)
         self.assertIn('Prepared-file client disconnected', text)
 
     def test_normal_compose_pulls_prebuilt_image(self) -> None:
         compose = (ROOT / "compose" / "compose.yaml").read_text(encoding="utf-8")
         build_override = (ROOT / "compose" / "build-local.yaml").read_text(encoding="utf-8")
-        self.assertIn("ghcr.io/mhndt/tvt-archive:0.8.1", compose)
+        self.assertIn("ghcr.io/mhndt/tvt-archive:0.8.2", compose)
         self.assertNotIn("build:", compose)
         self.assertIn("build:", build_override)
 
@@ -103,6 +102,19 @@ class ReleaseStaticTests(unittest.TestCase):
             self.assertEqual(archive_capture.ffmpeg_progress_seconds(path), 12.5)
             path.write_text("out_time_ms=7250000\nprogress=continue\n", encoding="utf-8")
             self.assertEqual(archive_capture.ffmpeg_progress_seconds(path), 7.25)
+
+    def test_public_error_and_path_hardening(self) -> None:
+        bridge = (ROOT / "host" / "app" / "bridge.py").read_text(encoding="utf-8")
+        panel = (ROOT / "custom_components" / "tvt_archive" / "frontend" / "tvt-archive-panel.js").read_text(encoding="utf-8")
+        self.assertIn("_camera_id = validated_camera_id", bridge)
+        self.assertIn("camera_index_directory(camera_id)", bridge)
+        self.assertIn('prefix="stream-"', bridge)
+        self.assertNotIn('prefix=f"stream-{camera_id}-"', bridge)
+        self.assertNotIn('X-TVT-Archive-Quality', bridge)
+        self.assertNotIn('self._error(500, str(error)', bridge)
+        self.assertIn('${$esc(this._selectedLiveProfile().name)}', panel)
+        self.assertIn('`${$esc(this._date)} ${$esc(selected)}`', panel)
+
 
 
 if __name__ == "__main__":
