@@ -14,5 +14,5 @@
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/mhndt/tvt-archive/issues",
   "requirements": [],
-  "version": "0.8.1"
+  "version": "0.8.2"
 }

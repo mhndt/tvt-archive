@@ -22,9 +22,10 @@ config = {
         "max_parallel_jobs": 1,
         "max_parallel_playback_sessions": 2,
         "hls_segment_seconds": 1,
-        "hls_start_buffer_seconds": 3,
-        "hls_timing_sample_frames": 10,
-        "hls_first_media_timeout_seconds": 15.0,
+        "hls_start_buffer_seconds": 2,
+        "hls_timing_sample_frames": 8,
+        "hls_first_media_timeout_seconds": 30.0,
+        "hls_first_media_retries": 1,
         "hls_timing_max_seconds": 2.5,
         "hls_audio_detect_seconds": 1.0,
         "hls_idle_seconds": 300,
@@ -69,14 +70,15 @@ for key, value in {
 if "qsv_device" in processing:
     processing.pop("qsv_device", None)
     changed = True
-if processing.get("hls_start_buffer_seconds") != 3:
-    processing["hls_start_buffer_seconds"] = 3
+if processing.get("hls_start_buffer_seconds") != 2:
+    processing["hls_start_buffer_seconds"] = 2
     changed = True
-if processing.get("hls_timing_sample_frames") != 10:
-    processing["hls_timing_sample_frames"] = 10
+if processing.get("hls_timing_sample_frames") != 8:
+    processing["hls_timing_sample_frames"] = 8
     changed = True
 for key, value in {
-    "hls_first_media_timeout_seconds": 15.0,
+    "hls_first_media_timeout_seconds": 30.0,
+    "hls_first_media_retries": 1,
     "hls_timing_max_seconds": 2.5,
     "hls_audio_detect_seconds": 1.0,
 }.items():

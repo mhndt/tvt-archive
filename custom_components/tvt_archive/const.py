@@ -3,7 +3,7 @@ CONF_URL = "url"
 CONF_TOKEN = "token"
 PLATFORMS = ["sensor", "binary_sensor"]
 PANEL_MODULE_PATH = "/tvt_archive/tvt-archive-panel.js"
-PANEL_MODULE_URL = f"{PANEL_MODULE_PATH}?v=0.8.1"
+PANEL_MODULE_URL = f"{PANEL_MODULE_PATH}?v=0.8.2"
 PANEL_LOGO_PATH = "/tvt_archive/logo.png"
 PANEL_URL_PATH = "tvt-archive"
 DATA_VIEWS_REGISTERED = "views_registered"

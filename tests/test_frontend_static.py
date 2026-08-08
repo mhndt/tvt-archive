@@ -44,10 +44,13 @@ class FrontendStaticTests(unittest.TestCase):
     def test_adaptive_archive_clock_avoids_short_camera_stalls(self) -> None:
         self.assertIn("_adaptiveTick()", PANEL)
         self.assertIn("ahead < 0.7", PANEL)
-        self.assertIn("target = 0.65", PANEL)
-        self.assertIn("target = 0.74", PANEL)
-        self.assertIn("target = 0.84", PANEL)
-        self.assertIn("target = 0.92", PANEL)
+        self.assertIn("target = 0.45", PANEL)
+        self.assertIn("target = 0.62", PANEL)
+        self.assertIn("target = 0.78", PANEL)
+        self.assertIn("target = 0.90", PANEL)
+        self.assertIn("this.bufferSupplyRate", PANEL)
+        self.assertIn("this.bufferSupplySamples", PANEL)
+        self.assertIn("const sustainable =", PANEL)
         self.assertIn("target = 0.97", PANEL)
         self.assertIn("target = 1.02", PANEL)
         self.assertIn("setComplete(complete)", PANEL)
@@ -96,15 +99,28 @@ class FrontendStaticTests(unittest.TestCase):
         self.assertRegex(PANEL, re.compile(r"\.player-state-content\{[^}]*color:var\(--secondary-text-color\)", re.S))
 
     def test_player_recovers_after_real_starvation(self) -> None:
-        self.assertIn("_enterRebuffer()", PANEL)
-        self.assertIn("_maybeRecover()", PANEL)
-        self.assertIn('state === "rebuffering" ? "Catching up"', PANEL)
-        self.assertIn('this.resumeBufferSeconds = 0.6', PANEL)
-        self.assertIn('ahead + 0.03 < this.resumeBufferSeconds', PANEL)
-        self.assertIn('this.hls?.startLoad', PANEL)
-        enter = PANEL[PANEL.index("  _enterRebuffer() {"):PANEL.index("  _maybeRecover() {")]
-        self.assertNotIn('this.video.pause()', enter)
-        self.assertIn('this.resume()', PANEL)
+        self.assertIn('_enterRebuffer(reason = "starvation")', PANEL)
+        self.assertIn('this._enterRebuffer("low-buffer")', PANEL)
+        self.assertIn('this.video.pause()', PANEL)
+        self.assertIn('this.freezeTime = null', PANEL)
+        self.assertIn('newAhead = Math.max(0, bufferedEnd - frozenAt)', PANEL)
+        self.assertIn('target = Math.max(0.9, this.resumeBufferSeconds)', PANEL)
+        self.assertIn('this.hls?.startLoad(this.freezeTime)', PANEL)
+        self.assertIn('now + 0.08 < frozenAt', PANEL)
+        self.assertIn('const result = this.video.play()', PANEL)
+        self.assertNotIn('"Catching up"', PANEL)
+        enter = PANEL[PANEL.index('  _enterRebuffer(reason = "starvation") {'):PANEL.index("  _maybeRecover() {")]
+        self.assertIn('this.video.pause()', enter)
+        recover = PANEL[PANEL.index("  _maybeRecover() {"):PANEL.index("  _adaptiveTick() {")]
+        self.assertNotIn("this.resume();", recover)
+
+
+    def test_initial_spinner_does_not_return_during_starvation(self) -> None:
+        self.assertIn("player-spinner", PANEL)
+        self.assertIn('<span class="player-spinner"></span><span>${label}</span>', PANEL)
+        self.assertIn('<span class="player-spinner"></span><span>Opening recording</span>', PANEL)
+        self.assertIn("transientPlaybackWait", PANEL)
+        self.assertIn("overlay.replaceChildren()", PANEL)
 
     def test_desktop_panel_fits_one_viewport_without_affecting_mobile(self) -> None:
         self.assertIn("@media(min-width:901px) and (min-height:720px)", PANEL)

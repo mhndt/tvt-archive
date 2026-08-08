@@ -29,7 +29,7 @@ from typing import Any, Callable
 
 from native9008 import TVT9008Client
 
-APP_VERSION = "0.8.1"
+APP_VERSION = "0.8.2"
 BASE = Path(os.environ.get("TVT_ARCHIVE_BASE", "/opt/tvt-archive"))
 CONFIG_DIRECTORY = Path(
     os.environ.get(
@@ -53,13 +53,37 @@ for directory in (CACHE, WORK, INDEX, LOGS):
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(threadName)s %(message)s")
 LOG = logging.getLogger("tvt-archive")
 
+CAMERA_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+
+
+def validated_camera_id(value: Any) -> str:
+    camera_id = str(value or "")
+    if not CAMERA_ID_RE.fullmatch(camera_id):
+        raise ValueError("Camera ID must contain only letters, numbers, underscores, or hyphens")
+    return camera_id
+
+
+def camera_index_directory(camera_id: str) -> Path:
+    return INDEX / validated_camera_id(camera_id)
+
+
 CONFIG_LOCK = threading.RLock()
 with CONFIG_PATH.open("r", encoding="utf-8") as handle:
     CONFIG = json.load(handle)
 
 SERVER = CONFIG.get("server", {})
 PROCESSING = CONFIG.get("processing", {})
-CAMERAS: dict[str, dict[str, Any]] = {str(item["id"]): dict(item) for item in CONFIG.get("cameras", [])}
+_configured_cameras = CONFIG.get("cameras", [])
+if not isinstance(_configured_cameras, list):
+    raise ValueError("Configured cameras must be a list")
+CAMERAS: dict[str, dict[str, Any]] = {}
+for _camera_item in _configured_cameras:
+    if not isinstance(_camera_item, dict):
+        raise ValueError("Every configured camera must be an object")
+    _camera_id = validated_camera_id(_camera_item.get("id"))
+    if _camera_id in CAMERAS:
+        raise ValueError(f"Duplicate configured camera ID: {_camera_id}")
+    CAMERAS[_camera_id] = dict(_camera_item)
 
 TOKEN = str(SERVER["token"])
 BIND = str(SERVER.get("bind", "0.0.0.0"))
@@ -96,13 +120,44 @@ HLS_IDLE_SECONDS = max(60, int(PROCESSING.get("hls_idle_seconds", 300)))
 HLS_RETAIN_SECONDS = max(300, int(PROCESSING.get("hls_retain_seconds", 1800)))
 HLS_SEGMENT_SECONDS = max(1, min(int(PROCESSING.get("hls_segment_seconds", 1)), 6))
 HLS_START_BUFFER_SECONDS = max(
-    2, min(int(PROCESSING.get("hls_start_buffer_seconds", 3)), 30)
+    2,
+    min(
+        int(os.environ.get(
+            "TVT_ARCHIVE_HLS_START_BUFFER_SECONDS",
+            PROCESSING.get("hls_start_buffer_seconds", 2),
+        )),
+        30,
+    ),
 )
 HLS_TIMING_SAMPLE_FRAMES = max(
-    8, min(int(PROCESSING.get("hls_timing_sample_frames", 10)), 120)
+    8,
+    min(
+        int(os.environ.get(
+            "TVT_ARCHIVE_HLS_TIMING_SAMPLE_FRAMES",
+            PROCESSING.get("hls_timing_sample_frames", 8),
+        )),
+        120,
+    ),
 )
 HLS_FIRST_MEDIA_TIMEOUT_SECONDS = max(
-    5.0, min(float(PROCESSING.get("hls_first_media_timeout_seconds", 15.0)), 60.0)
+    5.0,
+    min(
+        float(os.environ.get(
+            "TVT_ARCHIVE_HLS_FIRST_MEDIA_TIMEOUT_SECONDS",
+            PROCESSING.get("hls_first_media_timeout_seconds", 30.0),
+        )),
+        90.0,
+    ),
+)
+HLS_FIRST_MEDIA_RETRIES = max(
+    0,
+    min(
+        int(os.environ.get(
+            "TVT_ARCHIVE_HLS_FIRST_MEDIA_RETRIES",
+            PROCESSING.get("hls_first_media_retries", 1),
+        )),
+        3,
+    ),
 )
 HLS_TIMING_MAX_SECONDS = max(
     0.75, min(float(PROCESSING.get("hls_timing_max_seconds", 2.5)), 10.0)
@@ -117,7 +172,6 @@ HLS_AUDIO_DETECT_SECONDS = max(
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 TIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}$")
-CAMERA_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
 
 @dataclasses.dataclass
@@ -755,7 +809,7 @@ def update_camera_definition(camera_id: str, payload: dict[str, Any]) -> dict[st
             raise KeyError(f"Unknown camera: {camera_id}")
         updated[camera_id] = item
     persist_camera_map(updated)
-    shutil.rmtree(INDEX / camera_id, ignore_errors=True)
+    shutil.rmtree(camera_index_directory(camera_id), ignore_errors=True)
     return {"camera": safe_camera(camera_id), "test": test}
 
 
@@ -771,7 +825,7 @@ def delete_camera_definition(camera_id: str) -> dict[str, Any]:
             if len(updated) == len(CAMERAS):
                 raise KeyError(f"Unknown camera: {camera_id}")
         persist_camera_map(updated)
-    shutil.rmtree(INDEX / camera_id, ignore_errors=True)
+    shutil.rmtree(camera_index_directory(camera_id), ignore_errors=True)
     return {"removed": existing}
 
 
@@ -874,7 +928,7 @@ def merge_segments(raw_segments: list[dict[str, Any]], query_start: dt.datetime,
 def search_window(camera_id: str, start: dt.datetime, stop: dt.datetime, *,
                   cache_name: str | None = None, ttl: int = 60) -> dict[str, Any]:
     item = camera(camera_id)
-    camera_index = INDEX / camera_id
+    camera_index = camera_index_directory(camera_id)
     camera_index.mkdir(parents=True, exist_ok=True)
     cache_path = camera_index / f"{cache_name}.json" if cache_name else None
     if cache_path and cache_path.exists() and time.time() - cache_path.stat().st_mtime < ttl:
@@ -1871,7 +1925,7 @@ def _hls_command(video_input: str, audio_input: str | None,
                 "-f", "hls", "-hls_time", str(HLS_SEGMENT_SECONDS), "-hls_init_time", str(HLS_SEGMENT_SECONDS),
                 "-hls_list_size", "0", "-hls_playlist_type", "event", "-hls_segment_type", "fmp4",
                 "-hls_allow_cache", "0", "-flush_packets", "1",
-                "-hls_fmp4_init_filename", "init.mp4", "-hls_flags", "independent_segments+temp_file",
+                "-hls_fmp4_init_filename", "init.mp4", "-hls_flags", "split_by_time+temp_file",
                 "-hls_segment_filename", str(session.directory / "segment-%05d.m4s"),
                 str(session.playlist_path)]
     return command, accelerator
@@ -1895,17 +1949,60 @@ def generate_hls_session(session: PlaybackSession) -> None:
     session.phase = "Opening the camera archive"
     try:
         with capture_log_path.open("wb") as capture_log, ffmpeg_log_path.open("wb") as ffmpeg_log:
-            session.capture_process = subprocess.Popen(
-                [sys.executable, str(CAPTURE_HELPER), start.strftime("%Y-%m-%d %H:%M:%S"),
-                 str(session.request["duration"]), str(directory)],
-                stdout=capture_log, stderr=subprocess.STDOUT, env=capture_environment(item),
-            )
-            session.source_fps, measured_offset, session.has_audio = _wait_for_capture_timing(
-                directory,
-                session.capture_process,
-                session.stop_event,
-                phase_callback=lambda phase: setattr(session, "phase", phase),
-            )
+            startup_error: RuntimeError | None = None
+            measured_offset = 0
+            for startup_attempt in range(HLS_FIRST_MEDIA_RETRIES + 1):
+                if startup_attempt:
+                    session.phase = (
+                        f"Retrying camera archive ({startup_attempt}/{HLS_FIRST_MEDIA_RETRIES})"
+                    )
+                    LOG.warning(
+                        "Playback session %s is retrying archive startup after no first video",
+                        session.id,
+                    )
+                    for stale_path in (
+                        video_path,
+                        audio_path,
+                        directory / "timing.json",
+                        directory / "summary.json",
+                        directory / "rtsp-progress.txt",
+                        directory / "rtsp-ffmpeg.log",
+                    ):
+                        stale_path.unlink(missing_ok=True)
+                    if session.stop_event.wait(0.50):
+                        raise RuntimeError("Archive playback startup was cancelled.")
+
+                session.capture_process = subprocess.Popen(
+                    [sys.executable, str(CAPTURE_HELPER), start.strftime("%Y-%m-%d %H:%M:%S"),
+                     str(session.request["duration"]), str(directory)],
+                    stdout=capture_log, stderr=subprocess.STDOUT, env=capture_environment(item),
+                )
+                try:
+                    session.source_fps, measured_offset, session.has_audio = _wait_for_capture_timing(
+                        directory,
+                        session.capture_process,
+                        session.stop_event,
+                        phase_callback=lambda phase: setattr(session, "phase", phase),
+                    )
+                    startup_error = None
+                    break
+                except RuntimeError as error:
+                    _terminate_process(session.capture_process)
+                    session.capture_process = None
+                    if "delivered no video within" not in str(error):
+                        raise
+                    startup_error = error
+                    if startup_attempt >= HLS_FIRST_MEDIA_RETRIES:
+                        break
+
+            if startup_error is not None:
+                attempts = HLS_FIRST_MEDIA_RETRIES + 1
+                raise RuntimeError(
+                    f"Camera archive delivered no video after {attempts} startup "
+                    f"attempt{'s' if attempts != 1 else ''} "
+                    f"({HLS_FIRST_MEDIA_TIMEOUT_SECONDS:.0f} seconds each)."
+                ) from startup_error
+
             session.audio_offset_ms = measured_offset
             LOG.info(
                 "Playback session %s measured %.4f fps, %d ms audio offset, audio=%s",
@@ -2044,7 +2141,7 @@ def cleanup_loop() -> None:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "TVTArchiveBridge/0.8.1"
+    server_version = "TVTArchiveBridge/0.8.2"
 
     def log_message(self, fmt: str, *args: Any) -> None:
         LOG.info("%s %s", self.address_string(), fmt % args)
@@ -2222,7 +2319,7 @@ class Handler(BaseHTTPRequestHandler):
 
         item = camera(camera_id)
         lock = camera_session_slot(camera_id)
-        work_directory = Path(tempfile.mkdtemp(prefix=f"stream-{camera_id}-", dir=WORK))
+        work_directory = Path(tempfile.mkdtemp(prefix="stream-", dir=WORK))
         video_path = work_directory / "video.h264"
         audio_path = work_directory / "audio.alaw"
         ffmpeg_log = (work_directory / "ffmpeg.log").open("wb")
@@ -2289,7 +2386,6 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "video/mp4")
             self.send_header("Cache-Control", "no-store")
-            self.send_header("X-TVT-Archive-Quality", quality)
             self.send_header("X-TVT-Archive-Accelerator", accelerator_used)
             self.send_header("X-TVT-Archive-Audio", "1" if has_audio else "0")
             self._headers()
@@ -2386,7 +2482,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as error:
             self._error(400, str(error), head_only=head_only)
         except Exception as error:
-            LOG.exception("GET %s failed", path); self._error(500, str(error), head_only=head_only)
+            LOG.exception("GET %s failed", path); self._error(500, "Internal bridge error", head_only=head_only)
 
     def do_GET(self) -> None: self._route_get()
     def do_HEAD(self) -> None: self._route_get(head_only=True)
@@ -2418,7 +2514,7 @@ class Handler(BaseHTTPRequestHandler):
             self._error(404, str(error))
         except Exception as error:
             LOG.exception("POST %s failed", path)
-            self._error(500, str(error))
+            self._error(500, "Internal bridge error")
 
     def do_PUT(self) -> None:
         parsed, query = self._parse()
@@ -2438,7 +2534,7 @@ class Handler(BaseHTTPRequestHandler):
             self._error(404, str(error))
         except Exception as error:
             LOG.exception("PUT %s failed", path)
-            self._error(500, str(error))
+            self._error(500, "Internal bridge error")
 
     def do_DELETE(self) -> None:
         parsed, query = self._parse()
@@ -2465,7 +2561,7 @@ class Handler(BaseHTTPRequestHandler):
             self._error(404, str(error))
         except Exception as error:
             LOG.exception("DELETE %s failed", path)
-            self._error(500, str(error))
+            self._error(500, "Internal bridge error")
 
 
 if __name__ == "__main__":
