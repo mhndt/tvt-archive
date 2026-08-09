@@ -32,7 +32,6 @@ CONFIG.mkdir()
                 "username": "test",
                 "password": "not-a-real-secret",
                 "archive_backend": "native_9008",
-                "live_profiles": [],
             }],
         }
     ),

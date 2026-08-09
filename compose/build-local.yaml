@@ -2,9 +2,9 @@
 # with compose/compose.yaml and should not build locally.
 services:
   tvt-archive:
-    image: ${TVT_ARCHIVE_LOCAL_IMAGE:-tvt-archive:0.8.3-local}
+    image: ${TVT_ARCHIVE_LOCAL_IMAGE:-tvt-archive:0.8.4-local}
     build:
       context: ..
       dockerfile: Dockerfile
       args:
-        APP_VERSION: "0.8.3"
+        APP_VERSION: "0.8.4"

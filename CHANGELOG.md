@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.4
+
+### Recordings-only scope
+
+- Removed Live view from the Recordings panel.
+- Removed Home Assistant live-profile setup and management from TVT Archive.
+- Stopped exposing or normalizing live-profile mappings in the bridge; existing camera archive settings continue to work normally.
+- Live viewing is now intentionally left to Home Assistant camera integrations and dashboard cards.
+
 ## 0.8.3
 
 ### Mobile playback

@@ -1,6 +1,6 @@
 services:
   tvt-archive:
-    image: ${TVT_ARCHIVE_IMAGE:-ghcr.io/mhndt/tvt-archive:0.8.3}
+    image: ${TVT_ARCHIVE_IMAGE:-ghcr.io/mhndt/tvt-archive:0.8.4}
     container_name: tvt-archive
     restart: unless-stopped
     ports:

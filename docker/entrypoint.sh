@@ -52,7 +52,7 @@ print("Add the TVT Archive integration in Home Assistant, then manage cameras fr
 PY
   else
     python3 - "$CONFIG_PATH" <<'PY'
-import json, os, re, sys
+import json, os, sys
 path = sys.argv[1]
 with open(path, encoding="utf-8") as handle:
     data = json.load(handle)
@@ -89,10 +89,6 @@ for key, value in {
         processing[key] = value
         changed = True
 
-def slug(value):
-    value = re.sub(r"[^A-Za-z0-9_-]+", "_", str(value)).strip("_").lower()
-    return value[:48] or "live"
-
 for camera in data.get("cameras", []):
     defaults = {
         "archive_backend": "native_9008",
@@ -107,49 +103,6 @@ for camera in data.get("cameras", []):
         if key not in camera:
             camera[key] = value
             changed = True
-    profiles = camera.get("live_profiles")
-    if not isinstance(profiles, list):
-        streams = camera.get("live_streams", {})
-        profiles = []
-        if isinstance(streams, dict):
-            for key, name in (("high", "High"), ("balanced", "Balanced"), ("data_saver", "Data Saver")):
-                entity = streams.get(key)
-                if entity:
-                    profiles.append({"id": key, "name": name, "entity_id": entity, "default": key == "high"})
-        camera["live_profiles"] = profiles
-        changed = True
-    seen = set()
-    default_seen = False
-    cleaned = []
-    for index, raw in enumerate(profiles):
-        if not isinstance(raw, dict) or not raw.get("entity_id"):
-            changed = True
-            continue
-        profile_id = str(raw.get("id") or slug(raw.get("name") or f"live_{index + 1}"))
-        if profile_id in seen:
-            profile_id = f"live_{index + 1}"
-            changed = True
-        seen.add(profile_id)
-        is_default = bool(raw.get("default")) and not default_seen
-        default_seen = default_seen or is_default
-        item = {
-            "id": profile_id,
-            "name": str(raw.get("name") or profile_id),
-            "entity_id": str(raw.get("entity_id")),
-            "default": is_default,
-        }
-        if item != raw:
-            changed = True
-        cleaned.append(item)
-    if cleaned and not default_seen:
-        cleaned[0]["default"] = True
-        changed = True
-    if camera.get("live_profiles") != cleaned:
-        camera["live_profiles"] = cleaned
-        changed = True
-    if "live_streams" in camera:
-        camera.pop("live_streams", None)
-        changed = True
 if changed:
     temporary = path + ".tmp"
     with open(temporary, "w", encoding="utf-8") as handle:

@@ -11,7 +11,7 @@ It has two parts:
 - a small Docker bridge that talks to the camera archive on your local network;
 - a Home Assistant custom integration that provides the UI and proxies playback and downloads.
 
-Live view is deliberately independent. You can map any existing Home Assistant `camera.*` entity from ONVIF, Generic Camera, go2rtc, Frigate, or another integration.
+TVT Archive intentionally handles recordings only. Configure live viewing separately in Home Assistant using any camera integration or dashboard card you prefer.
 
 > [!IMPORTANT]
 > TVT Archive is an experimental public release. Native TCP/9008 playback is verified on a TVT TD-C12. Other cameras and hardware need broader testing.
@@ -24,7 +24,6 @@ Live view is deliberately independent. You can map any existing Home Assistant `
 - **Original**, **Balanced (720p)**, and **Data Saver (480p)** qualities.
 - Original-quality MP4 exports with real progress.
 - Multiple configured cameras with separate timelines and sessions.
-- Named live profiles using existing Home Assistant camera entities.
 - Automatic hardware-acceleration probing with software fallback.
 - Local bridge authentication with a generated access token.
 
@@ -175,7 +174,6 @@ After Home Assistant connects to the bridge, the TVT Archive setup flow asks for
 - the camera's own local username and password;
 - the archive backend, normally **Native TCP/9008**;
 - recording-audio handling for Native TCP/9008: **Auto** (recommended), **Always expect audio**, or **Disabled**;
-- optionally, an existing Home Assistant camera entity for Live view.
 
 The setup flow sends the camera details to the bridge, which stores them in the `tvt-archive-config` Docker volume. Home Assistant keeps the bridge URL and token in its config entry.
 
@@ -185,9 +183,8 @@ The integration automatically adds **Recordings** to the Home Assistant sidebar.
 
 Open **Settings → Devices & services**, find **TVT Archive**, and select **Configure**. The management menu provides:
 
-- **Add camera** — connect another camera or recorder and optionally assign its first Live profile.
+- **Add camera** — connect another camera or recorder.
 - **Edit camera** — change its name, address, recording mode, recording-audio handling, port, username, or password. Leave the password blank to keep the current password.
-- **Manage live profiles** — add profiles, rename or reorder them, choose a different existing Home Assistant camera entity, set the default profile, or remove a profile.
 - **Remove camera** — remove it from TVT Archive. This does not delete recordings from the camera or recorder.
 
 TVT Archive reloads the integration after a saved change so the panel and generated entities reflect the current camera list.
@@ -207,18 +204,6 @@ Choose a camera, date, recording quality, and timeline width. Green sections con
 - **Data Saver (480p)** — 854×480 H.264.
 
 Original browser playback uses short keyframe intervals for smooth one-second fragments. Original downloads still retain stream-copy video.
-
-## Live profiles
-
-TVT Archive does not create or replace live camera entities. Each live profile is simply a friendly name mapped to an existing Home Assistant `camera.*` entity.
-
-```text
-Main          → camera.front_door_main
-Mobile        → camera.front_door_sub
-Night vision  → camera.front_door_night
-```
-
-Those names are only examples. The source can be ONVIF, Generic Camera, go2rtc, Frigate, or another integration, and live profiles do not affect recorded-playback quality.
 
 # Compatibility
 

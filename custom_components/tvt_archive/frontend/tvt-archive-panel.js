@@ -1,4 +1,4 @@
-const VERSION = "0.8.3";
+const VERSION = "0.8.4";
 const $esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const pad = (n) => String(n).padStart(2, "0");
 const localDate = (d = new Date()) => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
@@ -539,224 +539,6 @@ class TVTFmp4Player {
   }
 }
 
-class TVTLiveCameraPlayer {
-  constructor(hass, host, entity) {
-    this.hass = hass;
-    this.host = host;
-    this.entity = entity;
-    this.destroyed = false;
-    this.peer = null;
-    this.remoteStream = null;
-    this.sessionId = null;
-    this.pendingCandidates = [];
-    this.unsubscribePromise = null;
-    this.video = null;
-  }
-
-  async start() {
-    if (this.destroyed) return;
-    let capabilities = null;
-    try {
-      capabilities = await this.hass.callWS({type:"camera/capabilities", entity_id:this.entity});
-    } catch (_) {}
-
-    const types = Array.isArray(capabilities?.frontend_stream_types)
-      ? capabilities.frontend_stream_types
-      : [];
-
-    if (types.includes("web_rtc") && typeof RTCPeerConnection !== "undefined") {
-      try {
-        await this._startWebRtc();
-        return;
-      } catch (error) {
-        console.warn("TVT Archive live WebRTC failed; falling back", error);
-        this._stopWebRtc();
-      }
-    }
-
-    if (types.includes("hls")) {
-      try {
-        const video = this._makeVideo();
-        if (video.canPlayType("application/vnd.apple.mpegurl")) {
-          const result = await this.hass.callWS({type:"camera/stream", entity_id:this.entity, format:"hls"});
-          if (this.destroyed) return;
-          video.src = new URL(result.url, window.location.origin).toString();
-          this.host.replaceChildren(video);
-          this.video = video;
-          const play = video.play();
-          if (play?.catch) play.catch(() => {});
-          return;
-        }
-      } catch (error) {
-        console.warn("TVT Archive live HLS failed; falling back", error);
-      }
-    }
-
-    this._startMjpeg();
-  }
-
-  _makeVideo() {
-    const video = document.createElement("video");
-    video.className = "live-media";
-    video.autoplay = true;
-    video.playsInline = true;
-    video.muted = true;
-    video.controls = false;
-    return video;
-  }
-
-  async _startWebRtc() {
-    const video = this._makeVideo();
-    this.host.replaceChildren(video);
-    this.video = video;
-
-    const clientConfig = await this.hass.callWS({
-      type:"camera/webrtc/get_client_config",
-      entity_id:this.entity,
-    });
-    if (this.destroyed) return;
-
-    const peer = new RTCPeerConnection(clientConfig?.configuration || {});
-    this.peer = peer;
-    if (clientConfig?.dataChannel) peer.createDataChannel(clientConfig.dataChannel);
-
-    const stream = new MediaStream();
-    this.remoteStream = stream;
-    peer.ontrack = (event) => {
-      if (this.destroyed) return;
-      if (!stream.getTracks().some((track) => track.id === event.track.id)) {
-        stream.addTrack(event.track);
-      }
-      video.srcObject = stream;
-      const play = video.play();
-      if (play?.catch) play.catch(() => {});
-    };
-
-    peer.onicecandidate = (event) => {
-      const candidate = event.candidate;
-      if (!candidate?.candidate || this.destroyed) return;
-      if (this.sessionId) this._sendCandidate(candidate);
-      else this.pendingCandidates.push(candidate);
-    };
-
-    peer.oniceconnectionstatechange = () => {
-      if (peer.iceConnectionState === "failed") {
-        try { peer.restartIce(); } catch (_) {}
-      }
-    };
-
-    peer.addTransceiver("audio", {direction:"recvonly"});
-    peer.addTransceiver("video", {direction:"recvonly"});
-
-    const offer = await peer.createOffer({offerToReceiveAudio:true, offerToReceiveVideo:true});
-    await peer.setLocalDescription(offer);
-    if (this.destroyed || !this.peer) return;
-
-    let earlyCandidates = "";
-    for (const candidate of this.pendingCandidates) {
-      if (candidate.candidate) earlyCandidates += `a=${candidate.candidate}\r\n`;
-    }
-
-    this.unsubscribePromise = this.hass.connection.subscribeMessage(
-      (event) => this._handleWebRtcEvent(event),
-      {
-        type:"camera/webrtc/offer",
-        entity_id:this.entity,
-        offer:(offer.sdp || "") + earlyCandidates,
-      },
-    );
-  }
-
-  async _handleWebRtcEvent(event) {
-    if (this.destroyed || !this.peer) return;
-
-    if (event.type === "session") {
-      this.sessionId = event.session_id;
-      const queued = this.pendingCandidates.splice(0);
-      for (const candidate of queued) this._sendCandidate(candidate);
-      return;
-    }
-
-    if (event.type === "answer") {
-      if (!["stable", "closed"].includes(this.peer.signalingState)) {
-        await this.peer.setRemoteDescription({type:"answer", sdp:event.answer});
-      }
-      return;
-    }
-
-    if (event.type === "candidate") {
-      const value = event.candidate || {};
-      const candidate = value.sdpMid || value.sdpMLineIndex != null
-        ? new RTCIceCandidate(value)
-        : new RTCIceCandidate({candidate:value.candidate, sdpMid:"0"});
-      try { await this.peer.addIceCandidate(candidate); } catch (_) {}
-      return;
-    }
-
-    if (event.type === "error") {
-      console.warn("TVT Archive live WebRTC error", event.message || event);
-      this._stopWebRtc();
-      this._startMjpeg();
-    }
-  }
-
-  _sendCandidate(candidate) {
-    if (!this.sessionId || this.destroyed) return;
-    this.hass.callWS({
-      type:"camera/webrtc/candidate",
-      entity_id:this.entity,
-      session_id:this.sessionId,
-      candidate:candidate.toJSON ? candidate.toJSON() : candidate,
-    }).catch(() => {});
-  }
-
-  _startMjpeg() {
-    if (this.destroyed) return;
-    const state = this.hass.states?.[this.entity];
-    const token = state?.attributes?.access_token;
-    if (!token) {
-      this.host.innerHTML = `<div class="empty">Live streaming is unavailable for this camera entity.</div>`;
-      return;
-    }
-    const image = document.createElement("img");
-    image.className = "live-media";
-    image.alt = `Live view of ${this.entity}`;
-    image.src = `/api/camera_proxy_stream/${encodeURIComponent(this.entity)}?token=${encodeURIComponent(token)}`;
-    this.host.replaceChildren(image);
-  }
-
-  _stopWebRtc() {
-    if (this.remoteStream) {
-      for (const track of this.remoteStream.getTracks()) track.stop();
-    }
-    this.remoteStream = null;
-    if (this.video) {
-      try {
-        this.video.pause();
-        this.video.srcObject = null;
-        this.video.removeAttribute("src");
-        this.video.load();
-      } catch (_) {}
-    }
-    this.video = null;
-    if (this.peer) {
-      try { this.peer.close(); } catch (_) {}
-    }
-    this.peer = null;
-    const unsubscribePromise = this.unsubscribePromise;
-    this.unsubscribePromise = null;
-    if (unsubscribePromise?.then) unsubscribePromise.then((unsubscribe) => unsubscribe?.()).catch(() => {});
-    this.sessionId = null;
-    this.pendingCandidates = [];
-  }
-
-  destroy() {
-    if (this.destroyed) return;
-    this.destroyed = true;
-    this._stopWebRtc();
-  }
-}
-
 class TVTArchivePanel extends HTMLElement {
   constructor() {
     super();
@@ -774,8 +556,7 @@ class TVTArchivePanel extends HTMLElement {
     this._rangeEnd = secToClock(Math.min(86399, this._selectedSec + 300));
     this._zoom = 1;
     this._recordingQuality = "original";
-    this._liveProfileId = null;
-    this._mode = "live";
+    this._mode = "recording";
     this._timeline = null;
     this._status = null;
     this._busy = false;
@@ -789,7 +570,6 @@ class TVTArchivePanel extends HTMLElement {
     this._playbackSession = null;
     this._recordingPlayer = null;
     this._recordingController = null;
-    this._liveController = null;
     this._pollTimer = null;
     this._sessionPollTimer = null;
     this._playbackRetryTimer = null;
@@ -804,8 +584,6 @@ class TVTArchivePanel extends HTMLElement {
     if (!this._loaded && value) {
       this._loaded = true;
       this._bootstrap();
-    } else if (value) {
-      this._refreshLivePlayer();
     }
   }
   get hass() { return this._hass; }
@@ -830,8 +608,6 @@ class TVTArchivePanel extends HTMLElement {
     clearTimeout(this._sessionPollTimer);
     clearTimeout(this._playbackRetryTimer);
     clearTimeout(this._statusTimer);
-    this._liveController?.destroy();
-    this._liveController = null;
     this._stopPlaybackSession(false);
   }
 
@@ -848,10 +624,8 @@ class TVTArchivePanel extends HTMLElement {
       if (!value || typeof value !== "object") return;
       if (/^\d{4}-\d{2}-\d{2}$/.test(value.date || "")) this._date = value.date;
       if (typeof value.cameraId === "string") this._cameraId = value.cameraId;
-      if (["live","recording"].includes(value.mode)) this._mode = value.mode;
       if (["original","balanced","data_saver"].includes(value.recordingQuality || value.quality)) this._recordingQuality = value.recordingQuality || value.quality;
       else if ((value.recordingQuality || value.quality) === "auto") this._recordingQuality = "original";
-      if (typeof value.liveProfileId === "string") this._liveProfileId = value.liveProfileId;
       if ([1,2,4].includes(Number(value.zoom))) this._zoom = Number(value.zoom);
       if (Number.isFinite(Number(value.selectedSec))) this._selectedSec = Math.max(0, Math.min(86399, Number(value.selectedSec)));
       if (/^\d{2}:\d{2}:\d{2}$/.test(value.rangeStart || "")) this._rangeStart = value.rangeStart;
@@ -865,11 +639,9 @@ class TVTArchivePanel extends HTMLElement {
     try {
       const params = new URL(window.location.href).searchParams;
       const camera = params.get("camera");
-      const mode = params.get("mode");
       const date = params.get("date");
       const time = params.get("time");
       if (camera) this._cameraId = camera;
-      if (["live","recording"].includes(mode)) this._mode = mode;
       if (/^\d{4}-\d{2}-\d{2}$/.test(date || "")) this._date = date;
       if (/^\d{2}:\d{2}(?::\d{2})?$/.test(time || "")) {
         this._selectedSec = clockToSec(time);
@@ -882,7 +654,7 @@ class TVTArchivePanel extends HTMLElement {
   _persistState() {
     try {
       sessionStorage.setItem(this._stateKey(), JSON.stringify({
-        date:this._date, cameraId:this._cameraId, mode:this._mode, recordingQuality:this._recordingQuality, liveProfileId:this._liveProfileId,
+        date:this._date, cameraId:this._cameraId, recordingQuality:this._recordingQuality,
         zoom:this._zoom, selectedSec:this._selectedSec, rangeStart:this._rangeStart, rangeEnd:this._rangeEnd,
         downloadJobId:this._downloadJobId, downloadPercent:this._downloadPercent,
       }));
@@ -918,7 +690,6 @@ class TVTArchivePanel extends HTMLElement {
       this._cameraId = this._cameras[0]?.id || null;
     }
     this._camera = this._cameras.find((camera) => camera.id === this._cameraId) || null;
-    this._ensureLiveProfileSelection();
   }
 
   async _loadTimeline(refresh = false) {
@@ -957,33 +728,6 @@ class TVTArchivePanel extends HTMLElement {
       : "original";
   }
 
-  _liveProfiles() {
-    return Array.isArray(this._camera?.live_profiles)
-      ? this._camera.live_profiles.filter((profile) => profile?.entity_id)
-      : [];
-  }
-
-  _ensureLiveProfileSelection() {
-    const profiles = this._liveProfiles();
-    if (profiles.some((profile) => profile.id === this._liveProfileId)) return;
-    this._liveProfileId = profiles.find((profile) => profile.default)?.id || profiles[0]?.id || null;
-  }
-
-  _selectedLiveProfile() {
-    this._ensureLiveProfileSelection();
-    const profiles = this._liveProfiles();
-    return profiles.find((profile) => profile.id === this._liveProfileId)
-      || profiles.find((profile) => profile.default)
-      || profiles[0]
-      || null;
-  }
-
-  _effectiveLiveEntity() {
-    const profile = this._selectedLiveProfile();
-    if (!profile) return null;
-    return profile.entity_id;
-  }
-
   _timelineHtml() {
     if (!this._timeline) return `<div class="empty">Loading timeline…</div>`;
     const width = this._zoom * 100;
@@ -1010,7 +754,6 @@ class TVTArchivePanel extends HTMLElement {
       today: status.timeline_today?.recorded_hours == null ? "—" : historyText(status.timeline_today.recorded_hours),
       history: historyText(status.availability?.available_history_hours),
       archive: this._camera?.archive_backend === "rtsp" ? "Recorded RTSP" : "Native TCP/9008",
-      liveProfile: this._selectedLiveProfile()?.name || "Not configured",
       accelerator: (this._playbackSession?.accelerator_used || status.accelerator?.selected || "—").replaceAll("_", " "),
       oldest: status.availability?.earliest ? new Date(status.availability.earliest).toLocaleString() : "—",
       latest: status.availability?.latest ? new Date(status.availability.latest).toLocaleString() : "—",
@@ -1074,18 +817,12 @@ class TVTArchivePanel extends HTMLElement {
     const effectiveQuality = this._effectiveRecordingQuality();
     const values = this._statusValues();
     const cameras = this._cameras.map((camera) => `<option value="${$esc(camera.id)}" ${camera.id === this._cameraId ? "selected" : ""}>${$esc(camera.name || camera.id)}</option>`).join("");
-    this._ensureLiveProfileSelection();
-    const liveProfiles = this._liveProfiles();
-    const qualities = this._mode === "recording"
-      ? [
-          ["original", "Original"],
-          ["balanced", "Balanced (720p)"],
-          ["data_saver", "Data Saver (480p)"],
-        ].map(([value, label]) => `<option value="${value}" ${value === this._recordingQuality ? "selected" : ""}>${label}</option>`).join("")
-      : (liveProfiles.length
-          ? liveProfiles.map((profile) => `<option value="${$esc(profile.id)}" ${profile.id === this._liveProfileId ? "selected" : ""}>${$esc(profile.name)}</option>`).join("")
-          : `<option value="">No live profiles</option>`);
-    const qualityLabel = this._mode === "recording" ? "Recording quality" : "Live profile";
+    const qualities = [
+      ["original", "Original"],
+      ["balanced", "Balanced (720p)"],
+      ["data_saver", "Data Saver (480p)"],
+    ].map(([value, label]) => `<option value="${value}" ${value === this._recordingQuality ? "selected" : ""}>${label}</option>`).join("");
+    const qualityLabel = "Recording quality";
 
     this.shadowRoot.innerHTML = `<style>
       :host{display:block;min-height:100%;background:var(--primary-background-color);color:var(--primary-text-color);box-sizing:border-box}
@@ -1098,22 +835,22 @@ class TVTArchivePanel extends HTMLElement {
       button{cursor:pointer;background:var(--primary-color);color:var(--text-primary-color,#fff);border:0;font-weight:600}button.secondary{background:var(--secondary-background-color);color:var(--primary-text-color)}button:disabled{opacity:.55;cursor:default}
       .shell{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:14px}.card{background:var(--card-background-color);border-radius:14px;box-shadow:var(--ha-card-box-shadow,0 2px 2px rgba(0,0,0,.15));overflow:hidden;min-width:0}
       .player-head{padding:11px 14px;display:flex;justify-content:space-between;align-items:center;gap:10px;border-bottom:1px solid var(--divider-color)}
-      .mode{display:flex;gap:7px}.mode button.active{background:var(--primary-color);color:#fff}.player{background:#000;min-height:min(62vh,640px);display:grid;place-items:center;position:relative;overflow:hidden}
-      .player video{width:100%;height:min(62vh,640px);object-fit:contain;background:#000;display:block}.live-media{width:100%;height:min(62vh,640px);object-fit:contain;background:#000;display:block}.player-state{display:none;grid-area:1/1;z-index:2;align-items:center;justify-content:center;pointer-events:none;color:var(--secondary-text-color);font-size:.92rem}.player-state.visible{display:flex}.player-state.action{pointer-events:auto}.player-state-content{display:flex;align-items:center;gap:10px;padding:10px 13px;border-radius:10px;background:rgba(0,0,0,.58);color:var(--secondary-text-color)}.player-spinner{width:18px;height:18px;border-radius:50%;border:3px solid rgba(255,255,255,.25);border-top-color:var(--secondary-text-color);animation:tvt-spin .8s linear infinite}@keyframes tvt-spin{to{transform:rotate(360deg)}}
+      .player{background:#000;min-height:min(62vh,640px);display:grid;place-items:center;position:relative;overflow:hidden}
+      .player video{width:100%;height:min(62vh,640px);object-fit:contain;background:#000;display:block}.player-state{display:none;grid-area:1/1;z-index:2;align-items:center;justify-content:center;pointer-events:none;color:var(--secondary-text-color);font-size:.92rem}.player-state.visible{display:flex}.player-state.action{pointer-events:auto}.player-state-content{display:flex;align-items:center;gap:10px;padding:10px 13px;border-radius:10px;background:rgba(0,0,0,.58);color:var(--secondary-text-color)}.player-spinner{width:18px;height:18px;border-radius:50%;border:3px solid rgba(255,255,255,.25);border-top-color:var(--secondary-text-color);animation:tvt-spin .8s linear infinite}@keyframes tvt-spin{to{transform:rotate(360deg)}}
       .empty{padding:32px;text-align:center;color:var(--secondary-text-color)}.sidebar{padding:14px;display:grid;gap:10px;align-content:start}.stat{padding:10px 12px;background:var(--secondary-background-color);border-radius:10px}.stat span{color:var(--secondary-text-color);font-size:.8rem}.stat b{display:block;margin-top:3px;overflow-wrap:anywhere}
       .timeline-card{padding:12px}.timeline-title{display:flex;justify-content:space-between;gap:10px;margin-bottom:8px}.timeline{height:112px;overflow-x:auto;overflow-y:hidden;position:relative;background:var(--secondary-background-color);border-radius:10px;cursor:crosshair}.timeline-inner{height:100%;position:relative;min-width:100%}.segment{position:absolute;top:38px;height:42px;border-radius:6px;background:var(--success-color,#43a047)}.tick{position:absolute;top:0;bottom:0;width:1px;background:var(--divider-color)}.tick span{position:absolute;left:0;top:7px;transform:translateX(-50%);font-size:.7rem;color:var(--secondary-text-color);white-space:nowrap}.tick:first-child span{left:6px;transform:none}.tick:last-child span{left:auto;right:6px;transform:none}.marker{position:absolute;top:28px;bottom:12px;width:2px;background:var(--error-color,#e53935)}.marker:after{content:"";position:absolute;top:-5px;left:-4px;width:10px;height:10px;border-radius:50%;background:inherit}
-      .lower{display:grid;grid-template-columns:1fr 1fr;gap:14px}.box{padding:13px;min-width:0;overflow:hidden}.selection-controls{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px;align-items:end}.selection-controls>*{min-width:0;max-width:100%}.range{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;gap:8px;align-items:end}.range>*{min-width:0;max-width:100%}.download-link{display:inline-flex;align-items:center;justify-content:center;padding:10px 14px;border-radius:8px;background:var(--primary-color);color:var(--text-primary-color,#fff);text-decoration:none;font-weight:600}.download-progress{display:none;grid-column:1/-1;align-items:center;gap:9px;font-size:.78rem;color:var(--secondary-text-color)}.download-progress.visible{display:flex}.download-track{height:5px;flex:1;overflow:hidden;border-radius:999px;background:var(--divider-color)}.download-bar{height:100%;width:0;background:var(--primary-color);transition:width .25s ease}.download-percent{min-width:34px;text-align:right;font-variant-numeric:tabular-nums}.statusline{min-height:22px;color:var(--secondary-text-color)}.error{color:var(--error-color)}
+      .lower{display:grid;grid-template-columns:1fr 1fr;gap:14px}.box{padding:13px;min-width:0;overflow:hidden}.selection-controls{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:end}.selection-controls>*{min-width:0;max-width:100%}.range{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;gap:8px;align-items:end}.range>*{min-width:0;max-width:100%}.download-link{display:inline-flex;align-items:center;justify-content:center;padding:10px 14px;border-radius:8px;background:var(--primary-color);color:var(--text-primary-color,#fff);text-decoration:none;font-weight:600}.download-progress{display:none;grid-column:1/-1;align-items:center;gap:9px;font-size:.78rem;color:var(--secondary-text-color)}.download-progress.visible{display:flex}.download-track{height:5px;flex:1;overflow:hidden;border-radius:999px;background:var(--divider-color)}.download-bar{height:100%;width:0;background:var(--primary-color);transition:width .25s ease}.download-percent{min-width:34px;text-align:right;font-variant-numeric:tabular-nums}.statusline{min-height:22px;color:var(--secondary-text-color)}.error{color:var(--error-color)}
       @media(min-width:901px) and (min-height:720px){
         :host{height:100dvh;overflow:hidden}.page{height:100%;overflow:hidden;padding:12px 18px;gap:10px;grid-template-rows:auto minmax(0,1fr) auto auto auto}
-        .shell{min-height:0;gap:10px}.shell>.card:first-child{display:grid;grid-template-rows:auto minmax(0,1fr);min-height:0}.player{height:100%;min-height:0}.player video,.live-media{height:100%;min-height:0;max-height:none}
+        .shell{min-height:0;gap:10px}.shell>.card:first-child{display:grid;grid-template-rows:auto minmax(0,1fr);min-height:0}.player{height:100%;min-height:0}.player video{height:100%;min-height:0;max-height:none}
         .sidebar{min-height:0;overflow:hidden;padding:10px;gap:7px}.stat{padding:7px 10px}.timeline-card{padding:9px 10px}.timeline-title{margin-bottom:6px}.timeline{height:92px}.segment{top:31px;height:35px}.marker{top:23px;bottom:10px}
         .lower{gap:10px}.box{padding:10px}.statusline{min-height:18px;font-size:.8rem}
       }
-      @media(max-width:900px){.shell{grid-template-columns:1fr}.sidebar{grid-template-columns:repeat(2,minmax(0,1fr))}.lower{grid-template-columns:1fr}.player,.player video,.live-media{min-height:42vh;height:42vh}.page{padding:10px}}
+      @media(max-width:900px){.shell{grid-template-columns:1fr}.sidebar{grid-template-columns:repeat(2,minmax(0,1fr))}.lower{grid-template-columns:1fr}.player,.player video{min-height:42vh;height:42vh}.page{padding:10px}}
       @media(max-width:560px){
         .top{display:block}.heading{margin-bottom:16px}.controls{width:100%;display:grid;grid-template-columns:1fr;gap:10px}.controls label,.controls input,.controls select,.controls button{width:100%}
         .player-head{display:grid;grid-template-columns:1fr auto;align-items:center}.player-head>b{grid-column:1/-1}.player-head>.subtle{grid-column:1/-1}.sidebar{grid-template-columns:1fr 1fr}.timeline-title{align-items:flex-start}.timeline-title span{max-width:68%}.timeline-inner.zoom-1 .tick.mobile-minor span{display:none}
-        .selection-controls{grid-template-columns:1fr 1fr}.selection-controls label{grid-column:1/-1;width:100%;overflow:hidden}.selection-controls input{width:100%;max-width:100%}.selection-controls button{width:100%}
+        .selection-controls{grid-template-columns:1fr}.selection-controls label{grid-column:auto;width:100%;overflow:hidden}.selection-controls input{width:100%;max-width:100%}.selection-controls button{width:100%}
         .range{grid-template-columns:1fr 1fr}.range button,.range .download-link{grid-column:1/-1;width:100%}.box{padding:11px}.page{overflow-x:hidden}
       }
       @media(max-width:370px){.sidebar{grid-template-columns:1fr}.selection-controls{grid-template-columns:1fr}.selection-controls label{grid-column:auto}.range{grid-template-columns:1fr}.range button,.range .download-link{grid-column:auto}.download-progress{grid-column:1}}
@@ -1121,16 +858,16 @@ class TVTArchivePanel extends HTMLElement {
       <div class="top"><div class="heading"><div><h1>Recordings</h1><div class="subtle version-text">TVT Archive · v${VERSION}</div></div></div>
         <div class="controls"><label>Camera<select id="camera">${cameras}</select></label><label>Date<input id="date" type="date" value="${$esc(this._date)}"></label><label>${qualityLabel}<select id="quality">${qualities}</select></label><label>Timeline<select id="zoom"><option value="1">24 hours</option><option value="2">12-hour</option><option value="4">6-hour</option></select></label><button id="refresh" class="secondary">Refresh</button></div>
       </div>
-      <div class="shell"><div class="card"><div class="player-head"><div class="mode"><button id="live" class="secondary ${this._mode === "live" ? "active" : ""}">● Live</button><button id="recording" class="secondary ${this._mode === "recording" ? "active" : ""}">Recording</button></div><b>${$esc(this._camera?.name || "Camera")}</b><span class="subtle">${this._mode === "recording" ? `${$esc(this._date)} ${$esc(selected)}` : `Live now${this._selectedLiveProfile()?.name ? ` · ${$esc(this._selectedLiveProfile().name)}` : ""}`}</span></div><div id="player" class="player"></div></div>
+      <div class="shell"><div class="card"><div class="player-head"><b>${$esc(this._camera?.name || "Camera")}</b><span class="subtle">${$esc(this._date)} ${$esc(selected)}</span></div><div id="player" class="player"></div></div>
         <div class="card sidebar">
           <div class="stat"><span>Recording</span><b id="stat-recording">${$esc(values.recording)}</b></div><div class="stat"><span>Recorded today</span><b id="stat-today">${$esc(values.today)}</b></div>
           <div class="stat"><span>Available history</span><b id="stat-history">${$esc(values.history)}</b></div><div class="stat"><span>Archive media</span><b id="stat-archive">${$esc(values.archive)}</b></div>
-          <div class="stat"><span>Default live profile</span><b id="stat-liveProfile">${$esc(values.liveProfile)}</b></div><div class="stat"><span>Playback accelerator</span><b id="stat-accelerator">${$esc(values.accelerator)}</b></div>
+<div class="stat"><span>Playback accelerator</span><b id="stat-accelerator">${$esc(values.accelerator)}</b></div>
           <div class="stat"><span>Oldest recording</span><b id="stat-oldest">${$esc(values.oldest)}</b></div><div class="stat"><span>Latest recording</span><b id="stat-latest">${$esc(values.latest)}</b></div>
         </div>
       </div>
       <div class="card timeline-card"><div class="timeline-title"><span>Click a recorded section to select a time</span><b>${selected}</b></div><div id="timeline" class="timeline">${this._timelineHtml()}</div></div>
-      <div class="lower"><div class="card box"><div class="selection-controls"><label>Selected time<input id="selected" type="time" step="1" value="${selected}"></label><button id="play">Play from here</button><button id="go-live" class="secondary">Go live</button></div></div>
+      <div class="lower"><div class="card box"><div class="selection-controls"><label>Selected time<input id="selected" type="time" step="1" value="${selected}"></label><button id="play">Play from here</button></div></div>
         <div class="card box"><div class="range"><label>Download start<input id="range-start" type="time" step="1" value="${$esc(this._rangeStart)}"></label><label>Download end<input id="range-end" type="time" step="1" value="${$esc(this._rangeEnd)}"></label>${this._downloadUrl ? `<a id="save-download" class="download-link" href="${$esc(this._downloadUrl)}" download="${$esc(this._downloadFilename || "recording.mp4")}">Save file</a>` : `<button id="download" ${this._busy ? "disabled" : ""}>${this._busy ? this._downloadActionLabel() : "Download original"}</button>`}<div id="download-progress" class="download-progress ${this._busy || this._downloadPercent === 100 ? "visible" : ""}"><div class="download-track" role="progressbar" aria-label="Export progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.max(0, Math.min(100, Math.round(this._downloadPercent || 0)))}"><div id="download-progress-bar" class="download-bar" style="width:${Math.max(0, Math.min(100, Math.round(this._downloadPercent || 0)))}%"></div></div><span id="download-percent" class="download-percent">${Math.max(0, Math.min(100, Math.round(this._downloadPercent || 0)))}%</span></div></div></div></div>
       <div id="statusline" class="statusline ${this._error ? "error" : ""}">${$esc(this._error || this._message || "")}</div>
     </div>`;
@@ -1146,8 +883,7 @@ class TVTArchivePanel extends HTMLElement {
       this._resetDownloadResult();
       this._cameraId = event.target.value;
       this._camera = this._cameras.find((camera) => camera.id === this._cameraId);
-      this._liveProfileId = null; this._ensureLiveProfileSelection();
-      this._timeline = null; this._status = null; this._mode = "live"; this._persistState();
+      this._timeline = null; this._status = null; this._mode = "recording"; this._persistState();
       await Promise.all([this._loadTimeline(), this._loadStatus()]);
     });
     get("date")?.addEventListener("change", async (event) => {
@@ -1159,13 +895,13 @@ class TVTArchivePanel extends HTMLElement {
       await this._loadTimeline();
     });
     get("quality")?.addEventListener("change", async (event) => {
-      if (this._mode === "recording" && this._playbackSession?.playlist_url) {
+      const wasPlaying = Boolean(this._playbackSession?.playlist_url);
+      if (wasPlaying) {
         this._selectedSec = Math.min(86399, this._selectedSec + Math.floor(this._currentPlaybackTime()));
       }
-      if (this._mode === "recording") this._recordingQuality = event.target.value;
-      else this._liveProfileId = event.target.value || null;
+      this._recordingQuality = event.target.value;
       this._persistState();
-      this._mode === "recording" ? this._playRecording() : this._render();
+      wasPlaying ? this._playRecording() : this._render();
     });
     get("zoom")?.addEventListener("change", (event) => { this._zoom = Number(event.target.value); this._persistState(); if (!this._playbackSession?.playlist_url) this._render(); });
     get("refresh")?.addEventListener("click", async () => {
@@ -1174,9 +910,6 @@ class TVTArchivePanel extends HTMLElement {
       await Promise.all([this._loadTimeline(true), this._loadStatus(true)]);
       this._persistState();
     });
-    get("live")?.addEventListener("click", () => this._goLive());
-    get("go-live")?.addEventListener("click", () => this._goLive());
-    get("recording")?.addEventListener("click", () => { this._mode = "recording"; this._persistState(); this._render(); });
     get("play")?.addEventListener("click", () => this._playRecording());
     get("selected")?.addEventListener("change", async (event) => { const value=event.currentTarget.value; this._resetDownloadResult(); this._selectedSec = clockToSec(value); this._rangeStart = value.length===5 ? `${value}:00` : value; this._rangeEnd = secToClock(Math.min(86399, this._selectedSec + 300)); this._persistState(); await this._stopPlaybackSession(); this._render(); });
     get("range-start")?.addEventListener("change", (event) => { this._rangeStart = event.currentTarget.value; this._resetDownloadResult(); this._render(); });
@@ -1197,46 +930,14 @@ class TVTArchivePanel extends HTMLElement {
     });
   }
 
-  _refreshLivePlayer() {
-    if (this._mode !== "live" || !this.shadowRoot.getElementById("player")) return;
-    if (this._liveController?.entity === this._effectiveLiveEntity()) {
-      this._liveController.hass = this._hass;
-      return;
-    }
-    this._renderPlayer();
-  }
-
   async _renderPlayer() {
     const host = this.shadowRoot.getElementById("player"); if (!host) return;
-    if (this._mode === "recording") {
-      this._liveController?.destroy();
-      this._liveController = null;
-      if (!this._playbackSession?.playlist_url) {
-        if (this._recordingController && this._recordingPlayer?.isConnected) return;
-        host.innerHTML = `<div class="empty">Select a recorded time and press <b>Play from here</b>.</div>`;
-        return;
-      }
-      this._attachHlsPlayer(host, this._playbackSession.playlist_url);
+    if (!this._playbackSession?.playlist_url) {
+      if (this._recordingController && this._recordingPlayer?.isConnected) return;
+      host.innerHTML = `<div class="empty">Select a recorded time and press <b>Play from here</b>.</div>`;
       return;
     }
-
-    const entity = this._effectiveLiveEntity();
-    if (!entity || !this._hass?.states?.[entity]) {
-      this._liveController?.destroy();
-      this._liveController = null;
-      host.innerHTML = `<div class="empty">No live camera entity is associated with this archive camera.<br>Open Settings → Devices & services → TVT Archive → Configure → Manage live profiles.</div>`;
-      return;
-    }
-
-    this._liveController?.destroy();
-    const controller = new TVTLiveCameraPlayer(this._hass, host, entity);
-    this._liveController = controller;
-    try {
-      await controller.start();
-    } catch (error) {
-      if (this._liveController !== controller || this._mode !== "live") return;
-      host.innerHTML = `<div class="empty">Could not render live entity ${$esc(entity)}: ${$esc(errorText(error))}</div>`;
-    }
+    this._attachHlsPlayer(host, this._playbackSession.playlist_url);
   }
 
   _setRecordingPlayerState(state, detail = {}) {
@@ -1318,8 +1019,6 @@ class TVTArchivePanel extends HTMLElement {
     }
     if (render) this._render();
   }
-
-  async _goLive() { clearTimeout(this._playbackRetryTimer); await this._stopPlaybackSession(); this._mode = "live"; this._persistState(); this._render(); }
 
   async _playRecording(automaticRetry = false) {
     clearTimeout(this._playbackRetryTimer);
