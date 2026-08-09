@@ -29,7 +29,7 @@ from typing import Any, Callable
 
 from native9008 import TVT9008Client
 
-APP_VERSION = "0.8.3"
+APP_VERSION = "0.8.4"
 BASE = Path(os.environ.get("TVT_ARCHIVE_BASE", "/opt/tvt-archive"))
 CONFIG_DIRECTORY = Path(
     os.environ.get(
@@ -388,29 +388,6 @@ def metadata_lock(camera_id: str) -> threading.Lock:
         return METADATA_LOCKS[camera_id]
 
 
-def _public_live_profiles(item: dict[str, Any]) -> list[dict[str, Any]]:
-    profiles = item.get("live_profiles")
-    if not isinstance(profiles, list):
-        # v0.6.x migration: fixed quality keys become ordinary named profiles.
-        streams = item.get("live_streams", {})
-        profiles = [
-            {"id": quality, "name": label, "entity_id": streams.get(quality),
-             "default": quality == "high"}
-            for quality, label in (("high", "High"), ("balanced", "Balanced"),
-                                   ("data_saver", "Data Saver"))
-            if isinstance(streams, dict) and streams.get(quality)
-        ]
-    return [
-        {
-            "id": str(profile.get("id", "")),
-            "name": str(profile.get("name", profile.get("id", "Live"))),
-            "entity_id": str(profile.get("entity_id", "")),
-            "default": bool(profile.get("default", False)),
-        }
-        for profile in profiles if isinstance(profile, dict) and profile.get("entity_id")
-    ]
-
-
 def safe_camera(camera_id: str) -> dict[str, Any]:
     item = camera(camera_id)
     return {
@@ -426,7 +403,6 @@ def safe_camera(camera_id: str) -> dict[str, Any]:
         "rtsp_stream_type": str(item.get("rtsp_stream_type", "main")),
         "rtsp_transport": str(item.get("rtsp_transport", "tcp")),
         "rtsp_fps": float(item.get("rtsp_fps", 25.0)),
-        "live_profiles": _public_live_profiles(item),
     }
 
 def list_cameras() -> list[dict[str, Any]]:
@@ -464,47 +440,6 @@ def normalize_host(value: Any) -> str:
     if not re.fullmatch(r"(?=.{1,253}\.?$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", host):
         raise ValueError("Camera host must be an IP address or valid hostname")
     return host
-
-
-def _normalize_live_profiles(payload: dict[str, Any], existing: dict[str, Any]) -> list[dict[str, Any]]:
-    supplied = payload.get("live_profiles")
-    if supplied is None:
-        if isinstance(existing.get("live_profiles"), list):
-            supplied = existing.get("live_profiles")
-        else:
-            streams = existing.get("live_streams", {})
-            supplied = [
-                {"id": quality, "name": label, "entity_id": streams.get(quality),
-                 "default": quality == "high"}
-                for quality, label in (("high", "High"), ("balanced", "Balanced"),
-                                       ("data_saver", "Data Saver"))
-                if isinstance(streams, dict) and streams.get(quality)
-            ]
-    if not isinstance(supplied, list):
-        raise ValueError("Live profiles must be a list")
-    profiles: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    default_seen = False
-    for position, raw in enumerate(supplied):
-        if not isinstance(raw, dict):
-            raise ValueError("Each live profile must be an object")
-        name = str(raw.get("name", "")).strip()
-        entity_id = str(raw.get("entity_id", "")).strip()
-        if not name or len(name) > 40:
-            raise ValueError("Live profile names must contain 1-40 characters")
-        if not re.fullmatch(r"camera\.[a-zA-Z0-9_]+", entity_id):
-            raise ValueError(f"Live profile {name!r} must reference a camera.* entity")
-        profile_id = str(raw.get("id") or camera_slug(name))[:48]
-        if not CAMERA_ID_RE.fullmatch(profile_id) or profile_id in seen:
-            profile_id = f"profile_{position + 1}"
-        seen.add(profile_id)
-        is_default = bool(raw.get("default", False)) and not default_seen
-        default_seen = default_seen or is_default
-        profiles.append({"id": profile_id, "name": name, "entity_id": entity_id,
-                         "default": is_default})
-    if profiles and not default_seen:
-        profiles[0]["default"] = True
-    return profiles
 
 
 def normalize_camera_definition(payload: dict[str, Any], existing: dict[str, Any] | None = None,
@@ -557,7 +492,6 @@ def normalize_camera_definition(payload: dict[str, Any], existing: dict[str, Any
         "rtsp_stream_type": rtsp_stream_type,
         "rtsp_transport": rtsp_transport,
         "rtsp_fps": rtsp_fps,
-        "live_profiles": _normalize_live_profiles(payload, existing),
     }
 
 
@@ -2295,7 +2229,7 @@ def cleanup_loop() -> None:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "TVTArchiveBridge/0.8.3"
+    server_version = "TVTArchiveBridge/0.8.4"
 
     def log_message(self, fmt: str, *args: Any) -> None:
         LOG.info("%s %s", self.address_string(), fmt % args)

@@ -11,7 +11,7 @@
       },
       "camera": {
         "title": "Add your first camera",
-        "description": "TVT Archive tests the camera before saving it. Native TCP/9008 is recommended and includes recorded audio. Recorded RTSP is a video fallback and opens one additional page for its advanced settings. You may optionally select one existing Home Assistant camera entity for Live view now; more can be added later through Configure.",
+        "description": "TVT Archive tests the camera before saving it. Native TCP/9008 is recommended and includes recorded audio. Recorded RTSP is a video fallback and opens one additional page for its advanced settings.",
         "data": {
           "name": "Camera name",
           "host": "Camera or recorder address",
@@ -19,8 +19,6 @@
           "port": "TVT TCP/9008 port",
           "username": "Username",
           "password": "Password",
-          "live_name": "Initial live profile name (optional)",
-          "live_entity": "Initial Home Assistant camera entity (optional)",
           "recording_audio": "Recording audio"
         }
       },
@@ -53,13 +51,12 @@
         "menu_options": {
           "add_camera": "Add camera",
           "edit_camera": "Edit camera",
-          "manage_live_profiles": "Manage live profiles",
           "remove_camera": "Remove camera"
         }
       },
       "add_camera": {
         "title": "Add camera",
-        "description": "Native TCP/9008 is recommended and includes recorded audio. Recorded RTSP is a video fallback and opens one additional page for its advanced settings. Live profiles are existing Home Assistant camera entities selected through this UI.",
+        "description": "Native TCP/9008 is recommended and includes recorded audio. Recorded RTSP is a video fallback and opens one additional page for its advanced settings.",
         "data": {
           "name": "Camera name",
           "host": "Camera or recorder address",
@@ -67,8 +64,6 @@
           "port": "TVT TCP/9008 port",
           "username": "Username",
           "password": "Password",
-          "live_name": "Initial live profile name (optional)",
-          "live_entity": "Initial Home Assistant camera entity (optional)",
           "recording_audio": "Recording audio"
         }
       },
@@ -89,60 +84,6 @@
           "username": "Username",
           "password": "New password",
           "recording_audio": "Recording audio"
-        }
-      },
-      "manage_live_profiles": {
-        "title": "Choose a camera",
-        "description": "Each camera has its own ordered list of live profiles.",
-        "data": {
-          "camera_id": "Camera"
-        }
-      },
-      "live_profile_menu": {
-        "title": "Manage live profiles",
-        "menu_options": {
-          "add_live_profile": "Add live profile",
-          "edit_live_profile": "Edit or reorder live profile",
-          "remove_live_profile": "Remove live profile"
-        }
-      },
-      "add_live_profile": {
-        "title": "Add live profile",
-        "description": "Select any existing Home Assistant camera entity. The profile name is what appears in TVT Archive's Live selector.",
-        "data": {
-          "live_name": "Profile name",
-          "live_entity": "Home Assistant camera entity",
-          "profile_position": "Position",
-          "profile_default": "Use as default live profile"
-        }
-      },
-      "edit_live_profile": {
-        "title": "Choose a live profile",
-        "data": {
-          "profile_id": "Live profile"
-        }
-      },
-      "edit_live_profile_details": {
-        "title": "Edit live profile",
-        "description": "Rename it, select a different existing camera entity, change its order, or make it the default.",
-        "data": {
-          "live_name": "Profile name",
-          "live_entity": "Home Assistant camera entity",
-          "profile_position": "Position",
-          "profile_default": "Use as default live profile"
-        }
-      },
-      "remove_live_profile": {
-        "title": "Choose a live profile to remove",
-        "data": {
-          "profile_id": "Live profile"
-        }
-      },
-      "confirm_remove_live_profile": {
-        "title": "Remove {profile_name}?",
-        "description": "This only removes the mapping from TVT Archive. It does not remove or disable the Home Assistant camera entity.",
-        "data": {
-          "confirm": "Confirm removal"
         }
       },
       "remove_camera": {
@@ -184,13 +125,11 @@
     "error": {
       "camera_connection_failed": "The bridge could not log in to or query this camera. Check its address, TVT TCP port, username, and password.",
       "camera_remove_failed": "The camera could not be removed. Wait for any active playback or download to finish and try again.",
-      "profile_update_failed": "The live profile list could not be saved.",
       "unknown": "Unexpected error"
     },
     "abort": {
       "cannot_connect": "Home Assistant could not connect to the TVT Archive bridge",
-      "camera_not_found": "The selected camera no longer exists",
-      "profile_not_found": "The selected live profile no longer exists"
+      "camera_not_found": "The selected camera no longer exists"
     }
   }
 }

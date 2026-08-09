@@ -113,8 +113,8 @@ class ReleaseStaticTests(unittest.TestCase):
         self.assertNotIn('prefix=f"stream-{camera_id}-"', bridge)
         self.assertNotIn('X-TVT-Archive-Quality', bridge)
         self.assertNotIn('self._error(500, str(error)', bridge)
-        self.assertIn('${$esc(this._selectedLiveProfile().name)}', panel)
-        self.assertIn('`${$esc(this._date)} ${$esc(selected)}`', panel)
+        self.assertNotIn("_selectedLiveProfile", panel)
+        self.assertIn('${$esc(this._date)} ${$esc(selected)}', panel)
 
     def test_panel_module_url_is_content_versioned(self) -> None:
         init_text = (ROOT / "custom_components/tvt_archive/__init__.py").read_text(encoding="utf-8")

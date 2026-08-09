@@ -16,8 +16,6 @@ from homeassistant.const import (
 from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
-    EntitySelector,
-    EntitySelectorConfig,
     TextSelector,
     TextSelectorConfig,
     TextSelectorType,
@@ -35,11 +33,6 @@ CONF_RTSP_PORT = "rtsp_port"
 CONF_RTSP_STREAM_TYPE = "rtsp_stream_type"
 CONF_RTSP_TRANSPORT = "rtsp_transport"
 CONF_RTSP_FPS = "rtsp_fps"
-CONF_LIVE_ENTITY = "live_entity"
-CONF_LIVE_NAME = "live_name"
-CONF_PROFILE_ID = "profile_id"
-CONF_PROFILE_DEFAULT = "profile_default"
-CONF_PROFILE_POSITION = "profile_position"
 
 BACKENDS = {
     "native_9008": "Native TCP/9008",
@@ -54,7 +47,6 @@ def _camera_schema(
     defaults: dict[str, Any] | None = None,
     *,
     editing: bool = False,
-    include_initial_live: bool = False,
 ) -> vol.Schema:
     """Common camera fields; RTSP-only details live on a second UI page."""
     defaults = defaults or {}
@@ -74,11 +66,6 @@ def _camera_schema(
         vol.Required(CONF_USERNAME, default=defaults.get(CONF_USERNAME, "admin")): str,
         password_key: password_field,
     }
-    if include_initial_live:
-        fields[vol.Optional(CONF_LIVE_NAME, default=defaults.get(CONF_LIVE_NAME, "High"))] = str
-        fields[vol.Optional(CONF_LIVE_ENTITY)] = EntitySelector(
-            EntitySelectorConfig(domain="camera")
-        )
     return vol.Schema(fields)
 
 
@@ -121,45 +108,6 @@ def _camera_defaults(camera: dict[str, Any]) -> dict[str, Any]:
         CONF_RTSP_TRANSPORT: camera.get("rtsp_transport", "tcp"),
         CONF_RTSP_FPS: camera.get("rtsp_fps", 25.0),
     }
-
-
-def _camera_payload(user_input: dict[str, Any], *, include_initial_live: bool) -> dict[str, Any]:
-    payload = dict(user_input)
-    live_entity = str(payload.pop(CONF_LIVE_ENTITY, "") or "").strip()
-    live_name = str(payload.pop(CONF_LIVE_NAME, "High") or "High").strip()
-    if include_initial_live and live_entity:
-        payload["live_profiles"] = [
-            {"name": live_name or "High", "entity_id": live_entity, "default": True}
-        ]
-    return payload
-
-
-def _profile_schema(
-    defaults: dict[str, Any] | None = None,
-    *,
-    max_position: int = 1,
-) -> vol.Schema:
-    defaults = defaults or {}
-    entity_default = defaults.get(CONF_LIVE_ENTITY)
-    entity_key = (
-        vol.Required(CONF_LIVE_ENTITY, default=entity_default)
-        if entity_default
-        else vol.Required(CONF_LIVE_ENTITY)
-    )
-    return vol.Schema(
-        {
-            vol.Required(CONF_LIVE_NAME, default=defaults.get(CONF_LIVE_NAME, "")): str,
-            entity_key: EntitySelector(EntitySelectorConfig(domain="camera")),
-            vol.Required(
-                CONF_PROFILE_POSITION,
-                default=int(defaults.get(CONF_PROFILE_POSITION, max_position)),
-            ): vol.All(vol.Coerce(int), vol.Range(min=1, max=max_position)),
-            vol.Required(
-                CONF_PROFILE_DEFAULT,
-                default=bool(defaults.get(CONF_PROFILE_DEFAULT, False)),
-            ): bool,
-        }
-    )
 
 
 class TVTArchiveConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -222,7 +170,7 @@ class TVTArchiveConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return self.async_abort(reason="cannot_connect")
         errors = {}
         if user_input is not None:
-            payload = _camera_payload(dict(user_input), include_initial_live=True)
+            payload = dict(user_input)
             if payload.get(CONF_ARCHIVE_BACKEND) == "rtsp":
                 self._pending_camera = payload
                 return await self.async_step_camera_rtsp()
@@ -239,7 +187,7 @@ class TVTArchiveConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
         return self.async_show_form(
             step_id="camera",
-            data_schema=_camera_schema(user_input, include_initial_live=True),
+            data_schema=_camera_schema(user_input),
             errors=errors,
         )
 
@@ -273,7 +221,6 @@ class TVTArchiveOptionsFlow(config_entries.OptionsFlow):
         self._entry = config_entry
         self._cameras: dict[str, dict[str, Any]] = {}
         self._selected_camera_id: str | None = None
-        self._selected_profile_id: str | None = None
         self._pending_camera: dict[str, Any] | None = None
 
     def _api(self) -> TVTArchiveApi:
@@ -308,16 +255,6 @@ class TVTArchiveOptionsFlow(config_entries.OptionsFlow):
             raise KeyError("camera_not_found")
         return self._cameras[self._selected_camera_id]
 
-    def _profiles(self) -> list[dict[str, Any]]:
-        profiles = self._selected_camera().get("live_profiles", [])
-        return [dict(profile) for profile in profiles if isinstance(profile, dict)]
-
-    async def _save_profiles(self, profiles: list[dict[str, Any]]) -> None:
-        await self._api().update_camera(
-            str(self._selected_camera_id), {"live_profiles": profiles}
-        )
-        await self._finish_change()
-
     async def async_step_init(self, user_input=None):
         try:
             await self._refresh_cameras()
@@ -325,13 +262,13 @@ class TVTArchiveOptionsFlow(config_entries.OptionsFlow):
             return self.async_abort(reason="cannot_connect")
         options = ["add_camera"]
         if self._cameras:
-            options.extend(["edit_camera", "manage_live_profiles", "remove_camera"])
+            options.extend(["edit_camera", "remove_camera"])
         return self.async_show_menu(step_id="init", menu_options=options)
 
     async def async_step_add_camera(self, user_input=None):
         errors = {}
         if user_input is not None:
-            payload = _camera_payload(dict(user_input), include_initial_live=True)
+            payload = dict(user_input)
             if payload.get(CONF_ARCHIVE_BACKEND) == "rtsp":
                 self._pending_camera = payload
                 return await self.async_step_add_camera_rtsp()
@@ -346,7 +283,7 @@ class TVTArchiveOptionsFlow(config_entries.OptionsFlow):
                 return self.async_create_entry(title="", data={})
         return self.async_show_form(
             step_id="add_camera",
-            data_schema=_camera_schema(user_input, include_initial_live=True),
+            data_schema=_camera_schema(user_input),
             errors=errors,
         )
 
@@ -435,162 +372,6 @@ class TVTArchiveOptionsFlow(config_entries.OptionsFlow):
         return self.async_show_form(
             step_id="edit_camera_rtsp",
             data_schema=_rtsp_schema(defaults),
-            errors=errors,
-        )
-
-    async def async_step_manage_live_profiles(self, user_input=None):
-        if not self._cameras:
-            await self._refresh_cameras()
-        if user_input is not None:
-            self._selected_camera_id = str(user_input[CONF_CAMERA_ID])
-            return await self.async_step_live_profile_menu()
-        choices = {
-            camera_id: str(camera.get("name", camera_id))
-            for camera_id, camera in self._cameras.items()
-        }
-        return self.async_show_form(
-            step_id="manage_live_profiles",
-            data_schema=vol.Schema({vol.Required(CONF_CAMERA_ID): vol.In(choices)}),
-        )
-
-    async def async_step_live_profile_menu(self, user_input=None):
-        try:
-            profiles = self._profiles()
-        except KeyError:
-            return self.async_abort(reason="camera_not_found")
-        options = ["add_live_profile"]
-        if profiles:
-            options.extend(["edit_live_profile", "remove_live_profile"])
-        return self.async_show_menu(step_id="live_profile_menu", menu_options=options)
-
-    async def async_step_add_live_profile(self, user_input=None):
-        profiles = self._profiles()
-        errors = {}
-        if user_input is not None:
-            position = int(user_input[CONF_PROFILE_POSITION]) - 1
-            is_default = bool(user_input[CONF_PROFILE_DEFAULT])
-            if is_default:
-                for profile in profiles:
-                    profile["default"] = False
-            profile = {
-                "name": str(user_input[CONF_LIVE_NAME]).strip(),
-                "entity_id": str(user_input[CONF_LIVE_ENTITY]),
-                "default": is_default,
-            }
-            profiles.insert(max(0, min(position, len(profiles))), profile)
-            try:
-                await self._save_profiles(profiles)
-            except TVTArchiveApiError:
-                errors["base"] = "profile_update_failed"
-            else:
-                return self.async_create_entry(title="", data={})
-        return self.async_show_form(
-            step_id="add_live_profile",
-            data_schema=_profile_schema(
-                user_input,
-                max_position=max(1, len(profiles) + 1),
-            ),
-            errors=errors,
-        )
-
-    async def async_step_edit_live_profile(self, user_input=None):
-        profiles = self._profiles()
-        if user_input is not None:
-            self._selected_profile_id = str(user_input[CONF_PROFILE_ID])
-            return await self.async_step_edit_live_profile_details()
-        choices = {
-            str(profile.get("id")): str(profile.get("name", profile.get("id")))
-            for profile in profiles
-        }
-        return self.async_show_form(
-            step_id="edit_live_profile",
-            data_schema=vol.Schema({vol.Required(CONF_PROFILE_ID): vol.In(choices)}),
-        )
-
-    async def async_step_edit_live_profile_details(self, user_input=None):
-        profiles = self._profiles()
-        index = next(
-            (i for i, profile in enumerate(profiles)
-             if str(profile.get("id")) == self._selected_profile_id),
-            None,
-        )
-        if index is None:
-            return self.async_abort(reason="profile_not_found")
-        profile = profiles[index]
-        defaults = {
-            CONF_LIVE_NAME: profile.get("name", ""),
-            CONF_LIVE_ENTITY: profile.get("entity_id"),
-            CONF_PROFILE_POSITION: index + 1,
-            CONF_PROFILE_DEFAULT: bool(profile.get("default", False)),
-        }
-        errors = {}
-        if user_input is not None:
-            profiles.pop(index)
-            is_default = bool(user_input[CONF_PROFILE_DEFAULT])
-            if is_default:
-                for item in profiles:
-                    item["default"] = False
-            updated = {
-                "id": profile.get("id"),
-                "name": str(user_input[CONF_LIVE_NAME]).strip(),
-                "entity_id": str(user_input[CONF_LIVE_ENTITY]),
-                "default": is_default,
-            }
-            position = max(0, min(int(user_input[CONF_PROFILE_POSITION]) - 1, len(profiles)))
-            profiles.insert(position, updated)
-            try:
-                await self._save_profiles(profiles)
-            except TVTArchiveApiError:
-                errors["base"] = "profile_update_failed"
-            else:
-                return self.async_create_entry(title="", data={})
-            defaults.update(user_input)
-        return self.async_show_form(
-            step_id="edit_live_profile_details",
-            data_schema=_profile_schema(defaults, max_position=max(1, len(self._profiles()))),
-            errors=errors,
-        )
-
-    async def async_step_remove_live_profile(self, user_input=None):
-        profiles = self._profiles()
-        if user_input is not None:
-            self._selected_profile_id = str(user_input[CONF_PROFILE_ID])
-            return await self.async_step_confirm_remove_live_profile()
-        choices = {
-            str(profile.get("id")): str(profile.get("name", profile.get("id")))
-            for profile in profiles
-        }
-        return self.async_show_form(
-            step_id="remove_live_profile",
-            data_schema=vol.Schema({vol.Required(CONF_PROFILE_ID): vol.In(choices)}),
-        )
-
-    async def async_step_confirm_remove_live_profile(self, user_input=None):
-        profiles = self._profiles()
-        profile = next(
-            (item for item in profiles if str(item.get("id")) == self._selected_profile_id),
-            None,
-        )
-        if profile is None:
-            return self.async_abort(reason="profile_not_found")
-        errors = {}
-        if user_input is not None:
-            if not user_input[CONF_CONFIRM]:
-                return await self.async_step_live_profile_menu()
-            profiles = [
-                item for item in profiles
-                if str(item.get("id")) != self._selected_profile_id
-            ]
-            try:
-                await self._save_profiles(profiles)
-            except TVTArchiveApiError:
-                errors["base"] = "profile_update_failed"
-            else:
-                return self.async_create_entry(title="", data={})
-        return self.async_show_form(
-            step_id="confirm_remove_live_profile",
-            data_schema=vol.Schema({vol.Required(CONF_CONFIRM, default=False): bool}),
-            description_placeholders={"profile_name": str(profile.get("name", "Live"))},
             errors=errors,
         )
 

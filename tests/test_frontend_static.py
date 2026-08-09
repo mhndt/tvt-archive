@@ -61,10 +61,7 @@ class FrontendStaticTests(unittest.TestCase):
         self.assertIn('this._state("opening")', PANEL)
         self.assertIn('video.controls = false', PANEL)
         self.assertIn('video.autoplay = false', PANEL)
-        recording_player = PANEL[
-            PANEL.index("class TVTFmp4Player"):PANEL.index("class TVTLiveCameraPlayer")
-        ]
-        self.assertNotIn('video.autoplay = true', recording_player)
+        self.assertNotIn('video.autoplay = true', PANEL)
         self.assertIn('this.startBufferSeconds - this.startBufferToleranceSeconds', PANEL)
         self.assertIn('ahead + 0.05 < startupThreshold', PANEL)
         prime = PANEL[PANEL.index("  prime() {"):PANEL.index("  async start() {")]
@@ -170,17 +167,16 @@ class FrontendStaticTests(unittest.TestCase):
         self.assertIn('this._playRecording(true)', PANEL)
         self.assertIn('await this._stopPlaybackSession()', PANEL)
 
-    def test_live_player_is_standalone_from_lovelace(self) -> None:
-        self.assertIn("class TVTLiveCameraPlayer", PANEL)
-        self.assertIn('type:"camera/capabilities"', PANEL)
-        self.assertIn('type:"camera/webrtc/get_client_config"', PANEL)
-        self.assertIn('type:"camera/webrtc/offer"', PANEL)
-        self.assertIn('type:"camera/webrtc/candidate"', PANEL)
-        self.assertIn('type:"camera/stream"', PANEL)
-        self.assertIn("/api/camera_proxy_stream/", PANEL)
-        self.assertNotIn("window.loadCardHelpers", PANEL)
-        self.assertNotIn('document.createElement("hui-picture-entity-card")', PANEL)
-        self.assertNotIn("helpers.createCardElement", PANEL)
+    def test_panel_is_recordings_only(self) -> None:
+        self.assertNotIn("TVTLiveCameraPlayer", PANEL)
+        self.assertNotIn("_selectedLiveProfile", PANEL)
+        self.assertNotIn("_effectiveLiveEntity", PANEL)
+        self.assertNotIn('id="go-live"', PANEL)
+        self.assertNotIn('id="live"', PANEL)
+        self.assertNotIn("Live now", PANEL)
+        self.assertNotIn("Default live profile", PANEL)
+        self.assertNotIn("manage_live_profiles", FLOW)
+        self.assertNotIn("live_profile", FLOW)
 
     def test_error_renderer_does_not_fall_back_to_object_object(self) -> None:
         self.assertIn("JSON.stringify(error)", PANEL)
