@@ -16,7 +16,7 @@ TVT Archive is also intended as an alternative to the vendor P2P/cloud access co
 TVT Archive intentionally handles recordings only. Configure live viewing separately in Home Assistant using any camera integration or dashboard card you prefer.
 
 > [!IMPORTANT]
-> TVT Archive is an experimental public release. Native TCP/9008 playback is verified on a TVT TD-C12. Other TVT devices and OEM/rebranded devices that implement TVT's private TCP/9008 protocol may be compatible, but they have not yet been verified. A device merely working in NVMS through ONVIF, RTSP, or a third-party SDK does not imply TVT Archive compatibility.
+> TVT Archive is an experimental public release. Native TCP/9008 playback is verified on a TVT TD-C12. Other TVT devices and OEM/rebranded devices that implement TVT's private protocol may be compatible, but they have not yet been verified.
 
 ## Features
 
@@ -213,7 +213,7 @@ Original-quality exports keep the stored H.264 video and convert recorded audio 
 | Status | Device / protocol |
 |---|---|
 | **Verified** | TVT TD-C12 — Native TCP/9008 |
-| **Potentially compatible** | Other TVT cameras, NVRs, DVRs, and OEM/rebranded devices implementing TVT's private TCP/9008 protocol |
+| **Potentially compatible** | Other TVT cameras, NVRs, DVRs, and OEM/rebranded devices implementing TVT's TCP/9008 protocol |
 
 Potential compatibility is not the same as verified support.
 
