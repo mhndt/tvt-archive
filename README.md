@@ -4,14 +4,14 @@
 
 # TVT Archive for Home Assistant
 
-TVT Archive adds a **Recordings** panel to Home Assistant for browsing, playing, and exporting recordings stored on compatible TVT and TVT-protocol cameras or recorders.
+TVT Archive adds a **Recordings** panel to Home Assistant for browsing, playing, and exporting recordings stored directly on the camera's SD card or recorder storage.
 
 It has two parts:
 
 - a small Docker bridge that talks to the camera archive on your local network;
 - a Home Assistant custom integration that provides the UI and proxies playback and downloads.
 
-TVT Archive is also intended as an alternative to the vendor P2P/cloud access commonly used by **SuperLive Plus**. When used locally, archive access stays between Home Assistant, the TVT Archive bridge, and the camera or recorder on your LAN, without depending on the vendor's external P2P infrastructure.
+TVT Archive is also intended as an alternative to the vendor P2P/cloud access commonly used by SuperLive Plus. When used locally, archive access stays between Home Assistant, the TVT Archive bridge, and the camera or recorder on your LAN, without depending on the vendor's external P2P infrastructure.
 
 TVT Archive intentionally handles recordings only. Configure live viewing separately in Home Assistant using any camera integration or dashboard card you prefer.
 
