@@ -4,7 +4,7 @@
 
 # TVT Archive for Home Assistant
 
-TVT Archive adds a **Recordings** panel to Home Assistant for browsing, playing, and exporting recordings stored on a TVT camera's built-in SD card.
+TVT Archive adds a **Recordings** panel to Home Assistant for browsing, playing, and exporting recordings stored on compatible TVT and TVT-protocol cameras or recorders.
 
 It has two parts:
 
@@ -14,7 +14,7 @@ It has two parts:
 TVT Archive intentionally handles recordings only. Configure live viewing separately in Home Assistant using any camera integration or dashboard card you prefer.
 
 > [!IMPORTANT]
-> TVT Archive is an experimental public release. Native TCP/9008 playback is verified on a TVT TD-C12. Other cameras and hardware need broader testing.
+> TVT Archive is an experimental public release. Native TCP/9008 playback is verified on a TVT TD-C12. Other TVT devices and OEM/rebranded devices that implement TVT's private TCP/9008 protocol may be compatible, but they have not yet been verified. A device merely working in NVMS through ONVIF, RTSP, or a third-party SDK does not imply TVT Archive compatibility.
 
 ## Features
 
@@ -207,9 +207,12 @@ Original browser playback uses short keyframe intervals for smooth one-second fr
 
 # Compatibility
 
-| Verified setup |
-|---|
-| TVT TD-C12 using Native TCP/9008 on an Intel HD Graphics 530 iGPU with Debian Trixie FFmpeg 7.1.5, libva 2.22.0, and Intel iHD 25.2.3 |
+| Status | Device / protocol |
+|---|---|
+| **Verified** | TVT TD-C12 using Native TCP/9008 on an Intel HD Graphics 530 iGPU with Debian Trixie FFmpeg 7.1.5, libva 2.22.0, and Intel iHD 25.2.3 |
+| **Potentially compatible** | Other TVT cameras, NVRs, DVRs, and OEM/rebranded devices that implement TVT's private TCP/9008 protocol |
+
+Potential compatibility is not the same as verified support. NVMS can communicate with devices through several mechanisms; a third-party camera that works in NVMS only through ONVIF, RTSP, or a vendor SDK is not necessarily compatible with TVT Archive. Compatibility reports for additional TVT-protocol devices are welcome.
 
 **Recording audio:** Auto learns positive archive-audio capability separately for each camera. For an unknown camera, startup uses the recording's own video timestamps during the existing timing window instead of assuming wall-clock delivery is real time. If audio appears later, that positive capability is remembered for future playback. Always expect audio provisions the browser audio track immediately; Disabled forces video-only playback.
 
@@ -249,7 +252,7 @@ The first implementation used recorded RTSP. It could retrieve stored H.264 vide
 
 A later prototype used the vendor's Linux SDK. It proved the SD archive contained H.264 video and G.711 A-law audio, but it also tied the project to a platform-specific vendor library and made deployment harder, so that approach was retired.
 
-Network analysis of NVMS showed one TCP connection to port `9008` carrying login, metadata, video, audio, and playback continuation. TVT Archive implements the archive operations it needs directly, without requiring NVMS or the older SDK at runtime.
+Network analysis of NVMS communicating with the tested TVT TD-C12 showed one TCP connection to port `9008` carrying login, metadata, video, audio, and playback continuation. TVT Archive reimplements the archive/playback subset of TVT's private TCP/9008 protocol that it needs, without requiring NVMS or the older SDK at runtime.
 
 More technical detail is available in:
 
