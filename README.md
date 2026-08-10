@@ -35,13 +35,33 @@ TVT Archive intentionally handles recordings only. Configure live viewing separa
 
 # Installation
 
+TVT Archive has two parts:
+
+1. The Docker bridge
+2. The Home Assistant integration
+
+The bridge can run on any machine on your LAN with Docker and Docker Compose v2.
+
 ## 1. Start the Docker bridge
 
-Clone the repository and inspect the Compose files before running them:
+Clone the repository and run the setup script:
 
 ```bash
 git clone https://github.com/mhndt/tvt-archive.git
 cd tvt-archive
+chmod +x setup.sh
+./setup.sh
+```
+
+You can clone TVT Archive wherever you prefer. Persistent data is stored in Docker named volumes.
+
+The setup script detects supported hardware acceleration, starts the bridge, and prints the **Bridge URL** and **Access token** you will need in Home Assistant.
+
+### Manual setup
+
+If you prefer to configure Docker Compose manually, copy the example environment file first:
+
+```bash
 cp .env.example .env
 ```
 
@@ -52,9 +72,9 @@ The Compose files are kept together here:
 - [NVIDIA override](compose/nvidia.yaml)
 - [Local source-build override](compose/build-local.yaml) — development only
 
-The base Compose file defines the container. Choose at most one hardware override. Docker merges the selected files into one container configuration; it does not create multiple TVT Archive containers.
+The base Compose file defines the container. Choose at most one hardware override.
 
-### CPU-only
+#### CPU-only
 
 Leave this in `.env`:
 
@@ -68,7 +88,7 @@ Then start the bridge:
 docker compose up -d
 ```
 
-### Intel or AMD GPU
+#### Intel or AMD GPU
 
 Find the group IDs for the render and video devices:
 
@@ -89,7 +109,7 @@ Start the bridge:
 docker compose up -d
 ```
 
-### NVIDIA GPU
+#### NVIDIA GPU
 
 Install NVIDIA Container Toolkit on the Docker host, then set this in `.env`:
 
@@ -105,7 +125,7 @@ docker compose up -d
 
 The bridge tests complete decode, resize, and encode pipelines. A GPU path is selected only when the actual pipeline works; otherwise it falls back to another working path or software H.264.
 
-### Get the bridge URL and token
+#### Get the bridge URL and token manually
 
 The bridge URL is the Docker host's LAN address on port `8099`:
 
@@ -123,15 +143,6 @@ Check the selected playback accelerator:
 
 ```bash
 docker exec tvt-archive /opt/tvt-archive/entrypoint.sh accelerator-info
-```
-
-### Optional setup script
-
-The manual Compose method above is recommended because every setting stays visible. The optional [script](setup.sh) performs the same steps and prints the bridge URL and token:
-
-```bash
-chmod +x setup.sh
-./setup.sh
 ```
 
 ## 2. Install the Home Assistant integration
