@@ -2238,13 +2238,11 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlsplit(self.path)
         return parsed, urllib.parse.parse_qs(parsed.query)
 
-    def _authorized(self, query: dict[str, list[str]]) -> bool:
-        supplied = ""
+    def _authorized(self, _query: dict[str, list[str]]) -> bool:
         header = self.headers.get("Authorization", "")
-        if header.startswith("Bearer "):
-            supplied = header[7:]
-        elif query.get("token"):
-            supplied = query["token"][0]
+        if not header.startswith("Bearer "):
+            return False
+        supplied = header[7:]
         return bool(supplied) and hmac.compare_digest(supplied, TOKEN)
 
     def _headers(self) -> None:

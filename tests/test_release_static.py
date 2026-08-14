@@ -116,6 +116,23 @@ class ReleaseStaticTests(unittest.TestCase):
         self.assertNotIn("_selectedLiveProfile", panel)
         self.assertIn('${$esc(this._date)} ${$esc(selected)}', panel)
 
+    def test_bridge_auth_is_header_only(self) -> None:
+        bridge = (ROOT / "host" / "app" / "bridge.py").read_text(encoding="utf-8")
+        self.assertIn('self.headers.get("Authorization", "")', bridge)
+        self.assertIn('header.startswith("Bearer ")', bridge)
+        self.assertNotIn('query.get("token")', bridge)
+        self.assertNotIn('query["token"]', bridge)
+
+    def test_privileged_release_actions_are_sha_pinned(self) -> None:
+        text = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        action_lines = [line.strip() for line in text.splitlines() if "uses:" in line]
+        self.assertEqual(len(action_lines), 8)
+        for line in action_lines:
+            reference = line.split("@", 1)[1].split()[0]
+            self.assertEqual(len(reference), 40, line)
+            self.assertTrue(all(char in "0123456789abcdef" for char in reference), line)
+            self.assertIn(" # v", line)
+
     def test_panel_module_url_is_content_versioned(self) -> None:
         init_text = (ROOT / "custom_components/tvt_archive/__init__.py").read_text(encoding="utf-8")
         const_text = (ROOT / "custom_components/tvt_archive/const.py").read_text(encoding="utf-8")

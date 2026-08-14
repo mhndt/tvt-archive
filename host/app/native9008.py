@@ -49,6 +49,9 @@ CONFIG_REQUEST_ID = 0x0000FFFF
 MAX_NORMAL_FRAME = 32 * 1024 * 1024
 MAX_FRAGMENTED_OBJECT = 32 * 1024 * 1024
 MAX_FRAGMENT_CHUNKS = 4096
+MAX_INFLIGHT_FRAGMENT_OBJECTS = 16
+MAX_INFLIGHT_FRAGMENT_BYTES = 64 * 1024 * 1024
+FRAGMENT_ASSEMBLY_TTL_SECONDS = 60.0
 MEDIA_HEADER_SIZE = 40
 AUDIO_PREFIX_SIZE = 4
 AUDIO_MARKER = b"\x01\x22\x00\x01"
@@ -74,6 +77,8 @@ class FragmentAssembly:
     chunk_count: int
     total_length: int
     chunks: dict[int, bytes]
+    received_bytes: int = 0
+    updated_at: float = 0.0
 
 
 @dataclass
@@ -127,6 +132,7 @@ class ApplicationObjectReader:
         self.stream = stream
         self.buffer = bytearray()
         self.fragments: dict[int, FragmentAssembly] = {}
+        self.fragment_bytes = 0
         self.is_socket = hasattr(stream, "recv")
         self.fragmented_objects = 0
         self.fragment_chunks = 0
@@ -144,8 +150,20 @@ class ApplicationObjectReader:
         del self.buffer[:size]
         return output
 
+    def _discard_fragment(self, object_id: int) -> None:
+        assembly = self.fragments.pop(object_id, None)
+        if assembly is not None:
+            self.fragment_bytes = max(0, self.fragment_bytes - assembly.received_bytes)
+
+    def _expire_fragments(self, now: float | None = None) -> None:
+        current = time.monotonic() if now is None else now
+        for object_id, assembly in list(self.fragments.items()):
+            if current - assembly.updated_at > FRAGMENT_ASSEMBLY_TTL_SECONDS:
+                self._discard_fragment(object_id)
+
     def read_object(self) -> tuple[bytes, bool, int | None] | None:
         while True:
+            self._expire_fragments()
             header = self.read_exact(8)
             if header[:4] != OUTER_MAGIC:
                 raise TVT9008Error(f"Unexpected outer magic {header[:4]!r}")
@@ -170,22 +188,49 @@ class ApplicationObjectReader:
                 raise TVT9008Error(f"Fragment {object_id} has invalid total length")
             if not (1 <= chunk_length <= MAX_FRAGMENTED_OBJECT):
                 raise TVT9008Error(f"Fragment {object_id} has invalid chunk length")
+
             chunk = self.read_exact(chunk_length)
+            now = time.monotonic()
             assembly = self.fragments.get(object_id)
             if assembly is None:
-                assembly = FragmentAssembly(chunk_count, total_length, {})
+                if len(self.fragments) >= MAX_INFLIGHT_FRAGMENT_OBJECTS:
+                    raise TVT9008Error("Too many incomplete fragmented objects")
+                assembly = FragmentAssembly(chunk_count, total_length, {}, updated_at=now)
                 self.fragments[object_id] = assembly
             elif assembly.chunk_count != chunk_count or assembly.total_length != total_length:
+                self._discard_fragment(object_id)
                 raise TVT9008Error(f"Fragment metadata changed for object {object_id}")
+
+            existing = assembly.chunks.get(chunk_index)
+            if existing is not None:
+                assembly.updated_at = now
+                self.fragment_chunks += 1
+                if existing != chunk:
+                    self._discard_fragment(object_id)
+                    raise TVT9008Error(f"Fragment {object_id} duplicate chunk {chunk_index} changed")
+                continue
+
+            retained = assembly.received_bytes + chunk_length
+            if retained > MAX_FRAGMENTED_OBJECT:
+                self._discard_fragment(object_id)
+                raise TVT9008Error(f"Fragment {object_id} retained too many bytes")
+            if self.fragment_bytes + chunk_length > MAX_INFLIGHT_FRAGMENT_BYTES:
+                self._discard_fragment(object_id)
+                raise TVT9008Error("In-flight fragment memory limit exceeded")
+
             assembly.chunks[chunk_index] = chunk
+            assembly.received_bytes = retained
+            assembly.updated_at = now
+            self.fragment_bytes += chunk_length
             self.fragment_chunks += 1
             if len(assembly.chunks) != assembly.chunk_count:
                 continue
             try:
                 payload = b"".join(assembly.chunks[index] for index in range(1, chunk_count + 1))
             except KeyError as exc:
+                self._discard_fragment(object_id)
                 raise TVT9008Error(f"Fragment object {object_id} is incomplete") from exc
-            del self.fragments[object_id]
+            self._discard_fragment(object_id)
             if len(payload) < total_length:
                 raise TVT9008Error(f"Fragment object {object_id} reconstructed short")
             self.fragmented_objects += 1
