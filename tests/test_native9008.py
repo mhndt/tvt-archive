@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import struct
 import sys
@@ -31,6 +32,96 @@ def video_frame(timestamp_us: int) -> native9008.InnerFrame:
 
 
 class NativePlaybackTests(unittest.TestCase):
+    @staticmethod
+    def _fragment(
+        object_id: int,
+        chunk_count: int,
+        total_length: int,
+        chunk_index: int,
+        chunk: bytes,
+    ) -> bytes:
+        return (
+            native9008.OUTER_MAGIC
+            + struct.pack("<I", 0xFFFFFFFF)
+            + struct.pack(
+                "<IIIIII",
+                object_id,
+                chunk_count,
+                total_length,
+                chunk_index,
+                len(chunk),
+                0,
+            )
+            + chunk
+        )
+
+    def test_fragment_padding_remains_compatible(self) -> None:
+        reader = native9008.ApplicationObjectReader(
+            io.BytesIO(self._fragment(1, 1, 5, 1, b"helloPAD"))
+        )
+        payload, fragmented, object_id = reader.read_object()
+        self.assertEqual(payload, b"hello")
+        self.assertTrue(fragmented)
+        self.assertEqual(object_id, 1)
+        self.assertEqual(reader.fragment_bytes, 0)
+
+    def test_duplicate_fragment_does_not_double_count_memory(self) -> None:
+        stream = (
+            self._fragment(1, 2, 4, 1, b"ab")
+            + self._fragment(1, 2, 4, 1, b"ab")
+            + self._fragment(1, 2, 4, 2, b"cd")
+        )
+        reader = native9008.ApplicationObjectReader(io.BytesIO(stream))
+        payload, _, _ = reader.read_object()
+        self.assertEqual(payload, b"abcd")
+        self.assertEqual(reader.fragment_bytes, 0)
+        self.assertEqual(reader.fragment_chunks, 3)
+
+    def test_conflicting_duplicate_fragment_is_rejected_and_released(self) -> None:
+        stream = self._fragment(1, 2, 4, 1, b"ab") + self._fragment(1, 2, 4, 1, b"xy")
+        reader = native9008.ApplicationObjectReader(io.BytesIO(stream))
+        with self.assertRaisesRegex(native9008.TVT9008Error, "duplicate chunk"):
+            reader.read_object()
+        self.assertEqual(reader.fragment_bytes, 0)
+        self.assertFalse(reader.fragments)
+
+    def test_fragment_global_memory_limit_is_enforced(self) -> None:
+        original = native9008.MAX_INFLIGHT_FRAGMENT_BYTES
+        native9008.MAX_INFLIGHT_FRAGMENT_BYTES = 4
+        try:
+            stream = self._fragment(1, 2, 4, 1, b"abc") + self._fragment(2, 2, 4, 1, b"def")
+            reader = native9008.ApplicationObjectReader(io.BytesIO(stream))
+            with self.assertRaisesRegex(native9008.TVT9008Error, "memory limit"):
+                reader.read_object()
+            self.assertLessEqual(reader.fragment_bytes, 4)
+        finally:
+            native9008.MAX_INFLIGHT_FRAGMENT_BYTES = original
+
+    def test_fragment_object_count_limit_is_enforced(self) -> None:
+        original = native9008.MAX_INFLIGHT_FRAGMENT_OBJECTS
+        native9008.MAX_INFLIGHT_FRAGMENT_OBJECTS = 1
+        try:
+            stream = self._fragment(1, 2, 4, 1, b"a") + self._fragment(2, 2, 4, 1, b"b")
+            reader = native9008.ApplicationObjectReader(io.BytesIO(stream))
+            with self.assertRaisesRegex(native9008.TVT9008Error, "Too many incomplete"):
+                reader.read_object()
+        finally:
+            native9008.MAX_INFLIGHT_FRAGMENT_OBJECTS = original
+
+    def test_stale_fragment_memory_is_expired(self) -> None:
+        reader = native9008.ApplicationObjectReader(io.BytesIO())
+        reader.fragments[7] = native9008.FragmentAssembly(
+            2,
+            4,
+            {1: b"ab"},
+            2,
+            time.monotonic() - 120,
+        )
+        reader.fragment_bytes = 2
+        reader._expire_fragments()
+        self.assertFalse(reader.fragments)
+        self.assertEqual(reader.fragment_bytes, 0)
+
     def test_continuation_every_25_video_frames_and_no_0907(self) -> None:
         client = native9008.TVT9008Client("camera", 9008, "user", "password")
         sent: list[tuple[int, int, bytes]] = []
