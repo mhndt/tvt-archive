@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- The bridge accepts the access token only in the `Authorization: Bearer` header. Query-string tokens are rejected.
+- Bound incomplete native TCP/9008 fragment reassembly by object count, memory, and age.
+- Pin release workflow actions to commit SHAs.
+
 ## 0.8.4
 
 ### Recordings-only scope

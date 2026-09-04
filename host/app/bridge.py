@@ -2228,6 +2228,12 @@ def cleanup_loop() -> None:
         time.sleep(30)
 
 
+def authorized(header: str) -> bool:
+    if not header.startswith("Bearer "):
+        return False
+    return hmac.compare_digest(header[7:], TOKEN)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "TVTArchiveBridge/0.8.4"
 
@@ -2238,14 +2244,8 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlsplit(self.path)
         return parsed, urllib.parse.parse_qs(parsed.query)
 
-    def _authorized(self, query: dict[str, list[str]]) -> bool:
-        supplied = ""
-        header = self.headers.get("Authorization", "")
-        if header.startswith("Bearer "):
-            supplied = header[7:]
-        elif query.get("token"):
-            supplied = query["token"][0]
-        return bool(supplied) and hmac.compare_digest(supplied, TOKEN)
+    def _authorized(self) -> bool:
+        return authorized(self.headers.get("Authorization", ""))
 
     def _headers(self) -> None:
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -2524,7 +2524,7 @@ class Handler(BaseHTTPRequestHandler):
                         "active_jobs": sum(j.status in ("queued", "running") for j in JOBS.values()),
                         "active_playback_sessions": sum(x.status in ("queued", "running", "playing") for x in SESSIONS.values())},
                        head_only=head_only); return
-        if not self._authorized(query):
+        if not self._authorized():
             self._error(401, "Missing or invalid access token", head_only=head_only); return
         try:
             if path == "/api/player/hls.js":
@@ -2576,8 +2576,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_HEAD(self) -> None: self._route_get(head_only=True)
 
     def do_POST(self) -> None:
-        parsed, query = self._parse()
-        if not self._authorized(query):
+        parsed, _ = self._parse()
+        if not self._authorized():
             self._error(401, "Missing or invalid access token")
             return
         path = parsed.path.rstrip("/")
@@ -2605,8 +2605,8 @@ class Handler(BaseHTTPRequestHandler):
             self._error(500, "Internal bridge error")
 
     def do_PUT(self) -> None:
-        parsed, query = self._parse()
-        if not self._authorized(query):
+        parsed, _ = self._parse()
+        if not self._authorized():
             self._error(401, "Missing or invalid access token")
             return
         path = parsed.path.rstrip("/")
@@ -2625,8 +2625,8 @@ class Handler(BaseHTTPRequestHandler):
             self._error(500, "Internal bridge error")
 
     def do_DELETE(self) -> None:
-        parsed, query = self._parse()
-        if not self._authorized(query):
+        parsed, _ = self._parse()
+        if not self._authorized():
             self._error(401, "Missing or invalid access token")
             return
         path = parsed.path.rstrip("/")

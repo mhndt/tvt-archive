@@ -56,6 +56,12 @@ class BridgeTests(unittest.TestCase):
         bridge.PLAYBACK_EXECUTOR.shutdown(wait=False, cancel_futures=True)
         TEMP.cleanup()
 
+    def test_authorization_requires_bearer_header(self) -> None:
+        self.assertTrue(bridge.authorized("Bearer test-token"))
+        self.assertFalse(bridge.authorized("Bearer wrong"))
+        self.assertFalse(bridge.authorized("test-token"))
+        self.assertFalse(bridge.authorized(""))
+
     def test_job_public_reports_real_percent(self) -> None:
         job = bridge.Job("a" * 32, "front_door", "cache", {"duration": 60})
         job.status = "running"

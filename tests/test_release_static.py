@@ -116,6 +116,16 @@ class ReleaseStaticTests(unittest.TestCase):
         self.assertNotIn("_selectedLiveProfile", panel)
         self.assertIn('${$esc(this._date)} ${$esc(selected)}', panel)
 
+    def test_privileged_release_actions_are_sha_pinned(self) -> None:
+        text = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        action_lines = [line.strip() for line in text.splitlines() if "uses:" in line]
+        self.assertTrue(action_lines)
+        for line in action_lines:
+            reference = line.split("@", 1)[1].split()[0]
+            self.assertEqual(len(reference), 40, line)
+            self.assertTrue(all(char in "0123456789abcdef" for char in reference), line)
+            self.assertRegex(line, r" # v\d+\.\d+\.\d+$")
+
     def test_panel_module_url_is_content_versioned(self) -> None:
         init_text = (ROOT / "custom_components/tvt_archive/__init__.py").read_text(encoding="utf-8")
         const_text = (ROOT / "custom_components/tvt_archive/const.py").read_text(encoding="utf-8")
