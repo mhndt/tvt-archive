@@ -6,6 +6,7 @@ from common import CAMERA, TOKEN, URL
 from homeassistant import config_entries
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.helpers.service_info.hassio import HassioServiceInfo
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.tvt_archive.api import TVTArchiveApiError, TVTArchiveAuthError
@@ -169,3 +170,46 @@ async def test_options_remove_camera(hass: HomeAssistant, api: AsyncMock) -> Non
     assert result["type"] is FlowResultType.CREATE_ENTRY
     api.delete_camera.assert_awaited_once_with("front")
     assert entry.title == "TVT Archive (0 cameras)"
+
+
+async def test_addon_discovery(hass: HomeAssistant, api: AsyncMock) -> None:
+    api.cameras.return_value = {"cameras": [CAMERA]}
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_HASSIO},
+        data=HassioServiceInfo(
+            config={"host": "a1b2c3d4-tvt-archive", "port": 8099, "token": "addon-token"},
+            name="TVT Archive",
+            slug="tvt_archive",
+            uuid="1234",
+        ),
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "hassio_confirm"
+    with patch("custom_components.tvt_archive.async_setup_entry", return_value=True):
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"] == {"url": "http://a1b2c3d4-tvt-archive:8099", "token": "addon-token"}
+
+
+async def test_addon_discovery_updates_existing_token(hass: HomeAssistant, api: AsyncMock) -> None:
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        unique_id="http://a1b2c3d4-tvt-archive:8099",
+        data={"url": "http://a1b2c3d4-tvt-archive:8099", "token": "old"},
+    )
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_HASSIO},
+        data=HassioServiceInfo(
+            config={"host": "a1b2c3d4-tvt-archive", "port": 8099, "token": "new"},
+            name="TVT Archive",
+            slug="tvt_archive",
+            uuid="1234",
+        ),
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+    assert entry.data["token"] == "new"

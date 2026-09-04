@@ -1,0 +1,25 @@
+name: TVT Archive
+version: "0.8.4"
+slug: tvt_archive
+description: Play and export the recordings on TVT camera SD cards
+url: https://github.com/mhndt/tvt-archive
+arch:
+  - amd64
+  - aarch64
+image: ghcr.io/mhndt/tvt-archive
+init: false
+startup: services
+hassio_api: true
+hassio_role: default
+discovery:
+  - tvt_archive
+devices:
+  - /dev/dri
+environment:
+  TVT_ARCHIVE_CONFIG_DIRECTORY: /data/config
+  STATE_DIRECTORY: /data/state
+  CACHE_DIRECTORY: /data/cache
+options:
+  encoder: software
+schema:
+  encoder: list(software|vaapi)

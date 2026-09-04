@@ -20,6 +20,7 @@ from homeassistant.helpers.selector import (
     TextSelectorConfig,
     TextSelectorType,
 )
+from homeassistant.helpers.service_info.hassio import HassioServiceInfo
 
 from .api import TVTArchiveApi, TVTArchiveApiError, TVTArchiveAuthError
 from .const import CONF_TOKEN, DOMAIN
@@ -119,6 +120,35 @@ class TVTArchiveConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 }
             ),
             errors=errors,
+        )
+
+    async def async_step_hassio(self, discovery_info: HassioServiceInfo):
+        config = discovery_info.config
+        url = f"http://{config['host']}:{config['port']}"
+        token = str(config["token"])
+        await self.async_set_unique_id(url.lower())
+        self._abort_if_unique_id_configured(updates={CONF_URL: url, CONF_TOKEN: token})
+        self._url, self._token = url, token
+        self.context["title_placeholders"] = {"name": discovery_info.name}
+        return await self.async_step_hassio_confirm()
+
+    async def async_step_hassio_confirm(self, user_input=None):
+        if self._url is None or self._token is None:
+            return self.async_abort(reason="cannot_connect")
+        if user_input is None:
+            return self.async_show_form(step_id="hassio_confirm")
+        api = TVTArchiveApi(async_get_clientsession(self.hass), self._url, self._token)
+        try:
+            await api.health()
+            cameras = await api.cameras()
+        except Exception:
+            return self.async_abort(reason="cannot_connect")
+        count = len(cameras.get("cameras", []))
+        if count == 0:
+            self._api = api
+            return await self.async_step_camera()
+        return self.async_create_entry(
+            title=_entry_title(count), data={CONF_URL: self._url, CONF_TOKEN: self._token}
         )
 
     async def async_step_reauth(self, entry_data: Mapping[str, Any]):

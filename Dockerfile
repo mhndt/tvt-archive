@@ -66,7 +66,6 @@ COPY --chown=root:root host/app/native9008.py ./app/native9008.py
 COPY --chown=root:root host/app/archive_capture.py ./app/archive_capture.py
 RUN chmod 0755 ./app/bridge.py ./app/native9008.py ./app/archive_capture.py
 
-USER 10001:10001
 EXPOSE 8099
 ENTRYPOINT ["tvt-archive"]
 CMD ["run"]

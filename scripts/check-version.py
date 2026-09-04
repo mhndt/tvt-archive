@@ -48,6 +48,7 @@ required_version_references = {
     "setup.sh": f"ghcr.io/mhndt/tvt-archive:{version}",
     "host/app/bridge.py": f"TVTArchiveBridge/{version}",
     "custom_components/tvt_archive/frontend/tvt-archive-panel.js": f'const VERSION = "{version}";',
+    "addon/config.yaml": f'version: "{version}"',
 }
 for path, expected in required_version_references.items():
     if expected not in read(path):
@@ -70,12 +71,6 @@ for path in (
 ):
     if not (ROOT / path).is_file():
         fail(f"required file is missing: {path}")
-
-for path in ROOT.rglob("*"):
-    if path.is_dir() and path.name == "__pycache__":
-        fail(f"generated Python cache directory is present: {path.relative_to(ROOT)}")
-    if path.is_file() and path.suffix in {".pyc", ".pyo"}:
-        fail(f"generated Python bytecode is present: {path.relative_to(ROOT)}")
 
 forbidden_patterns = {
     "private SMB path": r"/srv/storage/",

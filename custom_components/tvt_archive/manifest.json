@@ -1,6 +1,7 @@
 {
-  "domain": "tvt_archive",
-  "name": "TVT Archive",
+  "after_dependencies": [
+    "hassio"
+  ],
   "codeowners": [
     "@mhndt"
   ],
@@ -10,9 +11,11 @@
     "http"
   ],
   "documentation": "https://github.com/mhndt/tvt-archive",
+  "domain": "tvt_archive",
   "integration_type": "hub",
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/mhndt/tvt-archive/issues",
+  "name": "TVT Archive",
   "requirements": [],
   "version": "0.8.4"
 }

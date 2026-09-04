@@ -27,6 +27,10 @@
         "data": {
           "token": "Access token"
         }
+      },
+      "hassio_confirm": {
+        "title": "TVT Archive add-on",
+        "description": "Set up Home Assistant to use the TVT Archive add-on?"
       }
     },
     "error": {
@@ -39,7 +43,8 @@
       "already_configured": "This bridge is already configured",
       "cannot_connect": "Home Assistant could not connect to the TVT Archive bridge",
       "reauth_successful": "Access token updated"
-    }
+    },
+    "flow_title": "{name}"
   },
   "options": {
     "step": {

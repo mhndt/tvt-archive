@@ -1,0 +1,4 @@
+configuration:
+  encoder:
+    name: Encoder
+    description: software uses x264. vaapi encodes on an Intel or AMD GPU through /dev/dri.

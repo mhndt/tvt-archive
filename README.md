@@ -21,10 +21,19 @@ A small bridge container on your network reads the recordings straight from the 
 
 ## Prerequisites
 
-- The bridge running on a machine on the camera's network. See below.
+- The bridge, either as the add-on or as a container on a machine on the camera's network. See below.
 - The camera's local address and an account that is allowed to play back recordings.
 
-### Bridge
+### Bridge as an add-on
+
+On Home Assistant OS or Supervised, add this repository to the add-on store and install TVT Archive:
+
+[![Add repository to the add-on store](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fmhndt%2Ftvt-archive)
+
+Start it. Home Assistant discovers it once the integration is installed, so there is no URL or token to copy. Set the `encoder` option to `vaapi` to encode on an Intel or AMD GPU.
+
+<details>
+<summary>Bridge with Docker Compose (Home Assistant Container or Core)</summary>
 
 The bridge needs Docker with Compose v2 on an x86-64 or arm64 host.
 
@@ -48,15 +57,7 @@ Update the bridge:
 git pull && docker compose pull && docker compose up -d
 ```
 
-<details>
-<summary>Manual Compose setup</summary>
-
-```bash
-cp .env.example .env
-docker compose up -d
-```
-
-For VAAPI set `COMPOSE_FILE=compose/compose.yaml:compose/vaapi.yaml`, `TVT_ARCHIVE_ENCODER=vaapi`, and the group IDs from `stat -c %g /dev/dri/renderD128 /dev/dri/card0`.
+To configure by hand instead of `setup.sh`, copy `.env.example` to `.env` and run `docker compose up -d`. For VAAPI set `COMPOSE_FILE=compose/compose.yaml:compose/vaapi.yaml`, `TVT_ARCHIVE_ENCODER=vaapi`, and the group IDs from `stat -c %g /dev/dri/renderD128 /dev/dri/card0`.
 
 </details>
 
@@ -72,7 +73,9 @@ To install manually, copy `custom_components/tvt_archive` into your `config/cust
 
 ## Configure
 
-Go to Settings > Devices & services > Add integration and search for TVT Archive.
+With the add-on, Settings > Devices & services shows TVT Archive as discovered. Press Configure.
+
+With Docker Compose, choose Add integration, search for TVT Archive, and enter:
 
 | Field | Description |
 |---|---|
@@ -122,7 +125,7 @@ Exports always contain the original video with audio converted to AAC.
 
 # Bridge settings
 
-Settings live in `config.json` in the `tvt-archive-config` volume. Cameras are managed from Home Assistant; the optional `processing` keys are:
+Settings live in `config.json` in the `tvt-archive-config` volume, or in the add-on's data directory. Cameras are managed from Home Assistant; the optional `processing` keys are:
 
 | Key | Default | Description |
 |---|---|---|

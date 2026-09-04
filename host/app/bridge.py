@@ -15,6 +15,7 @@ import os
 import re
 import secrets
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -22,6 +23,7 @@ import threading
 import time
 import traceback
 import urllib.parse
+import urllib.request
 import uuid
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -46,6 +48,34 @@ INDEX = STATE / "index"
 LOGS = STATE / "logs"
 CAPTURE_HELPER = BASE / "app" / "archive_capture.py"
 HLS_JS_PATH = BASE / "static" / "hls.min.js"
+OPTIONS_PATH = Path("/data/options.json")
+
+
+def drop_privileges(uid: int = 10001, gid: int = 10001) -> None:
+    """When started as root (Home Assistant add-on), own the data and become uid 10001."""
+    if not hasattr(os, "geteuid") or os.geteuid() != 0:
+        return
+    for directory in (CONFIG_DIRECTORY, STATE, CACHE):
+        directory.mkdir(parents=True, exist_ok=True)
+        os.chown(directory, uid, gid)
+        for root, dirs, files in os.walk(directory):
+            for name in dirs + files:
+                os.chown(os.path.join(root, name), uid, gid)
+    groups = set()
+    for device in (
+        os.environ.get("TVT_ARCHIVE_DRI_DEVICE", "/dev/dri/renderD128"),
+        "/dev/dri/card0",
+    ):
+        try:
+            groups.add(os.stat(device).st_gid)
+        except OSError:
+            pass
+    os.setgroups(sorted(groups))
+    os.setgid(gid)
+    os.setuid(uid)
+
+
+drop_privileges()
 
 for directory in (CACHE, WORK, INDEX, LOGS):
     directory.mkdir(parents=True, exist_ok=True)
@@ -117,6 +147,9 @@ CONFIG = load_config(CONFIG_PATH)
 
 SERVER = CONFIG.get("server", {})
 PROCESSING = CONFIG.get("processing", {})
+OPTIONS: dict[str, Any] = {}
+if OPTIONS_PATH.is_file():
+    OPTIONS = json.loads(OPTIONS_PATH.read_text(encoding="utf-8"))
 _configured_cameras = CONFIG.get("cameras", [])
 if not isinstance(_configured_cameras, list):
     raise ValueError("Configured cameras must be a list")
@@ -136,7 +169,11 @@ CACHE_HOURS = int(PROCESSING.get("cache_hours", 6))
 DEFAULT_GAIN = int(PROCESSING.get("default_gain_db", 0))
 PLAYBACK_MAX_SECONDS = int(PROCESSING.get("playback_max_seconds", 900))
 DOWNLOAD_MAX_SECONDS = int(PROCESSING.get("download_max_seconds", 3600))
-ENCODER = str(os.environ.get("TVT_ARCHIVE_ENCODER", PROCESSING.get("encoder", "software"))).lower()
+ENCODER = str(
+    os.environ.get(
+        "TVT_ARCHIVE_ENCODER", OPTIONS.get("encoder", PROCESSING.get("encoder", "software"))
+    )
+).lower()
 if ENCODER not in ("software", "vaapi"):
     raise ValueError("encoder must be software or vaapi")
 DRI_DEVICE = str(
@@ -2245,6 +2282,30 @@ def cleanup_loop() -> None:
         time.sleep(30)
 
 
+def announce_to_supervisor() -> None:
+    token = os.environ.get("SUPERVISOR_TOKEN")
+    if not token:
+        return
+    host = socket.gethostname()
+    body = json.dumps(
+        {"service": "tvt_archive", "config": {"host": host, "port": PORT, "token": TOKEN}}
+    ).encode()
+    for delay in (2, 5, 15, 30, 60, 120):
+        time.sleep(delay)
+        request = urllib.request.Request(
+            "http://supervisor/discovery",
+            data=body,
+            method="POST",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10):
+                LOG.info("Announced to the Supervisor as %s:%s", host, PORT)
+                return
+        except OSError as error:
+            LOG.warning("Supervisor discovery failed: %s", error)
+
+
 def authorized(header: str) -> bool:
     if not header.startswith("Bearer "):
         return False
@@ -2575,6 +2636,7 @@ if __name__ == "__main__":
     if sys.argv[1:] not in ([], ["run"]):
         raise SystemExit(f"usage: {sys.argv[0]} [run|show-token]")
     threading.Thread(target=cleanup_loop, name="cache-cleanup", daemon=True).start()
+    threading.Thread(target=announce_to_supervisor, name="discovery", daemon=True).start()
     clean_cache()
     server = ThreadingHTTPServer((BIND, PORT), Handler)
     LOG.info("TVT Archive Bridge %s listening on %s:%s", APP_VERSION, BIND, PORT)

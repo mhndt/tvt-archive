@@ -15,3 +15,5 @@ README.md
 hacs.json
 setup.sh
 compose*.yaml
+addon
+repository.yaml
