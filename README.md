@@ -12,6 +12,9 @@ TVT Archive lets you browse, play, and export the recordings on a TVT camera's S
 
 A small bridge container on your network reads the recordings straight from the camera. Nothing leaves your LAN and no vendor account is needed.
 
+> [!IMPORTANT]
+> Tested with the TVT TD-C12. Other TVT and OEM cameras may work but are untested.
+
 ![Recordings panel](docs/images/panel.png)
 
 # Installation
@@ -104,6 +107,8 @@ One device is created per camera with these entities:
 
 Sensors update every two minutes.
 
+![Camera entities](docs/images/entities.png)
+
 ## Recordings panel
 
 Open Recordings in the sidebar. Choose a camera and a day. Green sections of the timeline are recordings. Click one and press Play from here, or set a start and end time and press Download original.
@@ -155,7 +160,7 @@ Delete the integration under Settings > Devices & services. To remove the bridge
 
 # Compatibility
 
-TVT Archive has been tested with a TVT TD-C12. Other TVT cameras, recorders, and OEM devices that run TVT firmware may work but have not been tested.
+Only the TVT TD-C12 has been tested. If it works on another TVT camera, recorder, or OEM device, open a compatibility report so it can be listed.
 
 [docs/protocol.md](docs/protocol.md) contains the protocol and reverse-engineering notes, and [docs/media-pipeline.md](docs/media-pipeline.md) describes how recordings are turned into playback and exports.
 
@@ -165,6 +170,13 @@ TVT Archive has been tested with a TVT TD-C12. Other TVT cameras, recorders, and
 bash tests/run-tests.sh
 ruff check . && ruff format --check .
 ./setup.sh --build-local
+```
+
+The Home Assistant tests need the test harness:
+
+```bash
+pip install pytest-homeassistant-custom-component home-assistant-frontend
+pytest
 ```
 
 # Contributing

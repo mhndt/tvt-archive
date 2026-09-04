@@ -41,6 +41,11 @@ jobs:
       - name: Python and frontend tests
         run: bash tests/run-tests.sh
 
+      - name: Home Assistant tests
+        run: |
+          pip install pytest-homeassistant-custom-component home-assistant-frontend
+          pytest -q
+
       - name: Shell syntax
         run: bash -n setup.sh scripts/package-hacs.sh
 
