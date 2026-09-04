@@ -16,7 +16,6 @@ from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-_STREAM_QUALITIES = {"original", "balanced", "data_saver"}
 _HLS_ASSET_RE = re.compile(r"(?:index\.m3u8|init\.mp4|segment-\d{5}\.m4s)")
 _HLS_URL_TTL_SECONDS = 2 * 60 * 60
 _MEDIA_URL_TTL_SECONDS = 2 * 60 * 60
@@ -237,7 +236,6 @@ class HLSAssetView(HomeAssistantView):
             "Content-Length",
             "Content-Range",
             "Accept-Ranges",
-            "X-TVT-Archive-Accelerator",
         ):
             if header in upstream.headers:
                 response.headers[header] = upstream.headers[header]

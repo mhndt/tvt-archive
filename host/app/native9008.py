@@ -94,6 +94,7 @@ class CaptureSummary:
     first_audio_time_us: int = 0
     last_audio_time_us: int = 0
     keyframes: int = 0
+    gop_us: int = 0
     fragmented_objects: int = 0
     fragment_chunks: int = 0
     housekeeping_frames: int = 0
@@ -117,6 +118,7 @@ class CaptureSummary:
             "first_audio_relative_us": 0,
             "last_audio_relative_us": 0,
             "keyframes": self.keyframes,
+            "gop_seconds": round(self.gop_us / 1_000_000, 3),
             "fragmented_objects": self.fragmented_objects,
             "fragment_chunks": self.fragment_chunks,
             "housekeeping_frames": self.housekeeping_frames,
@@ -549,6 +551,7 @@ class TVT9008Client:
         deadline = time.monotonic() + duration * NATIVE_CAPTURE_DEADLINE_FACTOR + 60
         next_continue_frame = CONTINUATION_INTERVAL_FRAMES
         last_video_wall: float | None = None
+        last_keyframe_us = 0
 
         def write_timing() -> None:
             value = summary.as_dict()
@@ -615,7 +618,11 @@ class TVT9008Client:
                     last_video_wall = time.monotonic()
                     summary.video_frames += 1
                     summary.video_bytes += len(payload)
-                    summary.keyframes += int(keyframe)
+                    if keyframe:
+                        if last_keyframe_us:
+                            summary.gop_us = max(summary.gop_us, timestamp_us - last_keyframe_us)
+                        last_keyframe_us = timestamp_us
+                        summary.keyframes += 1
                     if not summary.first_video_time_us:
                         summary.first_video_time_us = timestamp_us
                     summary.last_video_time_us = timestamp_us

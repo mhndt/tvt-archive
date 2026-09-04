@@ -35,9 +35,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     TVT_ARCHIVE_BASE=/opt/tvt-archive \
     TVT_ARCHIVE_CONFIG_DIRECTORY=/config \
     STATE_DIRECTORY=/state \
-    CACHE_DIRECTORY=/cache \
-    TVT_ARCHIVE_INTEL_MEDIA_DRIVER_VERSION=debian-trixie \
-    TVT_ARCHIVE_HLS_JS_VERSION=1.6.16
+    CACHE_DIRECTORY=/cache
 
 COPY --from=hlsjs-builder /export/ /opt/tvt-archive/static/
 COPY LICENSE THIRD_PARTY.md /usr/share/doc/tvt-archive/
@@ -52,7 +50,7 @@ RUN set -eux; \
     sed -ri 's/^Components: .*/Components: main contrib non-free non-free-firmware/' \
       /etc/apt/sources.list.d/debian.sources; \
     apt-get update; \
-    packages="python3 ffmpeg ca-certificates vainfo va-driver-all"; \
+    packages="python3 ffmpeg ca-certificates va-driver-all"; \
     if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
       packages="$packages intel-media-va-driver-non-free"; \
     fi; \
@@ -63,15 +61,17 @@ RUN set -eux; \
     useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin tvt-archive; \
     mkdir -p /config /state /cache /opt/tvt-archive/app /opt/tvt-archive/static; \
     chown 10001:10001 /config /state /cache; \
+    printf '#!/bin/sh\nexec python3 /opt/tvt-archive/app/bridge.py "$@"\n' > /usr/local/bin/tvt-archive; \
+    chmod 0755 /usr/local/bin/tvt-archive; \
     find / -xdev -type f -perm /6000 -exec chmod a-s {} +
 
 WORKDIR /opt/tvt-archive
 COPY --chown=root:root host/app/bridge.py ./app/bridge.py
 COPY --chown=root:root host/app/native9008.py ./app/native9008.py
 COPY --chown=root:root host/app/archive_capture.py ./app/archive_capture.py
-COPY --chown=root:root docker/entrypoint.sh ./entrypoint.sh
-RUN chmod 0755 ./app/bridge.py ./app/native9008.py ./app/archive_capture.py ./entrypoint.sh
+RUN chmod 0755 ./app/bridge.py ./app/native9008.py ./app/archive_capture.py
 
 USER 10001:10001
 EXPOSE 8099
-ENTRYPOINT ["/opt/tvt-archive/entrypoint.sh"]
+ENTRYPOINT ["tvt-archive"]
+CMD ["run"]

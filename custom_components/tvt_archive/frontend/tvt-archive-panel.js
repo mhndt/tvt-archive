@@ -603,8 +603,7 @@ class TVTArchivePanel extends HTMLElement {
       if (!value || typeof value !== "object") return;
       if (/^\d{4}-\d{2}-\d{2}$/.test(value.date || "")) this._date = value.date;
       if (typeof value.cameraId === "string") this._cameraId = value.cameraId;
-      if (["original","balanced","data_saver"].includes(value.recordingQuality || value.quality)) this._recordingQuality = value.recordingQuality || value.quality;
-      else if ((value.recordingQuality || value.quality) === "auto") this._recordingQuality = "original";
+      if (["low","balanced","data_saver"].includes(value.recordingQuality || value.quality)) this._recordingQuality = "low";
       if ([1,2,4].includes(Number(value.zoom))) this._zoom = Number(value.zoom);
       if (Number.isFinite(Number(value.selectedSec))) this._selectedSec = Math.max(0, Math.min(86399, Number(value.selectedSec)));
       if (/^\d{2}:\d{2}:\d{2}$/.test(value.rangeStart || "")) this._rangeStart = value.rangeStart;
@@ -702,9 +701,7 @@ class TVTArchivePanel extends HTMLElement {
   }
 
   _effectiveRecordingQuality() {
-    return ["original", "balanced", "data_saver"].includes(this._recordingQuality)
-      ? this._recordingQuality
-      : "original";
+    return this._recordingQuality === "low" ? "low" : "original";
   }
 
   _timelineHtml() {
@@ -733,7 +730,7 @@ class TVTArchivePanel extends HTMLElement {
       today: status.timeline_today?.recorded_hours == null ? "—" : historyText(status.timeline_today.recorded_hours),
       history: historyText(status.availability?.available_history_hours),
       archive: this._camera?.archive_backend === "rtsp" ? "Recorded RTSP" : "Native TCP/9008",
-      accelerator: (this._playbackSession?.accelerator_used || status.accelerator?.selected || "—").replaceAll("_", " "),
+      video: this._playbackSession?.video || status.encoder?.name || "—",
       oldest: status.availability?.earliest ? new Date(status.availability.earliest).toLocaleString() : "—",
       latest: status.availability?.latest ? new Date(status.availability.latest).toLocaleString() : "—",
     };
@@ -798,8 +795,7 @@ class TVTArchivePanel extends HTMLElement {
     const cameras = this._cameras.map((camera) => `<option value="${$esc(camera.id)}" ${camera.id === this._cameraId ? "selected" : ""}>${$esc(camera.name || camera.id)}</option>`).join("");
     const qualities = [
       ["original", "Original"],
-      ["balanced", "Balanced (720p)"],
-      ["data_saver", "Data Saver (480p)"],
+      ["low", "Low (480p)"],
     ].map(([value, label]) => `<option value="${value}" ${value === this._recordingQuality ? "selected" : ""}>${label}</option>`).join("");
     const qualityLabel = "Recording quality";
 
@@ -841,7 +837,7 @@ class TVTArchivePanel extends HTMLElement {
         <div class="card sidebar">
           <div class="stat"><span>Recording</span><b id="stat-recording">${$esc(values.recording)}</b></div><div class="stat"><span>Recorded today</span><b id="stat-today">${$esc(values.today)}</b></div>
           <div class="stat"><span>Available history</span><b id="stat-history">${$esc(values.history)}</b></div><div class="stat"><span>Archive media</span><b id="stat-archive">${$esc(values.archive)}</b></div>
-<div class="stat"><span>Playback accelerator</span><b id="stat-accelerator">${$esc(values.accelerator)}</b></div>
+<div class="stat"><span>Video</span><b id="stat-video">${$esc(values.video)}</b></div>
           <div class="stat"><span>Oldest recording</span><b id="stat-oldest">${$esc(values.oldest)}</b></div><div class="stat"><span>Latest recording</span><b id="stat-latest">${$esc(values.latest)}</b></div>
         </div>
       </div>

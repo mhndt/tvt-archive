@@ -51,7 +51,7 @@ jobs:
           docker volume create tvt-archive-ci-cache
           docker run -d --name tvt-archive-ci \
             -p 127.0.0.1:18099:8099 \
-            -e TVT_ARCHIVE_ACCELERATOR=software \
+            -e TVT_ARCHIVE_ENCODER=software \
             -v tvt-archive-ci-config:/config \
             -v tvt-archive-ci-state:/state \
             -v tvt-archive-ci-cache:/cache \
@@ -75,8 +75,7 @@ jobs:
 
       - name: Verify token and diagnostics commands
         run: |
-          test -n "$(docker exec tvt-archive-ci /opt/tvt-archive/entrypoint.sh show-token)"
-          docker exec tvt-archive-ci /opt/tvt-archive/entrypoint.sh accelerator-info
+          test -n "$(docker exec tvt-archive-ci tvt-archive show-token)"
 
       - name: Show logs on failure
         if: failure()

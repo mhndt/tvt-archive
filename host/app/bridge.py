@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -45,7 +46,6 @@ INDEX = STATE / "index"
 LOGS = STATE / "logs"
 CAPTURE_HELPER = BASE / "app" / "archive_capture.py"
 HLS_JS_PATH = BASE / "static" / "hls.min.js"
-HLS_JS_VERSION = os.environ.get("TVT_ARCHIVE_HLS_JS_VERSION", "1.6.16")
 
 for directory in (CACHE, WORK, INDEX, LOGS):
     directory.mkdir(parents=True, exist_ok=True)
@@ -69,10 +69,40 @@ def camera_index_directory(camera_id: str) -> Path:
     return INDEX / validated_camera_id(camera_id)
 
 
+def json_dump_atomic(path: Path, value: Any, *, mode: int | None = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+    if mode is not None:
+        os.chmod(temporary, mode)
+    os.replace(temporary, path)
+
+
+def load_config(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        token = os.environ.get("TVT_ARCHIVE_TOKEN") or secrets.token_urlsafe(32)
+        config = {
+            "server": {"bind": "0.0.0.0", "port": 8099, "token": token},
+            "processing": {},
+            "cameras": [],
+        }
+        json_dump_atomic(path, config, mode=0o600)
+        LOG.info("Created %s", path)
+        return config
+    with path.open(encoding="utf-8") as handle:
+        config = json.load(handle)
+    processing = config.setdefault("processing", {})
+    old = processing.pop("accelerator", None)
+    if old is not None and "encoder" not in processing:
+        processing["encoder"] = "vaapi" if "vaapi" in str(old) or "qsv" in str(old) else "software"
+    for key in ("vaapi_driver", "qsv_device", "hls_audio_detect_seconds"):
+        processing.pop(key, None)
+    return config
+
+
 CONFIG_LOCK = threading.RLock()
 CAPABILITIES_LOCK = threading.RLock()
-with CONFIG_PATH.open("r", encoding="utf-8") as handle:
-    CONFIG = json.load(handle)
+CONFIG = load_config(CONFIG_PATH)
 
 SERVER = CONFIG.get("server", {})
 PROCESSING = CONFIG.get("processing", {})
@@ -95,18 +125,14 @@ CACHE_HOURS = int(PROCESSING.get("cache_hours", 6))
 DEFAULT_GAIN = int(PROCESSING.get("default_gain_db", 0))
 PLAYBACK_MAX_SECONDS = int(PROCESSING.get("playback_max_seconds", 900))
 DOWNLOAD_MAX_SECONDS = int(PROCESSING.get("download_max_seconds", 3600))
-ACCELERATOR_PREFERENCE = str(
-    PROCESSING.get("accelerator", os.environ.get("TVT_ARCHIVE_ACCELERATOR", "auto"))
-).lower()
-VAAPI_DRIVER_PREFERENCE = (
-    str(PROCESSING.get("vaapi_driver", os.environ.get("TVT_ARCHIVE_VAAPI_DRIVER", "auto"))).strip()
-    or "auto"
-)
+ENCODER = str(os.environ.get("TVT_ARCHIVE_ENCODER", PROCESSING.get("encoder", "software"))).lower()
+if ENCODER not in ("software", "vaapi"):
+    raise ValueError("encoder must be software or vaapi")
 DRI_DEVICE = str(
-    PROCESSING.get("dri_device", os.environ.get("TVT_ARCHIVE_DRI_DEVICE", "/dev/dri/renderD128"))
+    os.environ.get("TVT_ARCHIVE_DRI_DEVICE", PROCESSING.get("dri_device", "/dev/dri/renderD128"))
 )
 STREAM_AUDIO_DELAY_MS = int(
-    PROCESSING.get("stream_audio_delay_ms", os.environ.get("TVT_ARCHIVE_STREAM_AUDIO_DELAY_MS", 0))
+    os.environ.get("TVT_ARCHIVE_STREAM_AUDIO_DELAY_MS", PROCESSING.get("stream_audio_delay_ms", 0))
 )
 MAX_WORKERS = max(1, min(int(PROCESSING.get("max_parallel_jobs", 1)), 4))
 NATIVE_SESSION_LIMIT = max(1, min(int(PROCESSING.get("max_native_sessions_per_camera", 2)), 4))
@@ -131,6 +157,8 @@ SESSIONS: dict[str, PlaybackSession] = {}
 HLS_IDLE_SECONDS = max(60, int(PROCESSING.get("hls_idle_seconds", 300)))
 HLS_RETAIN_SECONDS = max(300, int(PROCESSING.get("hls_retain_seconds", 1800)))
 HLS_SEGMENT_SECONDS = max(1, min(int(PROCESSING.get("hls_segment_seconds", 1)), 6))
+COPY_MAX_GOP_SECONDS = 2.0 * HLS_SEGMENT_SECONDS
+QUALITIES = ("original", "low")
 HLS_START_BUFFER_SECONDS = max(
     2,
     min(
@@ -203,7 +231,7 @@ class Job:
     output_path: str | None = None
     output_name: str | None = None
     error: str | None = None
-    accelerator_used: str = "copy"
+    video: str = "copy"
     video_frames: int = 0
     audio_frames: int = 0
     progress: float = 0.0
@@ -231,7 +259,7 @@ class Job:
             "request": self.request,
             "ready": self.status == "ready",
             "error": self.error,
-            "accelerator_used": self.accelerator_used,
+            "video": self.video,
             "video_frames": self.video_frames,
             "audio_frames": self.audio_frames,
             "filename": self.output_name,
@@ -251,7 +279,7 @@ class PlaybackSession:
     started_at: float | None = None
     finished_at: float | None = None
     error: str | None = None
-    accelerator_used: str = "copy"
+    video: str = "copy"
     stop_event: threading.Event = dataclasses.field(default_factory=threading.Event, repr=False)
     capture_process: subprocess.Popen[bytes] | None = dataclasses.field(default=None, repr=False)
     ffmpeg_process: subprocess.Popen[bytes] | None = dataclasses.field(default=None, repr=False)
@@ -328,7 +356,7 @@ class PlaybackSession:
             "playlist_ready": self.playlist_ready(),
             "complete": self.status == "complete",
             "error": self.error,
-            "accelerator_used": self.accelerator_used,
+            "video": self.video,
             "segment_seconds": HLS_SEGMENT_SECONDS,
             "segment_count": self.segment_count(),
             "buffered_seconds": round(self.buffered_seconds(), 3),
@@ -379,20 +407,18 @@ def _learned_archive_audio(camera_id: str) -> bool:
     return bool(_read_camera_capabilities(camera_id).get("recording_audio", False))
 
 
-def _remember_archive_audio(camera_id: str) -> None:
-    # Positive-only, per-camera learning. Never persist a negative capability.
+def _remember_capability(camera_id: str, key: str, value: Any) -> None:
     with CAPABILITIES_LOCK:
-        path = _camera_capabilities_path(camera_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        value = _read_camera_capabilities(camera_id)
-        if value.get("recording_audio") is True:
+        current = _read_camera_capabilities(camera_id)
+        if current.get(key) == value:
             return
-        value["recording_audio"] = True
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
-        LOG.info("Learned that camera %s provides archive audio", camera_id)
+        current[key] = value
+        json_dump_atomic(_camera_capabilities_path(camera_id), current, mode=0o600)
+        LOG.info("Camera %s: %s=%s", camera_id, key, value)
+
+
+def _remember_archive_audio(camera_id: str) -> None:
+    _remember_capability(camera_id, "recording_audio", True)
 
 
 def camera_lock(camera_id: str) -> threading.Lock:
@@ -922,15 +948,6 @@ def validate_date(value: str) -> dt.date:
     return dt.date.fromisoformat(value)
 
 
-def json_dump_atomic(path: Path, value: Any, *, mode: int | None = None) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
-    if mode is not None:
-        os.chmod(temporary, mode)
-    os.replace(temporary, path)
-
-
 def promote_completed_file(source: Path, destination: Path, *, mode: int = 0o600) -> None:
     """Publish a completed file atomically, including across Docker volumes.
 
@@ -1118,7 +1135,8 @@ def get_status(camera_id: str, *, force: bool = False) -> dict[str, Any]:
             "online": True,
             "timeline_today": today,
             "availability": availability,
-            "accelerator": acceleration_capabilities(),
+            "encoder": encoder_info(),
+            "gop_seconds": _read_camera_capabilities(camera_id).get("gop_seconds"),
         }
     except Exception as error:
         LOG.exception("Status failed for %s", camera_id)
@@ -1128,467 +1146,41 @@ def get_status(camera_id: str, *, force: bool = False) -> dict[str, Any]:
             "error": str(error),
             "timeline_today": {},
             "availability": {},
-            "accelerator": acceleration_capabilities(),
+            "encoder": encoder_info(),
         }
 
 
+@functools.cache
 def ffmpeg_version() -> str:
     try:
         completed = subprocess.run(
-            ["ffmpeg", "-version"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=10,
-            check=False,
+            ["ffmpeg", "-version"], capture_output=True, text=True, timeout=10, check=False
         )
         return completed.stdout.splitlines()[0].strip() if completed.stdout else "unavailable"
     except Exception:
         return "unavailable"
 
 
-@functools.lru_cache(maxsize=1)
-def ffmpeg_encoders() -> set[str]:
-    try:
-        completed = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-encoders"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=15,
-            check=False,
-        )
-        return {
-            match.group(1)
-            for line in completed.stdout.splitlines()
-            if (match := re.match(r"^\s*[A-Z.]{6}\s+([^\s]+)", line))
-        }
-    except Exception:
-        return set()
-
-
-def _device_accessible(path: str) -> bool:
-    return Path(path).exists() and os.access(path, os.R_OK | os.W_OK)
-
-
-def dri_vendor() -> str:
-    render_name = Path(DRI_DEVICE).name
-    vendor_path = Path("/sys/class/drm") / render_name / "device" / "vendor"
-    try:
-        value = vendor_path.read_text(encoding="utf-8").strip().lower()
-    except OSError:
-        return "unknown"
-    return {"0x8086": "intel", "0x1002": "amd"}.get(value, value)
-
-
-@functools.cache
-def vaapi_runtime_driver_info(driver: str = "") -> str | None:
-    if not _device_accessible(DRI_DEVICE):
-        return None
-    environment = os.environ.copy()
-    if driver:
-        environment["LIBVA_DRIVER_NAME"] = driver
-    else:
-        environment.pop("LIBVA_DRIVER_NAME", None)
-    try:
-        completed = subprocess.run(
-            ["vainfo", "--display", "drm", "--device", DRI_DEVICE],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=15,
-            check=False,
-            env=environment,
-        )
-    except Exception:
-        return None
-    for line in completed.stdout.splitlines():
-        cleaned = line.strip()
-        if "Driver version:" in cleaned:
-            return cleaned.split("Driver version:", 1)[1].strip()
-        if "VAAPI driver:" in cleaned:
-            return cleaned.split("VAAPI driver:", 1)[1].strip()
-    return None
-
-
-@functools.cache
-def encoder_works(candidate: str, vaapi_driver: str = "") -> bool:
-    """Probe a complete decode, resize, and encode path before selecting it."""
-    probe_dir = Path(tempfile.mkdtemp(prefix="accelerator-probe-", dir=WORK))
-    source = probe_dir / "source.h264"
-    environment = os.environ.copy()
-    if vaapi_driver:
-        environment["LIBVA_DRIVER_NAME"] = vaapi_driver
-    else:
-        environment.pop("LIBVA_DRIVER_NAME", None)
-    try:
-        generated = subprocess.run(
-            [
-                "ffmpeg",
-                "-y",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-f",
-                "lavfi",
-                "-i",
-                "testsrc2=size=1920x1080:rate=25",
-                "-frames:v",
-                "30",
-                "-pix_fmt",
-                "yuvj420p",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "ultrafast",
-                "-profile:v",
-                "high",
-                "-level:v",
-                "4.1",
-                "-f",
-                "h264",
-                str(source),
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=45,
-            check=False,
-            env=environment,
-        )
-        if generated.returncode != 0 or not source.exists():
-            return candidate == "software" and "libx264" in ffmpeg_encoders()
-        input_args = ["-f", "h264", "-i", str(source), "-frames:v", "20", "-an"]
-        if candidate == "vaapi_full":
-            command = [
-                "ffmpeg",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-init_hw_device",
-                f"vaapi=va:{DRI_DEVICE}",
-                "-filter_hw_device",
-                "va",
-                "-hwaccel",
-                "vaapi",
-                "-hwaccel_device",
-                "va",
-                "-hwaccel_output_format",
-                "vaapi",
-                *input_args,
-                "-vf",
-                "scale_vaapi=w=1280:h=720:format=nv12",
-                "-c:v",
-                "h264_vaapi",
-                "-profile:v",
-                "high",
-                "-b:v",
-                "2500k",
-                "-maxrate",
-                "3000k",
-                "-bufsize",
-                "5000k",
-                "-g",
-                "50",
-                "-f",
-                "null",
-                "-",
-            ]
-        elif candidate == "intel_qsv_full":
-            command = [
-                "ffmpeg",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-init_hw_device",
-                f"vaapi=va:{DRI_DEVICE}",
-                "-init_hw_device",
-                "qsv=qs@va",
-                "-filter_hw_device",
-                "qs",
-                "-hwaccel",
-                "qsv",
-                "-hwaccel_device",
-                "qs",
-                "-hwaccel_output_format",
-                "qsv",
-                *input_args,
-                "-vf",
-                "vpp_qsv=w=1280:h=720",
-                "-c:v",
-                "h264_qsv",
-                "-global_quality",
-                "24",
-                "-look_ahead",
-                "0",
-                "-g",
-                "50",
-                "-f",
-                "null",
-                "-",
-            ]
-        elif candidate == "nvidia_full":
-            command = [
-                "ffmpeg",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-hwaccel",
-                "cuda",
-                "-hwaccel_output_format",
-                "cuda",
-                *input_args,
-                "-vf",
-                "scale_cuda=1280:720",
-                "-c:v",
-                "h264_nvenc",
-                "-preset",
-                "p4",
-                "-cq",
-                "24",
-                "-b:v",
-                "0",
-                "-g",
-                "50",
-                "-f",
-                "null",
-                "-",
-            ]
-        elif candidate == "vaapi_hybrid":
-            command = [
-                "ffmpeg",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-init_hw_device",
-                f"vaapi=va:{DRI_DEVICE}",
-                "-filter_hw_device",
-                "va",
-                *input_args,
-                "-vf",
-                "scale=1280:720:flags=fast_bilinear,format=nv12,hwupload",
-                "-c:v",
-                "h264_vaapi",
-                "-qp",
-                "24",
-                "-g",
-                "50",
-                "-f",
-                "null",
-                "-",
-            ]
-        elif candidate == "nvidia_hybrid":
-            command = [
-                "ffmpeg",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                *input_args,
-                "-vf",
-                "scale=1280:720:flags=fast_bilinear",
-                "-c:v",
-                "h264_nvenc",
-                "-preset",
-                "p4",
-                "-cq",
-                "24",
-                "-b:v",
-                "0",
-                "-g",
-                "50",
-                "-f",
-                "null",
-                "-",
-            ]
-        elif candidate == "software":
-            command = [
-                "ffmpeg",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                *input_args,
-                "-vf",
-                "scale=1280:720:flags=fast_bilinear",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-crf",
-                "24",
-                "-g",
-                "50",
-                "-f",
-                "null",
-                "-",
-            ]
-        else:
-            return False
-        return (
-            subprocess.run(
-                command,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=45,
-                check=False,
-                env=environment,
-            ).returncode
-            == 0
-        )
-    except Exception:
-        return False
-    finally:
-        shutil.rmtree(probe_dir, ignore_errors=True)
-
-
-def _vaapi_driver_candidates() -> list[str]:
-    if VAAPI_DRIVER_PREFERENCE.lower() not in ("auto", "default"):
-        return [VAAPI_DRIVER_PREFERENCE]
-    vendor = dri_vendor()
-    if vendor == "intel":
-        values = [os.environ.get("LIBVA_DRIVER_NAME", ""), "iHD", "i965", ""]
-    else:
-        values = [os.environ.get("LIBVA_DRIVER_NAME", ""), ""]
-    result: list[str] = []
-    for value in values:
-        if value not in result:
-            result.append(value)
-    return result
-
-
-def acceleration_capabilities() -> dict[str, Any]:
-    encoders = ffmpeg_encoders()
-    available: list[str] = []
-    vendor = dri_vendor()
-    dri_ok = _device_accessible(DRI_DEVICE)
-    selected_vaapi_driver = ""
-
-    qsv_driver = next(
-        (
-            driver
-            for driver in _vaapi_driver_candidates()
-            if vendor == "intel"
-            and dri_ok
-            and "h264_qsv" in encoders
-            and encoder_works("intel_qsv_full", driver)
-        ),
-        None,
-    )
-    if qsv_driver is not None:
-        available.append("intel_qsv_full")
-
-    full_driver = next(
-        (
-            driver
-            for driver in _vaapi_driver_candidates()
-            if dri_ok and "h264_vaapi" in encoders and encoder_works("vaapi_full", driver)
-        ),
-        None,
-    )
-    if full_driver is not None:
-        available.append("vaapi_full")
-        selected_vaapi_driver = full_driver
-
-    if (
-        (
-            Path("/dev/nvidia0").exists()
-            or os.environ.get("NVIDIA_VISIBLE_DEVICES") not in (None, "", "void")
-        )
-        and "h264_nvenc" in encoders
-        and encoder_works("nvidia_full")
-    ):
-        available.append("nvidia_full")
-
-    hybrid_driver = next(
-        (
-            driver
-            for driver in _vaapi_driver_candidates()
-            if dri_ok and "h264_vaapi" in encoders and encoder_works("vaapi_hybrid", driver)
-        ),
-        None,
-    )
-    if hybrid_driver is not None:
-        available.append("vaapi_hybrid")
-        if not selected_vaapi_driver:
-            selected_vaapi_driver = hybrid_driver
-
-    if "h264_nvenc" in encoders and encoder_works("nvidia_hybrid"):
-        available.append("nvidia_hybrid")
-    if "libx264" in encoders and encoder_works("software"):
-        available.append("software")
-
-    aliases = {
-        "qsv": "intel_qsv_full",
-        "intel": "intel_qsv_full",
-        "vaapi": "vaapi_full",
-        "nvidia": "nvidia_full",
-        "cpu": "software",
-    }
-    preference = aliases.get(ACCELERATOR_PREFERENCE, ACCELERATOR_PREFERENCE)
-    selected = "none"
-    order = (
-        "vaapi_full",
-        "intel_qsv_full",
-        "nvidia_full",
-        "vaapi_hybrid",
-        "nvidia_hybrid",
-        "software",
-    )
-    if preference == "auto":
-        selected = next((candidate for candidate in order if candidate in available), "none")
-    elif preference in available:
-        selected = preference
-    elif preference not in ("none", "off"):
-        selected = next((candidate for candidate in order if candidate in available), "none")
-
-    if selected.startswith("vaapi") and selected_vaapi_driver:
-        os.environ["LIBVA_DRIVER_NAME"] = selected_vaapi_driver
-    elif selected == "intel_qsv_full" and qsv_driver:
-        os.environ["LIBVA_DRIVER_NAME"] = qsv_driver
-
-    runtime_driver = (
-        vaapi_runtime_driver_info(
-            selected_vaapi_driver if selected.startswith("vaapi") else (qsv_driver or "")
-        )
-        if selected in ("vaapi_full", "vaapi_hybrid", "intel_qsv_full")
-        else None
-    )
-    reported_vaapi_driver = selected_vaapi_driver or None
-    if not reported_vaapi_driver and runtime_driver:
-        if "iHD" in runtime_driver:
-            reported_vaapi_driver = "iHD"
-        elif "i965" in runtime_driver:
-            reported_vaapi_driver = "i965"
-        elif "radeonsi" in runtime_driver.lower():
-            reported_vaapi_driver = "radeonsi"
-
+def encoder_info() -> dict[str, Any]:
     return {
-        "preference": ACCELERATOR_PREFERENCE,
-        "selected": selected,
-        "available": available,
-        "dri_device": DRI_DEVICE if Path(DRI_DEVICE).exists() else None,
-        "dri_vendor": vendor,
-        "vaapi_driver_preference": VAAPI_DRIVER_PREFERENCE,
-        "vaapi_driver": reported_vaapi_driver,
-        "vaapi_runtime_driver": runtime_driver,
-        "packaged_intel_media_driver": os.environ.get("TVT_ARCHIVE_INTEL_MEDIA_DRIVER_VERSION"),
-        "ffmpeg_version": ffmpeg_version(),
-        "recording_playback_qualities": ["original", "balanced", "data_saver"],
-        "playback_transport": "low_latency_hls_fmp4",
-        "downloads": "original",
+        "name": ENCODER,
+        "dri_device": DRI_DEVICE if ENCODER == "vaapi" else None,
+        "ffmpeg": ffmpeg_version(),
     }
 
 
-def transcode_video_args(quality: str) -> tuple[list[str], list[str], str]:
-    """Return pre-input args, output args, and the selected file pipeline."""
-    if quality == "original":
-        return [], ["-c:v", "copy"], "copy"
-    selected = str(acceleration_capabilities().get("selected", "none"))
-    width = 1280 if quality == "balanced" else 854
-    height = 720 if quality == "balanced" else 480
-    cq = "24" if quality == "balanced" else "29"
-    bitrate, maxrate, bufsize = (
-        ("2500k", "3000k", "5000k") if quality == "balanced" else ("900k", "1200k", "2400k")
-    )
-    if selected == "vaapi_full":
+def playback_video_mode(camera_id: str, native: bool) -> str:
+    gop = float(_read_camera_capabilities(camera_id).get("gop_seconds", 0) or 0)
+    if native and 0 < gop <= COPY_MAX_GOP_SECONDS:
+        return "copy"
+    return ENCODER
+
+
+def video_args(quality: str, mode: str, gop: int | None = None) -> tuple[list[str], list[str]]:
+    """Pre-input and output arguments. gop is the HLS keyframe interval in frames."""
+    if mode == "copy":
+        return [], ["-c:v", "copy"]
+    if mode == "vaapi":
         pre = [
             "-init_hw_device",
             f"vaapi=va:{DRI_DEVICE}",
@@ -1601,188 +1193,51 @@ def transcode_video_args(quality: str) -> tuple[list[str], list[str], str]:
             "-hwaccel_output_format",
             "vaapi",
         ]
-        out = [
-            "-vf",
-            f"scale_vaapi=w={width}:h={height}:format=nv12",
-            "-c:v",
-            "h264_vaapi",
-            "-profile:v",
-            "high",
-            "-b:v",
-            bitrate,
-            "-maxrate",
-            maxrate,
-            "-bufsize",
-            bufsize,
-            "-g",
-            "50",
-        ]
-        return pre, out, selected
-    if selected == "intel_qsv_full":
-        pre = [
-            "-init_hw_device",
-            f"vaapi=va:{DRI_DEVICE}",
-            "-init_hw_device",
-            "qsv=qs@va",
-            "-filter_hw_device",
-            "qs",
-            "-hwaccel",
-            "qsv",
-            "-hwaccel_device",
-            "qs",
-            "-hwaccel_output_format",
-            "qsv",
-        ]
-        out = [
-            "-vf",
-            f"vpp_qsv=w={width}:h={height}",
-            "-c:v",
-            "h264_qsv",
-            "-global_quality",
-            cq,
-            "-look_ahead",
-            "0",
-            "-g",
-            "50",
-        ]
-        return pre, out, selected
-    if selected == "nvidia_full":
-        pre = ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
-        out = [
-            "-vf",
-            f"scale_cuda={width}:{height}",
-            "-c:v",
-            "h264_nvenc",
-            "-preset",
-            "p4",
-            "-cq",
-            cq,
-            "-b:v",
-            "0",
-            "-g",
-            "50",
-        ]
-        return pre, out, selected
-    if selected == "vaapi_hybrid":
-        pre = ["-init_hw_device", f"vaapi=va:{DRI_DEVICE}", "-filter_hw_device", "va"]
-        out = [
-            "-vf",
-            f"scale={width}:{height}:flags=fast_bilinear,format=nv12,hwupload",
-            "-c:v",
-            "h264_vaapi",
-            "-qp",
-            cq,
-            "-g",
-            "50",
-        ]
-        return pre, out, selected
-    if selected == "nvidia_hybrid":
-        return (
-            [],
-            [
+        if quality == "original":
+            out = ["-c:v", "h264_vaapi", "-profile:v", "high", "-qp", "18"]
+        else:
+            out = [
                 "-vf",
-                f"scale={width}:{height}:flags=fast_bilinear",
+                "scale_vaapi=w=854:h=480:format=nv12",
                 "-c:v",
-                "h264_nvenc",
-                "-preset",
-                "p4",
-                "-cq",
-                cq,
+                "h264_vaapi",
+                "-profile:v",
+                "high",
                 "-b:v",
-                "0",
-                "-g",
-                "50",
-            ],
-            selected,
-        )
-    if selected == "software":
-        return (
-            [],
-            [
+                "900k",
+                "-maxrate",
+                "1200k",
+                "-bufsize",
+                "2400k",
+            ]
+    else:
+        pre = []
+        if quality == "original":
+            out = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18"]
+        else:
+            out = [
                 "-vf",
-                f"scale={width}:{height}:flags=fast_bilinear",
+                "scale=854:480:flags=fast_bilinear",
                 "-c:v",
                 "libx264",
                 "-preset",
                 "veryfast",
                 "-crf",
-                cq,
-                "-g",
-                "50",
-            ],
-            selected,
-        )
-    raise RuntimeError("Reduced-quality playback requires an available video pipeline")
-
-
-def hls_video_pipeline(quality: str, source_fps: float = 25.0) -> tuple[list[str], list[str], str]:
-    """Return a short-GOP browser playback pipeline.
-
-    File exports keep Original video as a bit-for-bit stream copy. Browser playback
-    is different: copied camera GOPs can be 6-10 seconds long, which makes HLS
-    publish in large bursts and causes the play/buffer/play cycle seen in Firefox.
-    For playback only, Original is re-encoded at the source resolution with a
-    one-second GOP. Balanced and Data Saver retain their normal resize pipelines.
-    """
-    gop = max(1, round(source_fps * HLS_SEGMENT_SECONDS))
-    if quality != "original":
-        pre, out, selected = transcode_video_args(quality)
-    else:
-        selected = str(acceleration_capabilities().get("selected", "none"))
-        if selected == "vaapi_full":
-            pre = [
-                "-init_hw_device",
-                f"vaapi=va:{DRI_DEVICE}",
-                "-filter_hw_device",
-                "va",
-                "-hwaccel",
-                "vaapi",
-                "-hwaccel_device",
-                "va",
-                "-hwaccel_output_format",
-                "vaapi",
+                "29",
             ]
-            out = ["-c:v", "h264_vaapi", "-profile:v", "high", "-qp", "18", "-g", str(gop)]
-        elif selected == "intel_qsv_full":
-            pre = [
-                "-init_hw_device",
-                f"vaapi=va:{DRI_DEVICE}",
-                "-init_hw_device",
-                "qsv=qs@va",
-                "-filter_hw_device",
-                "qs",
-                "-hwaccel",
-                "qsv",
-                "-hwaccel_device",
-                "qs",
-                "-hwaccel_output_format",
-                "qsv",
-            ]
-            out = ["-c:v", "h264_qsv", "-global_quality", "18", "-look_ahead", "0", "-g", str(gop)]
-        elif selected == "nvidia_full":
-            pre = ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
-            out = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "18", "-b:v", "0", "-g", str(gop)]
-        elif selected == "vaapi_hybrid":
-            pre = ["-init_hw_device", f"vaapi=va:{DRI_DEVICE}", "-filter_hw_device", "va"]
-            out = ["-vf", "format=nv12,hwupload", "-c:v", "h264_vaapi", "-qp", "18", "-g", str(gop)]
-        elif selected == "nvidia_hybrid":
-            pre = []
-            out = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "18", "-b:v", "0", "-g", str(gop)]
-        elif selected == "software":
-            pre = []
-            out = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-g", str(gop)]
-        else:
-            raise RuntimeError("Original browser playback requires an available H.264 encoder")
-
-    # Make every HLS fragment independently decodable and prevent scene-cut logic
-    # from creating irregular 6-10 second segment bursts.
-    if "-g" in out:
-        index = out.index("-g")
-        out[index + 1] = str(gop)
-    if "libx264" in out:
+    if gop is None:
+        return pre, [*out, "-g", "50"]
+    out += [
+        "-g",
+        str(gop),
+        "-bf",
+        "0",
+        "-force_key_frames",
+        f"expr:gte(t,n_forced*{HLS_SEGMENT_SECONDS})",
+    ]
+    if mode == "software":
         out += ["-keyint_min", str(gop), "-sc_threshold", "0"]
-    out += ["-bf", "0", "-force_key_frames", f"expr:gte(t,n_forced*{HLS_SEGMENT_SECONDS})"]
-    return pre, out, selected
+    return pre, out
 
 
 def clean_cache() -> None:
@@ -1830,15 +1285,10 @@ def update_job(job: Job, **changes: Any) -> None:
             setattr(job, key, value)
 
 
-def export_filename(camera_name: str, start: dt.datetime, duration: int, quality: str) -> str:
+def export_filename(camera_name: str, start: dt.datetime, duration: int) -> str:
     component = re.sub(r"[^a-zA-Z0-9]+", "-", camera_name).strip("-") or "Camera"
     stop = start + dt.timedelta(seconds=duration)
-    quality_label = {
-        "original": "Original",
-        "balanced": "Balanced-720p",
-        "data_saver": "Data-Saver-480p",
-    }.get(quality, "Original")
-    return f"{component}_{start:%Y-%m-%d_%H-%M-%S}_to_{stop:%Y-%m-%d_%H-%M-%S}_{quality_label}.mp4"
+    return f"{component}_{start:%Y-%m-%d_%H-%M-%S}_to_{stop:%Y-%m-%d_%H-%M-%S}.mp4"
 
 
 def generate_job(job: Job) -> None:
@@ -1847,8 +1297,7 @@ def generate_job(job: Job) -> None:
     start = parse_local_timestamp(str(request["start"]))
     duration = int(request["duration"])
     gain_db = int(request["gain_db"])
-    quality = str(request.get("quality", "original"))
-    output_name = export_filename(str(item.get("name", job.camera_id)), start, duration, quality)
+    output_name = export_filename(str(item.get("name", job.camera_id)), start, duration)
     output_path = CACHE / f"{job.cache_key}.mp4"
     job_log = LOGS / f"{job.id}.log"
     work_directory = Path(tempfile.mkdtemp(prefix=f"job-{job.id[:8]}-", dir=WORK))
@@ -1909,6 +1358,9 @@ def generate_job(job: Job) -> None:
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
         video_frames = int(summary.get("video_frames", 0))
         audio_frames = int(summary.get("audio_frames", 0))
+        gop_seconds = float(summary.get("gop_seconds", 0) or 0)
+        if gop_seconds and summary.get("backend", "native_9008") == "native_9008":
+            _remember_capability(job.camera_id, "gop_seconds", gop_seconds)
         has_audio = (
             bool(summary.get("has_audio", audio_frames > 0))
             and audio_path.exists()
@@ -1941,7 +1393,7 @@ def generate_job(job: Job) -> None:
             if has_audio and first_audio and first_video
             else 0
         )
-        pre_input, video_args, accelerator_used = transcode_video_args(quality)
+        pre_input, video_output = video_args("original", "copy")
         ffmpeg = [
             "ffmpeg",
             "-y",
@@ -1975,7 +1427,7 @@ def generate_job(job: Job) -> None:
             ]
         else:
             ffmpeg += ["-map", "0:v:0", "-an"]
-        ffmpeg += video_args
+        ffmpeg += video_output
         if has_audio:
             audio_filters: list[str] = []
             if offset_ms > 0:
@@ -2055,7 +1507,6 @@ def generate_job(job: Job) -> None:
             finished_at=time.time(),
             output_path=str(output_path),
             output_name=output_name,
-            accelerator_used=accelerator_used,
             progress=1.0,
             captured_seconds=float(duration),
             processed_seconds=float(duration),
@@ -2082,34 +1533,22 @@ def generate_job(job: Job) -> None:
 
 
 def create_job(camera_id: str, request: dict[str, Any]) -> Job:
-    camera(camera_id)
+    item = camera(camera_id)
     start = parse_local_timestamp(str(request.get("start", "")))
-    kind = str(request.get("kind", "playback"))
-    if kind not in ("playback", "download"):
-        raise ValueError("Kind must be playback or download")
     duration = int(request.get("duration", 300))
-    limit = DOWNLOAD_MAX_SECONDS if kind == "download" else PLAYBACK_MAX_SECONDS
-    if not 5 <= duration <= limit:
-        raise ValueError(f"Duration must be 5-{limit} seconds for {kind}")
+    if not 5 <= duration <= DOWNLOAD_MAX_SECONDS:
+        raise ValueError(f"Duration must be 5-{DOWNLOAD_MAX_SECONDS} seconds")
     gain_db = int(request.get("gain_db", DEFAULT_GAIN))
     if gain_db not in (0, 6, 12, 18, 24):
         raise ValueError("Audio gain must be 0, 6, 12, 18, or 24 dB")
-    quality = str(request.get("quality", "original"))
-    if quality not in ("original", "balanced", "data_saver"):
-        raise ValueError("Quality must be original, balanced, or data_saver")
-    if kind == "download":
-        quality = "original"
     normalized = {
         "start": start.isoformat(timespec="seconds"),
         "duration": duration,
         "gain_db": gain_db,
-        "quality": quality,
-        "kind": kind,
     }
     cache_key = build_cache_key(camera_id, normalized)
     output_path = CACHE / f"{cache_key}.mp4"
-    item = camera(camera_id)
-    output_name = export_filename(str(item.get("name", camera_id)), start, duration, quality)
+    output_name = export_filename(str(item.get("name", camera_id)), start, duration)
     with JOBS_LOCK:
         existing_id = CACHE_TO_JOB.get(cache_key)
         if (
@@ -2125,11 +1564,6 @@ def create_job(camera_id: str, request: dict[str, Any]) -> Job:
             job.output_path, job.output_name = str(output_path), output_name
             job.progress = 1.0
             job.captured_seconds = job.processed_seconds = float(duration)
-            job.accelerator_used = (
-                "copy"
-                if quality == "original"
-                else str(acceleration_capabilities().get("selected", "software"))
-            )
         JOBS[job.id] = job
         CACHE_TO_JOB[cache_key] = job.id
     if job.status == "queued":
@@ -2473,14 +1907,13 @@ def _friendly_capture_error(detail: str, return_code: int | None = None) -> str:
     return f"Camera archive capture failed{suffix}." + (f" {text[-500:]}" if text else "")
 
 
-def _hls_command(
-    video_input: str, audio_input: str | None, session: PlaybackSession
-) -> tuple[list[str], str]:
+def _hls_command(video_input: str, audio_input: str | None, session: PlaybackSession) -> list[str]:
     request = session.request
     duration = int(request["duration"])
     quality = str(request["quality"])
     gain_db = int(request["gain_db"])
-    pre_input, video_output, accelerator = hls_video_pipeline(quality, session.source_fps)
+    gop = max(1, round(session.source_fps * HLS_SEGMENT_SECONDS))
+    pre_input, video_output = video_args(quality, session.video, gop)
     command = [
         "ffmpeg",
         "-y",
@@ -2571,12 +2004,12 @@ def _hls_command(
         "-hls_fmp4_init_filename",
         "init.mp4",
         "-hls_flags",
-        "split_by_time+temp_file",
+        "temp_file" if session.video == "copy" else "split_by_time+temp_file",
         "-hls_segment_filename",
         str(session.directory / "segment-%05d.m4s"),
         str(session.playlist_path),
     ]
-    return command, accelerator
+    return command
 
 
 def generate_hls_session(session: PlaybackSession) -> None:
@@ -2693,13 +2126,13 @@ def generate_hls_session(session: PlaybackSession) -> None:
             if session.has_audio:
                 audio_read, audio_write = os.pipe()
             try:
-                command, accelerator = _hls_command(
+                session.video = playback_video_mode(session.camera_id, native_audio)
+                command = _hls_command(
                     f"pipe:{video_read}",
                     f"pipe:{audio_read}" if audio_read is not None else None,
                     session,
                 )
-                session.accelerator_used = accelerator
-                session.phase = f"Preparing {session.request['quality'].replace('_', ' ')} HLS"
+                session.phase = f"Preparing {session.request['quality']} HLS"
                 pass_fds = (video_read,) if audio_read is None else (video_read, audio_read)
                 session.ffmpeg_process = subprocess.Popen(
                     command,
@@ -2817,6 +2250,10 @@ def generate_hls_session(session: PlaybackSession) -> None:
         _terminate_process(session.ffmpeg_process)
         for thread in feeder_threads:
             thread.join(timeout=2)
+        timing = _read_live_timing(session.directory) or {}
+        gop_seconds = float(timing.get("gop_seconds", 0) or 0)
+        if gop_seconds and timing.get("backend", "native_9008") == "native_9008":
+            _remember_capability(session.camera_id, "gop_seconds", gop_seconds)
         session.finished_at = time.time()
         lock.release()
 
@@ -2828,11 +2265,8 @@ def create_playback_session(camera_id: str, request: dict[str, Any]) -> Playback
     if not 5 <= duration <= PLAYBACK_MAX_SECONDS:
         raise ValueError(f"Duration must be 5-{PLAYBACK_MAX_SECONDS} seconds")
     quality = str(request.get("quality", "original"))
-    if quality == "auto":
-        selected = str(acceleration_capabilities().get("selected", "none"))
-        quality = "balanced" if selected not in ("none", "software") else "original"
-    if quality not in ("original", "balanced", "data_saver"):
-        raise ValueError("Quality must be auto, original, balanced, or data_saver")
+    if quality not in QUALITIES:
+        raise ValueError("Quality must be original or low")
     gain_db = int(request.get("gain_db", DEFAULT_GAIN))
     if gain_db not in (0, 6, 12, 18, 24):
         raise ValueError("Audio gain must be 0, 6, 12, 18, or 24 dB")
@@ -3053,7 +2487,6 @@ class Handler(BaseHTTPRequestHandler):
             "Cache-Control",
             "no-store" if asset.endswith(".m3u8") else "private, max-age=3600, immutable",
         )
-        self.send_header("X-TVT-Archive-Accelerator", value.accelerator_used)
         if status == 206:
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
         self._headers()
@@ -3082,10 +2515,7 @@ class Handler(BaseHTTPRequestHandler):
                     "ok": True,
                     "version": APP_VERSION,
                     "camera_count": len(CAMERAS),
-                    "accelerator": acceleration_capabilities(),
-                    "normal_video_mode": "H.264 stream copy",
-                    "playback_transport": "HLS fMP4 sessions",
-                    "hls_player": f"hls.js {HLS_JS_VERSION}",
+                    "encoder": encoder_info(),
                     "native_session_limit_per_camera": NATIVE_SESSION_LIMIT,
                     "active_jobs": sum(j.status in ("queued", "running") for j in JOBS.values()),
                     "active_playback_sessions": sum(
@@ -3248,6 +2678,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["show-token"]:
+        print(TOKEN)
+        raise SystemExit(0)
+    if sys.argv[1:] not in ([], ["run"]):
+        raise SystemExit(f"usage: {sys.argv[0]} [run|show-token]")
     threading.Thread(target=cleanup_loop, name="cache-cleanup", daemon=True).start()
     clean_cache()
     server = ThreadingHTTPServer((BIND, PORT), Handler)

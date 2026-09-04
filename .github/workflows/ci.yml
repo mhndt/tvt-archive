@@ -42,10 +42,10 @@ jobs:
         run: bash tests/run-tests.sh
 
       - name: Shell syntax
-        run: bash -n setup.sh docker/entrypoint.sh scripts/package-hacs.sh
+        run: bash -n setup.sh scripts/package-hacs.sh
 
       - name: ShellCheck
-        run: shellcheck setup.sh docker/entrypoint.sh scripts/package-hacs.sh
+        run: shellcheck setup.sh scripts/package-hacs.sh
 
       - name: Validate JSON
         run: |
@@ -61,8 +61,7 @@ jobs:
         run: |
           cp .env.example .env
           docker compose -f compose/compose.yaml config --quiet
-          docker compose -f compose/compose.yaml -f compose/intel-amd.yaml config --quiet
-          docker compose -f compose/compose.yaml -f compose/nvidia.yaml config --quiet
+          docker compose -f compose/compose.yaml -f compose/vaapi.yaml config --quiet
           docker compose -f compose/compose.yaml -f compose/build-local.yaml config --quiet
 
       - name: Build HACS package

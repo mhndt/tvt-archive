@@ -22,7 +22,7 @@ CONFIG.mkdir()
     json.dumps(
         {
             "server": {"bind": "127.0.0.1", "port": 18099, "token": "test-token"},
-            "processing": {"accelerator": "auto", "max_parallel_jobs": 1},
+            "processing": {"encoder": "software", "max_parallel_jobs": 1},
             "cameras": [
                 {
                     "id": "front_door",
@@ -58,6 +58,29 @@ class BridgeTests(unittest.TestCase):
         bridge.PLAYBACK_EXECUTOR.shutdown(wait=False, cancel_futures=True)
         TEMP.cleanup()
 
+    def test_load_config_creates_file_with_token(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            created = bridge.load_config(path)
+            self.assertGreaterEqual(len(created["server"]["token"]), 32)
+            self.assertEqual(created["cameras"], [])
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), created)
+
+    def test_load_config_migrates_accelerator(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "server": {"token": "t"},
+                        "processing": {"accelerator": "vaapi_full", "vaapi_driver": "iHD"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            processing = bridge.load_config(path)["processing"]
+            self.assertEqual(processing, {"encoder": "vaapi"})
+
     def test_authorization_requires_bearer_header(self) -> None:
         self.assertTrue(bridge.authorized("Bearer test-token"))
         self.assertFalse(bridge.authorized("Bearer wrong"))
@@ -90,32 +113,37 @@ class BridgeTests(unittest.TestCase):
         )
 
     def test_readable_export_filename(self) -> None:
-        name = bridge.export_filename(
-            "Front Door / East", datetime(2026, 7, 30, 6, 49, 14), 16, "original"
-        )
+        name = bridge.export_filename("Front Door / East", datetime(2026, 7, 30, 6, 49, 14), 16)
         self.assertEqual(
             name,
-            "Front-Door-East_2026-07-30_06-49-14_to_2026-07-30_06-49-30_Original.mp4",
+            "Front-Door-East_2026-07-30_06-49-14_to_2026-07-30_06-49-30.mp4",
         )
 
-    def test_full_vaapi_command_uses_proven_gpu_only_pipeline(self) -> None:
-        with patch.object(
-            bridge, "acceleration_capabilities", return_value={"selected": "vaapi_full"}
-        ):
-            pre, out, selected = bridge.transcode_video_args("balanced")
-        self.assertEqual(selected, "vaapi_full")
+    def test_low_quality_uses_software_x264_by_default(self) -> None:
+        pre, out = bridge.video_args("low", "software")
+        self.assertEqual(pre, [])
+        self.assertIn("libx264", out)
+        self.assertIn("scale=854:480:flags=fast_bilinear", out)
+
+    def test_vaapi_encoder_uses_full_gpu_pipeline(self) -> None:
+        pre, out = bridge.video_args("low", "vaapi")
         joined = " ".join(pre + out)
         self.assertIn("-hwaccel_output_format vaapi", joined)
-        self.assertIn("scale_vaapi=w=1280:h=720:format=nv12", joined)
+        self.assertIn("scale_vaapi=w=854:h=480:format=nv12", joined)
         self.assertIn("-c:v h264_vaapi", joined)
-        self.assertNotIn("hwdownload", joined)
-        self.assertNotIn("hwupload", joined)
 
-    def test_original_video_is_always_copied(self) -> None:
-        pre, out, selected = bridge.transcode_video_args("original")
-        self.assertEqual(pre, [])
-        self.assertEqual(out, ["-c:v", "copy"])
-        self.assertEqual(selected, "copy")
+    def test_copy_mode_never_encodes(self) -> None:
+        self.assertEqual(bridge.video_args("original", "copy"), ([], ["-c:v", "copy"]))
+
+    def test_playback_copies_only_with_short_learned_gop(self) -> None:
+        capability = bridge._camera_capabilities_path("front_door")
+        capability.unlink(missing_ok=True)
+        self.assertEqual(bridge.playback_video_mode("front_door", True), bridge.ENCODER)
+        bridge._remember_capability("front_door", "gop_seconds", 2.0)
+        self.assertEqual(bridge.playback_video_mode("front_door", True), "copy")
+        self.assertEqual(bridge.playback_video_mode("front_door", False), bridge.ENCODER)
+        bridge._remember_capability("front_door", "gop_seconds", 8.0)
+        self.assertEqual(bridge.playback_video_mode("front_door", True), bridge.ENCODER)
 
     def test_metadata_and_media_locks_are_independent(self) -> None:
         self.assertIsNot(
@@ -176,27 +204,12 @@ class BridgeTests(unittest.TestCase):
             (path / "index.m3u8").unlink()
             self.assertTrue(session.playlist_ready())
 
-    def test_original_hls_uses_short_gop_encoder_while_exports_still_copy(self) -> None:
-        with patch.object(
-            bridge, "acceleration_capabilities", return_value={"selected": "software"}
-        ):
-            pre, out, selected = bridge.hls_video_pipeline("original", source_fps=25.0)
-        self.assertEqual(pre, [])
-        self.assertEqual(selected, "software")
+    def test_hls_encode_forces_segment_length_gop(self) -> None:
+        _, out = bridge.video_args("original", "software", 25)
         self.assertIn("libx264", out)
-        self.assertNotIn("copy", out)
         self.assertEqual(out[out.index("-g") + 1], "25")
         self.assertIn("-force_key_frames", out)
-        file_pre, file_out, file_selected = bridge.transcode_video_args("original")
-        self.assertEqual((file_pre, file_out, file_selected), ([], ["-c:v", "copy"], "copy"))
-
-    def test_hls_gop_tracks_segment_length(self) -> None:
-        with patch.object(
-            bridge, "acceleration_capabilities", return_value={"selected": "software"}
-        ):
-            _, out, _ = bridge.hls_video_pipeline("data_saver", source_fps=25.0)
-        index = out.index("-g")
-        self.assertEqual(out[index + 1], str(round(25.0 * bridge.HLS_SEGMENT_SECONDS)))
+        self.assertIn("-sc_threshold", out)
 
     def test_timing_probe_uses_reported_fps_and_audio_without_waiting_full_legacy_deadline(
         self,
@@ -279,10 +292,8 @@ class BridgeTests(unittest.TestCase):
             session.has_audio = True
             session.audio_offset_ms = 2053
             session.audio_alignment_in_feeder = True
-            with patch.object(
-                bridge, "acceleration_capabilities", return_value={"selected": "software"}
-            ):
-                command, _ = bridge._hls_command("pipe:3", "pipe:4", session)
+            session.video = "software"
+            command = bridge._hls_command("pipe:3", "pipe:4", session)
             joined = " ".join(command)
             self.assertNotIn("adelay=2053", joined)
             self.assertIn("aresample=async=1:first_pts=0", joined)

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- The bridge creates and upgrades its own config file. The container entrypoint is `tvt-archive`; print the token with `docker exec tvt-archive tvt-archive show-token`.
+- Original playback copies the camera stream when its keyframe interval is 2 s or less, otherwise it is re-encoded. Exports always copy.
+- Video encoding is software by default with an opt-in `vaapi` encoder. GPU probing, QSV, NVIDIA, and hybrid pipelines are gone.
+- The Balanced (720p) quality is gone and Data Saver is now Low (480p).
+- Fixed playback pausing on slow links and a misplaced overlay on iOS.
 - The bridge accepts the access token only in the `Authorization: Bearer` header. Query-string tokens are rejected.
 - Bound incomplete native TCP/9008 fragment reassembly by object count, memory, and age.
 - Pin release workflow actions to commit SHAs.
