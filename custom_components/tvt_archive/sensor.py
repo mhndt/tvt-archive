@@ -25,7 +25,7 @@ class TVTSensorDescription(SensorEntityDescription):
 DESCRIPTIONS = (
     TVTSensorDescription(
         key="recorded_today",
-        name="Recorded today",
+        translation_key="recorded_today",
         native_unit_of_measurement=UnitOfTime.HOURS,
         device_class=SensorDeviceClass.DURATION,
         icon="mdi:timeline-clock",
@@ -33,7 +33,7 @@ DESCRIPTIONS = (
     ),
     TVTSensorDescription(
         key="available_history",
-        name="Available history",
+        translation_key="available_history",
         native_unit_of_measurement=UnitOfTime.HOURS,
         device_class=SensorDeviceClass.DURATION,
         icon="mdi:history",
@@ -41,7 +41,7 @@ DESCRIPTIONS = (
     ),
     TVTSensorDescription(
         key="oldest_recording",
-        name="Oldest recording",
+        translation_key="oldest_recording",
         device_class=SensorDeviceClass.TIMESTAMP,
         icon="mdi:history",
         timestamp=True,
@@ -49,7 +49,7 @@ DESCRIPTIONS = (
     ),
     TVTSensorDescription(
         key="latest_recording",
-        name="Latest recording",
+        translation_key="latest_recording",
         device_class=SensorDeviceClass.TIMESTAMP,
         icon="mdi:clock-check",
         timestamp=True,

@@ -25,14 +25,6 @@ body:
       label: Camera or recorder model and firmware
     validations:
       required: true
-  - type: dropdown
-    attributes:
-      label: Archive backend
-      options:
-        - Native TCP/9008
-        - Recorded RTSP
-    validations:
-      required: true
   - type: textarea
     attributes:
       label: What happened?

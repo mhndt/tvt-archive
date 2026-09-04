@@ -1,5 +1,4 @@
-# Developer/test override. Normal users should pull the published GHCR image
-# with compose/compose.yaml and should not build locally.
+# Development build. Normal installs pull the published image.
 services:
   tvt-archive:
     image: ${TVT_ARCHIVE_LOCAL_IMAGE:-tvt-archive:0.8.4-local}

@@ -10,6 +10,10 @@ class TVTArchiveApiError(Exception):
     """Raised when the TVT Archive bridge rejects a request."""
 
 
+class TVTArchiveAuthError(TVTArchiveApiError):
+    """Raised when the bridge rejects the access token."""
+
+
 class TVTArchiveApi:
     def __init__(self, session: ClientSession, base_url: str, token: str) -> None:
         self.session = session
@@ -45,9 +49,10 @@ class TVTArchiveApi:
             except Exception:
                 data = {"error": await response.text()}
             if response.status >= 400:
-                raise TVTArchiveApiError(
-                    str(data.get("error", f"Bridge returned HTTP {response.status}"))
-                )
+                message = str(data.get("error", f"Bridge returned HTTP {response.status}"))
+                if response.status == 401:
+                    raise TVTArchiveAuthError(message)
+                raise TVTArchiveApiError(message)
             return data
 
     async def health(self) -> dict[str, Any]:

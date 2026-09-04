@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Pure-Python interoperability client for TVT/NVMS TCP/9008 archives.
-
-This module implements only the read-only operations required by TVT Archive:
-login, recording searches, and recorded-media playback. It does not change
-camera settings or delete recordings.
-"""
+"""Read-only client for the TVT TCP/9008 archive protocol: login, search, playback."""
 
 from __future__ import annotations
 
@@ -101,7 +96,6 @@ class CaptureSummary:
     continuation_commands: int = 0
     timed_out: bool = False
     has_audio: bool = False
-    backend: str = "native_9008"
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -125,7 +119,6 @@ class CaptureSummary:
             "continuation_commands": self.continuation_commands,
             "timed_out": self.timed_out,
             "has_audio": self.has_audio,
-            "backend": self.backend,
         }
 
 
@@ -537,17 +530,14 @@ class TVT9008Client:
         timing_path = output_directory / "timing.json"
         summary_path = output_directory / "summary.json"
         stop = start + timedelta(seconds=duration)
-        # The camera and container share local wall-clock time. mktime deliberately
-        # interprets the naive camera timestamp in the container's mounted timezone.
+        # Camera timestamps are local time; the container runs in the camera's timezone.
         start_epoch = int(time.mktime(start.timetuple()))
         stop_epoch = int(time.mktime(stop.timetuple()))
         summary = CaptureSummary()
         self.send(KIND_PLAYBACK_START, request_id, self._playback_body(start_epoch, stop_epoch))
         self.wait_for(KIND_PLAYBACK_START_RESPONSE, request_id, self.timeout)
         target_end_us = stop_epoch * 1_000_000
-        # Archive delivery on real cameras can be substantially slower than realtime.
-        # A generous overall deadline avoids killing a healthy slow stream, while the
-        # mid-stream video watchdog below catches a connection that is actually stuck.
+        # Delivery can be far slower than realtime; the stall watchdog catches a stuck connection.
         deadline = time.monotonic() + duration * NATIVE_CAPTURE_DEADLINE_FACTOR + 60
         next_continue_frame = CONTINUATION_INTERVAL_FRAMES
         last_video_wall: float | None = None
@@ -656,8 +646,7 @@ class TVT9008Client:
         if self.reader is not None:
             summary.fragmented_objects = self.reader.fragmented_objects
             summary.fragment_chunks = self.reader.fragment_chunks
-        # There is no proven playback-stop command. Closing the TCP session is
-        # the clean termination mechanism used by this read-only client.
+        # No stop command is known; closing the socket ends playback.
         write_timing()
         _atomic_json(summary_path, summary.as_dict())
         return summary

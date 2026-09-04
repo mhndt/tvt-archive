@@ -28,7 +28,7 @@ async def async_setup_entry(
 
 
 class TVTRecordingSensor(TVTArchiveEntity, BinarySensorEntity):
-    _attr_name = "Recording"
+    _attr_translation_key = "recording"
     _attr_device_class = BinarySensorDeviceClass.RUNNING
     _attr_icon = "mdi:record-rec"
 

@@ -29,10 +29,8 @@ CONFIG.mkdir()
                     "name": "Front Door",
                     "host": "192.0.2.10",
                     "port": 9008,
-                    "channel": 0,
                     "username": "test",
                     "password": "not-a-real-secret",
-                    "archive_backend": "native_9008",
                 }
             ],
         }
@@ -80,6 +78,20 @@ class BridgeTests(unittest.TestCase):
             )
             processing = bridge.load_config(path)["processing"]
             self.assertEqual(processing, {"encoder": "vaapi"})
+
+    def test_load_config_drops_rtsp_camera_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "server": {"token": "t"},
+                        "cameras": [{"id": "a", "archive_backend": "rtsp", "rtsp_port": 554}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(bridge.load_config(path)["cameras"], [{"id": "a"}])
 
     def test_authorization_requires_bearer_header(self) -> None:
         self.assertTrue(bridge.authorized("Bearer test-token"))
@@ -138,12 +150,11 @@ class BridgeTests(unittest.TestCase):
     def test_playback_copies_only_with_short_learned_gop(self) -> None:
         capability = bridge._camera_capabilities_path("front_door")
         capability.unlink(missing_ok=True)
-        self.assertEqual(bridge.playback_video_mode("front_door", True), bridge.ENCODER)
+        self.assertEqual(bridge.playback_video_mode("front_door"), bridge.ENCODER)
         bridge._remember_capability("front_door", "gop_seconds", 2.0)
-        self.assertEqual(bridge.playback_video_mode("front_door", True), "copy")
-        self.assertEqual(bridge.playback_video_mode("front_door", False), bridge.ENCODER)
+        self.assertEqual(bridge.playback_video_mode("front_door"), "copy")
         bridge._remember_capability("front_door", "gop_seconds", 8.0)
-        self.assertEqual(bridge.playback_video_mode("front_door", True), bridge.ENCODER)
+        self.assertEqual(bridge.playback_video_mode("front_door"), bridge.ENCODER)
 
     def test_metadata_and_media_locks_are_independent(self) -> None:
         self.assertIsNot(
@@ -222,7 +233,6 @@ class BridgeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=bridge.WORK) as directory:
             path = Path(directory)
             timing = {
-                "backend": "native_9008",
                 "video_frames": bridge.HLS_TIMING_SAMPLE_FRAMES,
                 "audio_frames": bridge.HLS_TIMING_SAMPLE_FRAMES - 1,
                 "first_video_time_us": 1_000_000,

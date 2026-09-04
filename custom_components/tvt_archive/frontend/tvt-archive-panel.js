@@ -104,8 +104,7 @@ class TVTFmp4Player {
     this.controlsHideDelayMs = 2000;
     this.initialControlsShown = false;
     this.startBufferSeconds = Math.max(2, Math.min(12, Number(startBufferSeconds || 3)));
-    // Firefox's decoded range can be a few hundred milliseconds shorter than
-    // the playlist duration because of fMP4 timestamp and audio alignment.
+    // Firefox reports slightly less buffered media than the playlist duration.
     this.startBufferToleranceSeconds = 0.45;
     this.resumeBufferSeconds = 0.6;
     this._boundSeeking = () => {
@@ -725,12 +724,13 @@ class TVTArchivePanel extends HTMLElement {
 
   _statusValues() {
     const status = this._status || {};
+    const mode = this._playbackSession?.video || status.encoder?.name || "—";
+    const gop = Number(status.gop_seconds || 0);
     return {
       recording: status.timeline_today?.recording_now ? "Running" : status.online === false ? "Offline" : "Not active",
       today: status.timeline_today?.recorded_hours == null ? "—" : historyText(status.timeline_today.recorded_hours),
       history: historyText(status.availability?.available_history_hours),
-      archive: this._camera?.archive_backend === "rtsp" ? "Recorded RTSP" : "Native TCP/9008",
-      video: this._playbackSession?.video || status.encoder?.name || "—",
+      video: mode !== "copy" && gop > 2 ? `${mode} (camera keyframes every ${Math.round(gop)} s)` : mode,
       oldest: status.availability?.earliest ? new Date(status.availability.earliest).toLocaleString() : "—",
       latest: status.availability?.latest ? new Date(status.availability.latest).toLocaleString() : "—",
     };
@@ -836,7 +836,7 @@ class TVTArchivePanel extends HTMLElement {
       <div class="shell"><div class="card"><div class="player-head"><b>${$esc(this._camera?.name || "Camera")}</b><span class="subtle">${$esc(this._date)} ${$esc(selected)}</span></div><div id="player" class="player"></div></div>
         <div class="card sidebar">
           <div class="stat"><span>Recording</span><b id="stat-recording">${$esc(values.recording)}</b></div><div class="stat"><span>Recorded today</span><b id="stat-today">${$esc(values.today)}</b></div>
-          <div class="stat"><span>Available history</span><b id="stat-history">${$esc(values.history)}</b></div><div class="stat"><span>Archive media</span><b id="stat-archive">${$esc(values.archive)}</b></div>
+          <div class="stat"><span>Available history</span><b id="stat-history">${$esc(values.history)}</b></div>
 <div class="stat"><span>Video</span><b id="stat-video">${$esc(values.video)}</b></div>
           <div class="stat"><span>Oldest recording</span><b id="stat-oldest">${$esc(values.oldest)}</b></div><div class="stat"><span>Latest recording</span><b id="stat-latest">${$esc(values.latest)}</b></div>
         </div>
@@ -1001,9 +1001,6 @@ class TVTArchivePanel extends HTMLElement {
     const duration = Math.max(5, Math.min(900, 86400 - Math.floor(this._selectedSec)));
     this._message = `Opening ${quality.replaceAll("_", " ")} recording`;
     this._render();
-    // Create the visible shell immediately, then attach one stable signed playlist
-    // to the local hls.js player when the backend announces it. The same player
-    // remains attached while the event playlist grows.
     this._primeRecordingPlayer();
     try {
       const session = await this._api("POST", `tvt_archive/${this._entryId}/cameras/${this._cameraId}/sessions`, {
@@ -1025,12 +1022,7 @@ class TVTArchivePanel extends HTMLElement {
       const alreadyAttached = Boolean(this._recordingController?.url || previous?.playlist_url);
       const fresh = await this._api("GET", `tvt_archive/${this._entryId}/sessions/${sessionId}`);
       if (this._playbackSession?.id !== sessionId) return;
-      // Playlist readiness is supposed to be sticky, but retain the first signed
-      // URL locally as well so a transient metadata/proxy read can never tear
-      // down a player that is already receiving segments.
-      // Keep the first signed media URLs for the lifetime of this player. The HA
-      // proxy signs each status response, so preferring the fresh URL recreated
-      // Firefox's media element every second and caused the 1.4s/opening loop.
+      // Keep the first signed URLs; every status response carries new ones and swapping recreates the player.
       const playlistUrl = previous?.playlist_url || fresh.playlist_url || null;
       const playerScriptUrl = previous?.player_script_url || fresh.player_script_url || null;
       const session = {

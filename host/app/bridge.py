@@ -97,6 +97,17 @@ def load_config(path: Path) -> dict[str, Any]:
         processing["encoder"] = "vaapi" if "vaapi" in str(old) or "qsv" in str(old) else "software"
     for key in ("vaapi_driver", "qsv_device", "hls_audio_detect_seconds"):
         processing.pop(key, None)
+    for item in config.get("cameras", []):
+        if isinstance(item, dict):
+            for key in (
+                "archive_backend",
+                "channel",
+                "rtsp_port",
+                "rtsp_stream_type",
+                "rtsp_transport",
+                "rtsp_fps",
+            ):
+                item.pop(key, None)
     return config
 
 
@@ -305,7 +316,6 @@ class PlaybackSession:
             return 0
 
     def buffered_seconds(self) -> float:
-        """Return real HLS media duration, including long copy-mode GOP segments."""
         try:
             text = self.playlist_path.read_text(encoding="utf-8")
         except OSError:
@@ -319,10 +329,7 @@ class PlaybackSession:
         return total
 
     def playlist_ready(self) -> bool:
-        # Once the playlist has been exposed, keep it exposed. FFmpeg replaces
-        # the event playlist atomically while adding segments, and a transient
-        # read/stat race must not make Home Assistant withdraw the signed URL
-        # and cause the browser player to be recreated.
+        # Stay ready once announced; a transient stat race must not tear down the player.
         if self.playlist_announced:
             return True
         try:
@@ -429,11 +436,6 @@ def camera_lock(camera_id: str) -> threading.Lock:
 
 
 def camera_session_slot(camera_id: str) -> threading.BoundedSemaphore:
-    """Return the per-camera archive session gate.
-
-    Two native TCP/9008 sessions are permitted by default because real-camera
-    testing proved that playback and one export can run together reliably.
-    """
     with CONFIG_LOCK:
         if camera_id not in CAMERA_SESSION_SLOTS:
             raise KeyError(f"Unknown camera: {camera_id}")
@@ -454,14 +456,8 @@ def safe_camera(camera_id: str) -> dict[str, Any]:
         "name": str(item.get("name", camera_id)),
         "host": str(item["host"]),
         "port": int(item.get("port", 9008)),
-        "channel": int(item.get("channel", 0)),
         "username": str(item.get("username", "")),
-        "archive_backend": str(item.get("archive_backend", "native_9008")),
         "recording_audio": recording_audio_mode(camera_id),
-        "rtsp_port": int(item.get("rtsp_port", 554)),
-        "rtsp_stream_type": str(item.get("rtsp_stream_type", "main")),
-        "rtsp_transport": str(item.get("rtsp_transport", "tcp")),
-        "rtsp_fps": float(item.get("rtsp_fps", 25.0)),
     }
 
 
@@ -515,32 +511,14 @@ def normalize_camera_definition(
     camera_id = fixed_id or str(payload.get("id") or existing.get("id") or next_camera_id(name))
     if not CAMERA_ID_RE.fullmatch(camera_id):
         raise ValueError("Camera ID may contain only letters, numbers, underscores, and hyphens")
-    backend = str(payload.get("archive_backend", existing.get("archive_backend", "native_9008")))
-    if backend not in ("native_9008", "rtsp"):
-        raise ValueError("Archive backend must be native_9008 or rtsp")
     recording_audio = (
         str(payload.get("recording_audio", existing.get("recording_audio", "auto"))).strip().lower()
     )
     if recording_audio not in RECORDING_AUDIO_MODES:
         raise ValueError("Recording audio mode must be auto, on, or off")
     port = int(payload.get("port", existing.get("port", 9008)))
-    rtsp_port = int(payload.get("rtsp_port", existing.get("rtsp_port", 554)))
-    channel = int(payload.get("channel", existing.get("channel", 0)))
-    rtsp_fps = float(payload.get("rtsp_fps", existing.get("rtsp_fps", 25.0)))
-    rtsp_stream_type = str(
-        payload.get("rtsp_stream_type", existing.get("rtsp_stream_type", "main"))
-    )
-    rtsp_transport = str(payload.get("rtsp_transport", existing.get("rtsp_transport", "tcp")))
-    if not 1 <= port <= 65535 or not 1 <= rtsp_port <= 65535:
-        raise ValueError("Camera ports must be between 1 and 65535")
-    if not 0 <= channel <= 255:
-        raise ValueError("Camera channel must be between 0 and 255")
-    if not 5 <= rtsp_fps <= 120:
-        raise ValueError("Recorded RTSP FPS must be between 5 and 120")
-    if rtsp_stream_type not in ("main", "sub"):
-        raise ValueError("Recorded RTSP stream must be main or sub")
-    if rtsp_transport not in ("tcp", "udp"):
-        raise ValueError("Recorded RTSP transport must be tcp or udp")
+    if not 1 <= port <= 65535:
+        raise ValueError("Camera port must be between 1 and 65535")
     username = str(payload.get("username", existing.get("username", ""))).strip()
     supplied_password = payload.get("password")
     password = (
@@ -555,15 +533,9 @@ def normalize_camera_definition(
         "name": name,
         "host": normalize_host(payload.get("host", existing.get("host"))),
         "port": port,
-        "rtsp_port": rtsp_port,
-        "channel": channel,
         "username": username,
         "password": password,
-        "archive_backend": backend,
         "recording_audio": recording_audio,
-        "rtsp_stream_type": rtsp_stream_type,
-        "rtsp_transport": rtsp_transport,
-        "rtsp_fps": rtsp_fps,
     }
 
 
@@ -571,16 +543,10 @@ def capture_environment(item: dict[str, Any]) -> dict[str, str]:
     env = os.environ.copy()
     env.update(
         {
-            "TVT_ARCHIVE_BACKEND": str(item.get("archive_backend", "native_9008")),
             "TVT_HOST": str(item.get("connect_host", item["host"])),
             "TVT_PORT": str(item.get("connect_port", item.get("port", 9008))),
-            "TVT_RTSP_PORT": str(item.get("rtsp_port", 554)),
-            "TVT_RTSP_STREAM_TYPE": str(item.get("rtsp_stream_type", "main")),
-            "TVT_RTSP_TRANSPORT": str(item.get("rtsp_transport", "tcp")),
-            "TVT_RTSP_FPS": str(item.get("rtsp_fps", 25.0)),
             "TVT_USER": str(item["username"]),
             "TVT_PASSWORD": str(item["password"]),
-            "TVT_CHANNEL": str(item.get("channel", 0)),
         }
     )
     return env
@@ -722,14 +688,11 @@ def run_capture_with_progress(
     env: dict[str, str],
     log_path: Path,
 ) -> None:
-    started = time.monotonic()
     timing_path = work_directory / "timing.json"
 
     def monitor() -> None:
         timing = _read_json_if_ready(timing_path)
         captured = min(float(duration), _captured_span_seconds(timing))
-        if captured <= 0 and str(env.get("TVT_ARCHIVE_BACKEND")) == "rtsp":
-            captured = min(float(duration), time.monotonic() - started)
         fraction = min(1.0, captured / max(1, duration))
         update_job(
             job,
@@ -826,7 +789,6 @@ def test_camera_definition(item: dict[str, Any]) -> dict[str, Any]:
         "online": True,
         "segments_found": len(segments),
         "recording_dates": len(dates),
-        "archive_backend": item.get("archive_backend", "native_9008"),
     }
 
 
@@ -876,18 +838,7 @@ def update_camera_definition(camera_id: str, payload: dict[str, Any]) -> dict[st
     if camera_has_active_jobs(camera_id):
         raise ValueError("Wait for this camera's active playback/download job to finish")
     item = normalize_camera_definition(payload, existing, fixed_id=camera_id)
-    connection_keys = {
-        "host",
-        "port",
-        "rtsp_port",
-        "channel",
-        "username",
-        "password",
-        "archive_backend",
-        "rtsp_stream_type",
-        "rtsp_transport",
-        "rtsp_fps",
-    }
+    connection_keys = ("host", "port", "username", "password")
     if any(item.get(key) != existing.get(key) for key in connection_keys):
         with camera_lock(camera_id):
             test = test_camera_definition(item)
@@ -949,13 +900,7 @@ def validate_date(value: str) -> dt.date:
 
 
 def promote_completed_file(source: Path, destination: Path, *, mode: int = 0o600) -> None:
-    """Publish a completed file atomically, including across Docker volumes.
-
-    ``os.replace`` is atomic but raises EXDEV when /state and /cache are separate
-    mounts.  In that case copy into a temporary file *inside the destination
-    directory*, flush it, and atomically rename that temporary file into place.
-    Readers therefore never observe a partially copied export.
-    """
+    """Move into place atomically, copying first when the volumes differ (EXDEV)."""
     destination.parent.mkdir(parents=True, exist_ok=True)
     try:
         os.replace(source, destination)
@@ -1071,8 +1016,6 @@ def search_window(
         "camera_id": camera_id,
         "query_start": start.isoformat(timespec="seconds"),
         "query_stop": stop.isoformat(timespec="seconds"),
-        "channel": int(item.get("channel", 0)),
-        "archive_backend": str(item.get("archive_backend", "native_9008")),
         "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
         **merge_segments(raw_segments, start, stop),
     }
@@ -1169,9 +1112,9 @@ def encoder_info() -> dict[str, Any]:
     }
 
 
-def playback_video_mode(camera_id: str, native: bool) -> str:
+def playback_video_mode(camera_id: str) -> str:
     gop = float(_read_camera_capabilities(camera_id).get("gop_seconds", 0) or 0)
-    if native and 0 < gop <= COPY_MAX_GOP_SECONDS:
+    if 0 < gop <= COPY_MAX_GOP_SECONDS:
         return "copy"
     return ENCODER
 
@@ -1359,7 +1302,7 @@ def generate_job(job: Job) -> None:
         video_frames = int(summary.get("video_frames", 0))
         audio_frames = int(summary.get("audio_frames", 0))
         gop_seconds = float(summary.get("gop_seconds", 0) or 0)
-        if gop_seconds and summary.get("backend", "native_9008") == "native_9008":
+        if gop_seconds:
             _remember_capability(job.camera_id, "gop_seconds", gop_seconds)
         has_audio = (
             bool(summary.get("has_audio", audio_frames > 0))
@@ -1587,7 +1530,7 @@ def _stream_failure_detail(work_directory: Path) -> str:
         parts.append(f"archive capture log:\n{native}")
     if ffmpeg:
         parts.append(f"FFmpeg log:\n{ffmpeg}")
-    return "\n\n".join(parts) or "No native-capture or FFmpeg diagnostics were produced."
+    return "\n\n".join(parts) or "No capture or ffmpeg diagnostics were produced."
 
 
 def _feed_growing_file(
@@ -1796,15 +1739,7 @@ def _wait_for_capture_timing(
     probe_audio: bool = True,
     phase_callback: Callable[[str], None] | None = None,
 ) -> tuple[float, int, bool]:
-    """Wait for first video, then briefly measure cadence and audio timing.
-
-    Camera connection/login/seek time remains in the ``Opening`` phase. The
-    short timing deadline begins only after the first video packet is visible,
-    so a transport retry no longer consumes the frame-analysis budget. Native
-    timing JSON already contains a rolling source_fps estimate; use it as a
-    safe fallback when packet timestamps do not span cleanly enough for the
-    direct calculation.
-    """
+    """Wait for the first video, then measure frame rate and audio offset."""
     opening_deadline = time.monotonic() + HLS_FIRST_MEDIA_TIMEOUT_SECONDS
     probe_deadline: float | None = None
     latest: dict[str, Any] | None = None
@@ -1838,13 +1773,7 @@ def _wait_for_capture_timing(
         now = time.monotonic()
         latest = _read_live_timing(directory) or latest
         if latest:
-            backend = str(latest.get("backend", "native_9008"))
             frames = int(latest.get("video_frames", 0) or 0)
-            if backend == "rtsp":
-                fps = measured_fps(latest)
-                if fps:
-                    return fps, 0, False
-
             if frames > 0 and probe_deadline is None:
                 probe_deadline = now + HLS_TIMING_MAX_SECONDS
                 if phase_callback is not None:
@@ -1892,7 +1821,6 @@ def _wait_for_capture_timing(
 
 
 def _friendly_capture_error(detail: str, return_code: int | None = None) -> str:
-    """Turn transport failures into concise UI errors while logs retain detail."""
     text = detail or ""
     lower = text.lower()
     if "no route to host" in lower or "network is unreachable" in lower:
@@ -2034,9 +1962,8 @@ def generate_hls_session(session: PlaybackSession) -> None:
             startup_error: RuntimeError | None = None
             measured_offset = 0
             audio_mode = recording_audio_mode(session.camera_id)
-            native_audio = str(item.get("archive_backend", "native_9008")) == "native_9008"
             learned_audio = _learned_archive_audio(session.camera_id)
-            probe_audio = bool(native_audio and audio_mode == "auto" and not learned_audio)
+            probe_audio = audio_mode == "auto" and not learned_audio
             for startup_attempt in range(HLS_FIRST_MEDIA_RETRIES + 1):
                 if startup_attempt:
                     session.phase = (
@@ -2051,8 +1978,6 @@ def generate_hls_session(session: PlaybackSession) -> None:
                         audio_path,
                         directory / "timing.json",
                         directory / "summary.json",
-                        directory / "rtsp-progress.txt",
-                        directory / "rtsp-ffmpeg.log",
                     ):
                         stale_path.unlink(missing_ok=True)
                     if session.stop_event.wait(0.50):
@@ -2100,10 +2025,10 @@ def generate_hls_session(session: PlaybackSession) -> None:
                 ) from startup_error
 
             detected_audio = bool(session.has_audio)
-            if detected_audio and native_audio:
+            if detected_audio:
                 _remember_archive_audio(session.camera_id)
                 learned_audio = True
-            if not native_audio or audio_mode == "off":
+            if audio_mode == "off":
                 expected_audio = False
             elif audio_mode == "on":
                 expected_audio = True
@@ -2111,7 +2036,7 @@ def generate_hls_session(session: PlaybackSession) -> None:
                 expected_audio = detected_audio or learned_audio
             session.has_audio = expected_audio
             session.audio_offset_ms = measured_offset
-            session.audio_alignment_in_feeder = bool(expected_audio and native_audio)
+            session.audio_alignment_in_feeder = expected_audio
             LOG.info(
                 "Playback session %s measured %.4f fps, %d ms audio offset, detected_audio=%s expected_audio=%s mode=%s",
                 session.id,
@@ -2126,7 +2051,7 @@ def generate_hls_session(session: PlaybackSession) -> None:
             if session.has_audio:
                 audio_read, audio_write = os.pipe()
             try:
-                session.video = playback_video_mode(session.camera_id, native_audio)
+                session.video = playback_video_mode(session.camera_id)
                 command = _hls_command(
                     f"pipe:{video_read}",
                     f"pipe:{audio_read}" if audio_read is not None else None,
@@ -2179,7 +2104,7 @@ def generate_hls_session(session: PlaybackSession) -> None:
                             daemon=True,
                         )
                     )
-            elif native_audio and audio_mode == "auto" and not learned_audio:
+            elif audio_mode == "auto" and not learned_audio:
                 feeder_threads.append(
                     threading.Thread(
                         target=_watch_for_archive_audio,
@@ -2210,9 +2135,7 @@ def generate_hls_session(session: PlaybackSession) -> None:
                 and capture_rc is None
                 and session.capture_process is not None
             ):
-                # FFmpeg can observe EOF a fraction before the capture helper exits.
-                # Give the helper a moment so its real exit status wins over the
-                # superficially successful HLS finalization.
+                # ffmpeg may see EOF before the capture helper exits; let its status win.
                 try:
                     capture_rc = session.capture_process.wait(timeout=1.0)
                 except subprocess.TimeoutExpired:
@@ -2252,7 +2175,7 @@ def generate_hls_session(session: PlaybackSession) -> None:
             thread.join(timeout=2)
         timing = _read_live_timing(session.directory) or {}
         gop_seconds = float(timing.get("gop_seconds", 0) or 0)
-        if gop_seconds and timing.get("backend", "native_9008") == "native_9008":
+        if gop_seconds:
             _remember_capability(session.camera_id, "gop_seconds", gop_seconds)
         session.finished_at = time.time()
         lock.release()
@@ -2330,6 +2253,7 @@ def authorized(header: str) -> bool:
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "TVTArchiveBridge/0.8.4"
+    timeout = 60
 
     def log_message(self, fmt: str, *args: Any) -> None:
         LOG.info("%s %s", self.address_string(), fmt % args)
@@ -2387,77 +2311,9 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             LOG.info("Player-library client disconnected")
 
-    def _serve_file(
-        self, path: Path, filename: str, download: bool, *, head_only: bool = False
+    def _send_range(
+        self, path: Path, content_type: str, headers: dict[str, str], *, head_only: bool
     ) -> None:
-        if not path.is_file():
-            self._error(404, "File not found", head_only=head_only)
-            return
-        size, start, end, status = path.stat().st_size, 0, path.stat().st_size - 1, 200
-        range_header = self.headers.get("Range")
-        if range_header:
-            match = re.match(r"bytes=(\d*)-(\d*)$", range_header.strip())
-            if not match:
-                self._error(416, "Invalid byte range", head_only=head_only)
-                return
-            if match.group(1):
-                start = int(match.group(1))
-            if match.group(2):
-                end = int(match.group(2))
-            if not match.group(1) and match.group(2):
-                start, end = max(0, size - int(match.group(2))), size - 1
-            if start >= size or start > end:
-                self.send_response(416)
-                self.send_header("Content-Range", f"bytes */{size}")
-                self.end_headers()
-                return
-            end, status = min(end, size - 1), 206
-        length = end - start + 1
-        self.send_response(status)
-        self.send_header("Content-Type", "video/mp4")
-        self.send_header("Content-Length", str(length))
-        self.send_header("Accept-Ranges", "bytes")
-        self.send_header("Cache-Control", "private, max-age=3600")
-        if status == 206:
-            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
-        self.send_header(
-            "Content-Disposition",
-            f'{"attachment" if download else "inline"}; filename="{filename}"',
-        )
-        self._headers()
-        self.end_headers()
-        if head_only:
-            return
-        try:
-            with path.open("rb") as handle:
-                handle.seek(start)
-                remaining = length
-                while remaining:
-                    block = handle.read(min(1024 * 1024, remaining))
-                    if not block:
-                        break
-                    self.wfile.write(block)
-                    remaining -= len(block)
-        except (BrokenPipeError, ConnectionResetError):
-            LOG.info("Prepared-file client disconnected: %s", filename)
-
-    def _serve_hls_asset(self, session_id: str, asset: str, *, head_only: bool = False) -> None:
-        value = _session(session_id)
-        if not re.fullmatch(r"(?:index\.m3u8|init\.mp4|segment-\d{5}\.m4s)", asset):
-            self._error(404, "Unknown HLS asset", head_only=head_only)
-            return
-        path = value.directory / asset
-        if not path.is_file():
-            if value.status == "error":
-                self._error(409, value.error or "Playback session failed", head_only=head_only)
-            else:
-                self._error(425, "Playback media is not ready yet", head_only=head_only)
-            return
-        content_type = {
-            ".m3u8": "application/vnd.apple.mpegurl",
-            ".mp4": "video/mp4",
-            ".m4s": "video/iso.segment",
-        }.get(path.suffix, "application/octet-stream")
         size = path.stat().st_size
         start, end, status = 0, size - 1, 200
         range_header = self.headers.get("Range")
@@ -2483,25 +2339,60 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(length))
         self.send_header("Accept-Ranges", "bytes")
-        self.send_header(
-            "Cache-Control",
-            "no-store" if asset.endswith(".m3u8") else "private, max-age=3600, immutable",
-        )
         if status == 206:
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        for key, value in headers.items():
+            self.send_header(key, value)
         self._headers()
         self.end_headers()
         if head_only:
             return
-        with path.open("rb") as handle:
-            handle.seek(start)
-            remaining = length
-            while remaining:
-                block = handle.read(min(1024 * 1024, remaining))
-                if not block:
-                    break
-                self.wfile.write(block)
-                remaining -= len(block)
+        try:
+            with path.open("rb") as handle:
+                handle.seek(start)
+                remaining = length
+                while remaining:
+                    block = handle.read(min(1024 * 1024, remaining))
+                    if not block:
+                        break
+                    self.wfile.write(block)
+                    remaining -= len(block)
+        except (BrokenPipeError, ConnectionResetError):
+            LOG.info("Client disconnected: %s", path.name)
+
+    def _serve_file(
+        self, path: Path, filename: str, download: bool, *, head_only: bool = False
+    ) -> None:
+        if not path.is_file():
+            self._error(404, "File not found", head_only=head_only)
+            return
+        disposition = f'{"attachment" if download else "inline"}; filename="{filename}"'
+        self._send_range(
+            path,
+            "video/mp4",
+            {"Cache-Control": "private, max-age=3600", "Content-Disposition": disposition},
+            head_only=head_only,
+        )
+
+    def _serve_hls_asset(self, session_id: str, asset: str, *, head_only: bool = False) -> None:
+        value = _session(session_id)
+        if not re.fullmatch(r"(?:index\.m3u8|init\.mp4|segment-\d{5}\.m4s)", asset):
+            self._error(404, "Unknown HLS asset", head_only=head_only)
+            return
+        path = value.directory / asset
+        if not path.is_file():
+            if value.status == "error":
+                self._error(409, value.error or "Playback session failed", head_only=head_only)
+            else:
+                self._error(425, "Playback media is not ready yet", head_only=head_only)
+            return
+        content_type = {
+            ".m3u8": "application/vnd.apple.mpegurl",
+            ".mp4": "video/mp4",
+            ".m4s": "video/iso.segment",
+        }[path.suffix]
+        cache = "no-store" if asset.endswith(".m3u8") else "private, max-age=3600, immutable"
+        self._send_range(path, content_type, {"Cache-Control": cache}, head_only=head_only)
 
     def _route_get(self, *, head_only: bool = False) -> None:
         parsed, query = self._parse()

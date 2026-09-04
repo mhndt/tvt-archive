@@ -1,4 +1,29 @@
-This document describes the read-only subset implemented by TVT Archive. Integer fields are little-endian unless stated otherwise.
+# Protocol notes
+
+This file records the read-only subset of TVT's archive protocol that TVT Archive implements: login, recording search, and playback over one TCP connection to port 9008. Integer fields are little-endian unless stated otherwise. Everything below was observed on a TVT TD-C12; other firmware may differ.
+
+## How it was found
+
+The goal was to play and export what the camera had already recorded to its SD card. Four steps got there, each answering one question.
+
+| Step | Question | Answer |
+|---|---|---|
+| Recorded RTSP | Can the archive be read at all? | Yes. `rtsp://…/chID=0&date=…&time=…&timelen=…&action=playback` returns stored H.264, but no usable audio. |
+| Vendor Linux SDK | Is audio on the card? | Yes. The SDK's playback callback delivers H.264, mono 8 kHz G.711 A-law, timestamps, and searchable ranges. The SDK was not kept because it needs a platform-specific binary. |
+| Packet capture of NVMS | How does the vendor software get both? | One TCP connection to port 9008 carries login, calendar and range queries, video, audio, heartbeats, and playback continuation. |
+| Python canaries | Which messages are actually required? | One operation at a time was replayed until login, search, playback, fragment reassembly, and the continuation cadence were reproduced. |
+
+The result is the pure-Python client in `host/app/native9008.py`. It only reads: it never changes camera settings or deletes recordings.
+
+## Recorded RTSP
+
+Before the native client existed, playback used the camera's RTSP server, and that path shipped as a video-only fallback through 0.8.4. The URL is:
+
+```text
+rtsp://USER:PASS@CAMERA:554/chID=0&date=YYYY-MM-DD&time=HH:MM:SS&timelen=SECONDS&streamType=main&action=playback
+```
+
+`chID` is the channel, `timelen` the length in seconds, and `streamType` is `main` or `sub`. ffmpeg with `-rtsp_transport tcp` and `-c:v copy` pulls the stored H.264. On the TD-C12 the audio track was unusable, the calendar and timeline still needed the native connection, and the fallback required its own page of settings, so it was removed in 0.9.0. The URL above still works for anyone who needs it by hand.
 
 ## Session layout
 
@@ -199,7 +224,7 @@ timing.json  rolling timing and progress state
 summary.json final capture statistics
 ```
 
-The next conversion stage is described in [Media pipeline](MEDIA_PIPELINE.md).
+The next conversion stage is described in [Media pipeline](media-pipeline.md).
 
 ## Playback continuation
 
@@ -220,8 +245,3 @@ Controlled tests on the TVT TD-C12 found that sending it every 25 received video
 
 The cadence may need device-specific adjustment if other firmware behaves differently.
 
-## Scope
-
-The implementation searches recording metadata and reads historical media. It does not change camera configuration or delete recordings.
-
-The protocol has been validated against a TVT TD-C12. Other models and firmware may differ.

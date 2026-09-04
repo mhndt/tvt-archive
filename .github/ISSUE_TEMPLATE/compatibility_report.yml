@@ -36,13 +36,10 @@ body:
     attributes:
       label: Results
       options:
-        - label: Native metadata/timeline works
-        - label: Native recorded video works
-        - label: Native recorded audio works
-        - label: Recorded RTSP works
-        - label: Original playback works
-        - label: Balanced 720p works
-        - label: Data Saver 480p works
+        - label: Calendar and timeline work
+        - label: Video plays
+        - label: Audio plays
+        - label: Low (480p) plays
         - label: MP4 export works
   - type: textarea
     attributes:

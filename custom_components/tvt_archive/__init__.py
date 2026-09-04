@@ -109,6 +109,5 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not unloaded:
         return False
     hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
-    # Keep the registered static path/module/panel during config-entry reloads.
-    # A Home Assistant restart naturally removes them when the integration no longer exists.
+    # Static paths and the panel stay registered across reloads.
     return True

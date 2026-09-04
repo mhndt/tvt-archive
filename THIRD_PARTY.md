@@ -6,7 +6,7 @@ TVT Archive is licensed under the MIT License. The container and integration als
 
 The runtime image installs FFmpeg, FFprobe, libva tools, and general VAAPI drivers from Debian 13 (Trixie). These packages and any enabled codec components remain subject to their own upstream and Debian licensing terms. TVT Archive invokes the packaged executables and libraries; it does not copy their source into this repository.
 
-On `linux/amd64`, the image also installs Debian's `intel-media-va-driver-non-free` package for Intel iHD support. The verified Intel HD Graphics 530 environment reports FFmpeg 7.1.5, libva 2.22.0, and Intel media-driver 25.2.3.
+On `linux/amd64`, the image also installs Debian's `intel-media-va-driver-non-free` package for Intel iHD support.
 
 Exact package versions for a published image are available through container diagnostics and the image SBOM.
 
