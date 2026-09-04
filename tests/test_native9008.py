@@ -126,14 +126,13 @@ class NativePlaybackTests(unittest.TestCase):
         client = native9008.TVT9008Client("camera", 9008, "user", "password")
         sent: list[tuple[int, int, bytes]] = []
         client.send = lambda kind, request_id, body=b"": sent.append((kind, request_id, body))  # type: ignore[method-assign]
-        client.wait_for = lambda kind, request_id, timeout: native9008.InnerFrame(kind, request_id or 0, 3, b"")  # type: ignore[method-assign]
+        client.wait_for = lambda kind, request_id, timeout: native9008.InnerFrame(
+            kind, request_id or 0, 3, b""
+        )  # type: ignore[method-assign]
 
         start = datetime(2026, 7, 30, 6, 49, 14)
         start_epoch = int(time.mktime(start.timetuple()))
-        frames = iter(
-            video_frame(start_epoch * 1_000_000 + index * 40_000)
-            for index in range(51)
-        )
+        frames = iter(video_frame(start_epoch * 1_000_000 + index * 40_000) for index in range(51))
         client.read_frame = lambda: next(frames)  # type: ignore[method-assign]
 
         with tempfile.TemporaryDirectory() as directory:
@@ -154,7 +153,9 @@ class NativePlaybackTests(unittest.TestCase):
     def test_midstream_video_stall_raises_timeout(self) -> None:
         client = native9008.TVT9008Client("camera", 9008, "user", "password")
         client.send = lambda *args, **kwargs: None  # type: ignore[method-assign]
-        client.wait_for = lambda kind, request_id, timeout: native9008.InnerFrame(kind, request_id or 0, 3, b"")  # type: ignore[method-assign]
+        client.wait_for = lambda kind, request_id, timeout: native9008.InnerFrame(
+            kind, request_id or 0, 3, b""
+        )  # type: ignore[method-assign]
 
         start = datetime(2026, 7, 30, 6, 49, 14)
         start_epoch = int(time.mktime(start.timetuple()))
@@ -208,7 +209,9 @@ class NativePlaybackTests(unittest.TestCase):
         native9008.socket.create_connection = lambda *args, **kwargs: fake  # type: ignore[assignment]
         try:
             client = native9008.TVT9008Client("camera", 9008, "user", "password")
-            client.wait_for = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("login failed"))  # type: ignore[method-assign]
+            client.wait_for = lambda *args, **kwargs: (_ for _ in ()).throw(
+                RuntimeError("login failed")
+            )  # type: ignore[method-assign]
             with self.assertRaisesRegex(RuntimeError, "login failed"):
                 client.connect()
             self.assertTrue(fake.closed)

@@ -39,14 +39,13 @@ def _hls_signature(key: bytes, entry_id: str, session_id: str, expires: int) -> 
     payload = f"{entry_id}:{session_id}:{expires}".encode()
     return hmac.new(key, payload, hashlib.sha256).hexdigest()
 
+
 def _player_signature(key: bytes, entry_id: str, expires: int) -> str:
     payload = f"player:{entry_id}:{expires}".encode()
     return hmac.new(key, payload, hashlib.sha256).hexdigest()
 
 
-def _add_media_urls(
-    entry_id: str, data: dict[str, Any], job: dict[str, Any]
-) -> dict[str, Any]:
+def _add_media_urls(entry_id: str, data: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
     result = dict(job)
     if result.get("ready"):
         expires = int(time.time()) + _MEDIA_URL_TTL_SECONDS
@@ -62,9 +61,7 @@ def _add_media_urls(
     return result
 
 
-def _add_hls_url(
-    entry_id: str, data: dict[str, Any], session: dict[str, Any]
-) -> dict[str, Any]:
+def _add_hls_url(entry_id: str, data: dict[str, Any], session: dict[str, Any]) -> dict[str, Any]:
     result = dict(session)
     created_at = int(result.get("created_at_unix", int(time.time())))
     player_expires = created_at + _PLAYER_URL_TTL_SECONDS
@@ -111,9 +108,7 @@ class StatusView(HomeAssistantView):
 
     async def get(self, request, entry_id, camera_id):
         data = _entry_data(request.app["hass"], entry_id)
-        return self.json(
-            await data["api"].status(camera_id, request.query.get("refresh") == "1")
-        )
+        return self.json(await data["api"].status(camera_id, request.query.get("refresh") == "1"))
 
 
 class TimelineView(HomeAssistantView):
@@ -127,9 +122,7 @@ class TimelineView(HomeAssistantView):
             raise web.HTTPBadRequest(text="date is required")
         data = _entry_data(request.app["hass"], entry_id)
         return self.json(
-            await data["api"].timeline(
-                camera_id, date, request.query.get("refresh") == "1"
-            )
+            await data["api"].timeline(camera_id, date, request.query.get("refresh") == "1")
         )
 
 
@@ -211,6 +204,7 @@ class HLSLibraryView(HomeAssistantView):
             charset="utf-8",
             headers={"Cache-Control": "public, max-age=31536000, immutable"},
         )
+
 
 class HLSAssetView(HomeAssistantView):
     url = "/api/tvt_archive/hls/{entry_id}/{session_id}/{expires}/{signature}/{asset}"

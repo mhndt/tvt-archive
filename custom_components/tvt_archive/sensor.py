@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorEntityDescription
 from homeassistant.config_entries import ConfigEntry
@@ -19,7 +20,6 @@ from .entity import TVTArchiveEntity
 class TVTSensorDescription(SensorEntityDescription):
     value_fn: Callable[[dict[str, Any]], Any]
     timestamp: bool = False
-
 
 
 DESCRIPTIONS = (
@@ -58,15 +58,23 @@ DESCRIPTIONS = (
 )
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry,
-                            async_add_entities: AddConfigEntryEntitiesCallback) -> None:
+async def async_setup_entry(
+    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddConfigEntryEntitiesCallback
+) -> None:
     data = hass.data[DOMAIN][entry.entry_id]
     coordinator = data["coordinator"]
     entities = []
     for camera in coordinator.data.get("cameras", []):
         for description in DESCRIPTIONS:
-            entities.append(TVTArchiveSensor(coordinator, entry.entry_id, str(camera["id"]),
-                                             str(camera.get("name", camera["id"])), description))
+            entities.append(
+                TVTArchiveSensor(
+                    coordinator,
+                    entry.entry_id,
+                    str(camera["id"]),
+                    str(camera.get("name", camera["id"])),
+                    description,
+                )
+            )
     async_add_entities(entities)
 
 

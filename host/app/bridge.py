@@ -5,27 +5,27 @@ import concurrent.futures
 import dataclasses
 import datetime as dt
 import errno
-import hashlib
 import functools
-import ipaddress
+import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
 import re
-import select
-import sys
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 import traceback
 import urllib.parse
 import uuid
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from native9008 import TVT9008Client
 
@@ -50,7 +50,9 @@ HLS_JS_VERSION = os.environ.get("TVT_ARCHIVE_HLS_JS_VERSION", "1.6.16")
 for directory in (CACHE, WORK, INDEX, LOGS):
     directory.mkdir(parents=True, exist_ok=True)
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(threadName)s %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s %(levelname)s %(threadName)s %(message)s"
+)
 LOG = logging.getLogger("tvt-archive")
 
 CAMERA_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
@@ -93,14 +95,21 @@ CACHE_HOURS = int(PROCESSING.get("cache_hours", 6))
 DEFAULT_GAIN = int(PROCESSING.get("default_gain_db", 0))
 PLAYBACK_MAX_SECONDS = int(PROCESSING.get("playback_max_seconds", 900))
 DOWNLOAD_MAX_SECONDS = int(PROCESSING.get("download_max_seconds", 3600))
-ACCELERATOR_PREFERENCE = str(PROCESSING.get("accelerator", os.environ.get("TVT_ARCHIVE_ACCELERATOR", "auto"))).lower()
-VAAPI_DRIVER_PREFERENCE = str(PROCESSING.get("vaapi_driver", os.environ.get("TVT_ARCHIVE_VAAPI_DRIVER", "auto"))).strip() or "auto"
-DRI_DEVICE = str(PROCESSING.get("dri_device", os.environ.get("TVT_ARCHIVE_DRI_DEVICE", "/dev/dri/renderD128")))
-STREAM_AUDIO_DELAY_MS = int(PROCESSING.get("stream_audio_delay_ms", os.environ.get("TVT_ARCHIVE_STREAM_AUDIO_DELAY_MS", 0)))
-MAX_WORKERS = max(1, min(int(PROCESSING.get("max_parallel_jobs", 1)), 4))
-NATIVE_SESSION_LIMIT = max(
-    1, min(int(PROCESSING.get("max_native_sessions_per_camera", 2)), 4)
+ACCELERATOR_PREFERENCE = str(
+    PROCESSING.get("accelerator", os.environ.get("TVT_ARCHIVE_ACCELERATOR", "auto"))
+).lower()
+VAAPI_DRIVER_PREFERENCE = (
+    str(PROCESSING.get("vaapi_driver", os.environ.get("TVT_ARCHIVE_VAAPI_DRIVER", "auto"))).strip()
+    or "auto"
 )
+DRI_DEVICE = str(
+    PROCESSING.get("dri_device", os.environ.get("TVT_ARCHIVE_DRI_DEVICE", "/dev/dri/renderD128"))
+)
+STREAM_AUDIO_DELAY_MS = int(
+    PROCESSING.get("stream_audio_delay_ms", os.environ.get("TVT_ARCHIVE_STREAM_AUDIO_DELAY_MS", 0))
+)
+MAX_WORKERS = max(1, min(int(PROCESSING.get("max_parallel_jobs", 1)), 4))
+NATIVE_SESSION_LIMIT = max(1, min(int(PROCESSING.get("max_native_sessions_per_camera", 2)), 4))
 
 CAMERA_LOCKS: dict[str, threading.Lock] = {camera_id: threading.Lock() for camera_id in CAMERAS}
 CAMERA_SESSION_SLOTS: dict[str, threading.BoundedSemaphore] = {
@@ -108,61 +117,69 @@ CAMERA_SESSION_SLOTS: dict[str, threading.BoundedSemaphore] = {
 }
 METADATA_LOCKS: dict[str, threading.Lock] = {camera_id: threading.Lock() for camera_id in CAMERAS}
 JOBS_LOCK = threading.Lock()
-JOBS: dict[str, "Job"] = {}
+JOBS: dict[str, Job] = {}
 CACHE_TO_JOB: dict[str, str] = {}
-EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="camera-job")
+EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=MAX_WORKERS, thread_name_prefix="camera-job"
+)
 PLAYBACK_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=max(1, min(int(PROCESSING.get("max_parallel_playback_sessions", 2)), 4)),
     thread_name_prefix="playback-session",
 )
 SESSIONS_LOCK = threading.RLock()
-SESSIONS: dict[str, "PlaybackSession"] = {}
+SESSIONS: dict[str, PlaybackSession] = {}
 HLS_IDLE_SECONDS = max(60, int(PROCESSING.get("hls_idle_seconds", 300)))
 HLS_RETAIN_SECONDS = max(300, int(PROCESSING.get("hls_retain_seconds", 1800)))
 HLS_SEGMENT_SECONDS = max(1, min(int(PROCESSING.get("hls_segment_seconds", 1)), 6))
 HLS_START_BUFFER_SECONDS = max(
     2,
     min(
-        int(os.environ.get(
-            "TVT_ARCHIVE_HLS_START_BUFFER_SECONDS",
-            PROCESSING.get("hls_start_buffer_seconds", 2),
-        )),
+        int(
+            os.environ.get(
+                "TVT_ARCHIVE_HLS_START_BUFFER_SECONDS",
+                PROCESSING.get("hls_start_buffer_seconds", 2),
+            )
+        ),
         30,
     ),
 )
 HLS_TIMING_SAMPLE_FRAMES = max(
     8,
     min(
-        int(os.environ.get(
-            "TVT_ARCHIVE_HLS_TIMING_SAMPLE_FRAMES",
-            PROCESSING.get("hls_timing_sample_frames", 8),
-        )),
+        int(
+            os.environ.get(
+                "TVT_ARCHIVE_HLS_TIMING_SAMPLE_FRAMES",
+                PROCESSING.get("hls_timing_sample_frames", 8),
+            )
+        ),
         120,
     ),
 )
 HLS_FIRST_MEDIA_TIMEOUT_SECONDS = max(
     5.0,
     min(
-        float(os.environ.get(
-            "TVT_ARCHIVE_HLS_FIRST_MEDIA_TIMEOUT_SECONDS",
-            PROCESSING.get("hls_first_media_timeout_seconds", 30.0),
-        )),
+        float(
+            os.environ.get(
+                "TVT_ARCHIVE_HLS_FIRST_MEDIA_TIMEOUT_SECONDS",
+                PROCESSING.get("hls_first_media_timeout_seconds", 30.0),
+            )
+        ),
         90.0,
     ),
 )
 HLS_FIRST_MEDIA_RETRIES = max(
     0,
     min(
-        int(os.environ.get(
-            "TVT_ARCHIVE_HLS_FIRST_MEDIA_RETRIES",
-            PROCESSING.get("hls_first_media_retries", 1),
-        )),
+        int(
+            os.environ.get(
+                "TVT_ARCHIVE_HLS_FIRST_MEDIA_RETRIES",
+                PROCESSING.get("hls_first_media_retries", 1),
+            )
+        ),
         3,
     ),
 )
-HLS_TIMING_MAX_SECONDS = max(
-    0.75, min(float(PROCESSING.get("hls_timing_max_seconds", 2.5)), 10.0)
-)
+HLS_TIMING_MAX_SECONDS = max(0.75, min(float(PROCESSING.get("hls_timing_max_seconds", 2.5)), 10.0))
 HLS_AUDIO_PROBE_MEDIA_SECONDS = max(
     0.25,
     min(float(PROCESSING.get("hls_audio_probe_media_seconds", HLS_START_BUFFER_SECONDS)), 10.0),
@@ -215,7 +232,6 @@ class Job:
             "ready": self.status == "ready",
             "error": self.error,
             "accelerator_used": self.accelerator_used,
-            "qsv_used": self.accelerator_used.startswith("intel_qsv"),
             "video_frames": self.video_frames,
             "audio_frames": self.audio_frames,
             "filename": self.output_name,
@@ -286,7 +302,9 @@ class PlaybackSession:
                 return False
             count = self.segment_count()
             buffered = self.buffered_seconds()
-            ready = buffered >= HLS_START_BUFFER_SECONDS or (self.status == "complete" and count > 0)
+            ready = buffered >= HLS_START_BUFFER_SECONDS or (
+                self.status == "complete" and count > 0
+            )
             if ready:
                 self.playlist_announced = True
             return ready
@@ -318,8 +336,11 @@ class PlaybackSession:
             "source_fps": round(self.source_fps, 4),
             "audio_offset_ms": self.audio_offset_ms,
             "has_audio": self.has_audio,
-            "mime_type": ('video/mp4; codecs="avc1.640029, mp4a.40.2"' if self.has_audio
-                          else 'video/mp4; codecs="avc1.640029"'),
+            "mime_type": (
+                'video/mp4; codecs="avc1.640029, mp4a.40.2"'
+                if self.has_audio
+                else 'video/mp4; codecs="avc1.640029"'
+            ),
         }
 
 
@@ -334,33 +355,45 @@ RECORDING_AUDIO_MODES = {"auto", "on", "off"}
 ALAW_SAMPLE_RATE = 8000
 ALAW_SILENCE_BYTE = b"\xd5"
 
+
 def recording_audio_mode(camera_id: str) -> str:
     mode = str(camera(camera_id).get("recording_audio", "auto")).strip().lower()
     if mode not in RECORDING_AUDIO_MODES:
         raise ValueError("Recording audio mode must be auto, on, or off")
     return mode
 
+
 def _camera_capabilities_path(camera_id: str) -> Path:
     return camera_index_directory(camera_id) / "capabilities.json"
 
+
 def _read_camera_capabilities(camera_id: str) -> dict[str, Any]:
-    try: value=json.loads(_camera_capabilities_path(camera_id).read_text(encoding="utf-8"))
-    except (OSError,json.JSONDecodeError): return {}
-    return value if isinstance(value,dict) else {}
+    try:
+        value = json.loads(_camera_capabilities_path(camera_id).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
 
 def _learned_archive_audio(camera_id: str) -> bool:
-    return bool(_read_camera_capabilities(camera_id).get("recording_audio",False))
+    return bool(_read_camera_capabilities(camera_id).get("recording_audio", False))
+
 
 def _remember_archive_audio(camera_id: str) -> None:
     # Positive-only, per-camera learning. Never persist a negative capability.
     with CAPABILITIES_LOCK:
-        path=_camera_capabilities_path(camera_id); path.parent.mkdir(parents=True,exist_ok=True)
-        value=_read_camera_capabilities(camera_id)
-        if value.get("recording_audio") is True: return
-        value["recording_audio"]=True
-        tmp=path.with_name(path.name+".tmp"); tmp.write_text(json.dumps(value,indent=2)+"\n",encoding="utf-8")
-        os.chmod(tmp,0o600); os.replace(tmp,path)
-        LOG.info("Learned that camera %s provides archive audio",camera_id)
+        path = _camera_capabilities_path(camera_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        value = _read_camera_capabilities(camera_id)
+        if value.get("recording_audio") is True:
+            return
+        value["recording_audio"] = True
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+        LOG.info("Learned that camera %s provides archive audio", camera_id)
+
 
 def camera_lock(camera_id: str) -> threading.Lock:
     with CONFIG_LOCK:
@@ -405,6 +438,7 @@ def safe_camera(camera_id: str) -> dict[str, Any]:
         "rtsp_fps": float(item.get("rtsp_fps", 25.0)),
     }
 
+
 def list_cameras() -> list[dict[str, Any]]:
     with CONFIG_LOCK:
         camera_ids = list(CAMERAS)
@@ -437,13 +471,17 @@ def normalize_host(value: Any) -> str:
         return host
     except ValueError:
         pass
-    if not re.fullmatch(r"(?=.{1,253}\.?$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", host):
+    if not re.fullmatch(
+        r"(?=.{1,253}\.?$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?",
+        host,
+    ):
         raise ValueError("Camera host must be an IP address or valid hostname")
     return host
 
 
-def normalize_camera_definition(payload: dict[str, Any], existing: dict[str, Any] | None = None,
-                                *, fixed_id: str | None = None) -> dict[str, Any]:
+def normalize_camera_definition(
+    payload: dict[str, Any], existing: dict[str, Any] | None = None, *, fixed_id: str | None = None
+) -> dict[str, Any]:
     existing = dict(existing or {})
     name = str(payload.get("name", existing.get("name", ""))).strip()
     if not name or len(name) > 80:
@@ -454,14 +492,18 @@ def normalize_camera_definition(payload: dict[str, Any], existing: dict[str, Any
     backend = str(payload.get("archive_backend", existing.get("archive_backend", "native_9008")))
     if backend not in ("native_9008", "rtsp"):
         raise ValueError("Archive backend must be native_9008 or rtsp")
-    recording_audio = str(payload.get("recording_audio", existing.get("recording_audio", "auto"))).strip().lower()
+    recording_audio = (
+        str(payload.get("recording_audio", existing.get("recording_audio", "auto"))).strip().lower()
+    )
     if recording_audio not in RECORDING_AUDIO_MODES:
         raise ValueError("Recording audio mode must be auto, on, or off")
     port = int(payload.get("port", existing.get("port", 9008)))
     rtsp_port = int(payload.get("rtsp_port", existing.get("rtsp_port", 554)))
     channel = int(payload.get("channel", existing.get("channel", 0)))
     rtsp_fps = float(payload.get("rtsp_fps", existing.get("rtsp_fps", 25.0)))
-    rtsp_stream_type = str(payload.get("rtsp_stream_type", existing.get("rtsp_stream_type", "main")))
+    rtsp_stream_type = str(
+        payload.get("rtsp_stream_type", existing.get("rtsp_stream_type", "main"))
+    )
     rtsp_transport = str(payload.get("rtsp_transport", existing.get("rtsp_transport", "tcp")))
     if not 1 <= port <= 65535 or not 1 <= rtsp_port <= 65535:
         raise ValueError("Camera ports must be between 1 and 65535")
@@ -475,7 +517,11 @@ def normalize_camera_definition(payload: dict[str, Any], existing: dict[str, Any
         raise ValueError("Recorded RTSP transport must be tcp or udp")
     username = str(payload.get("username", existing.get("username", ""))).strip()
     supplied_password = payload.get("password")
-    password = str(supplied_password) if supplied_password not in (None, "") else str(existing.get("password", ""))
+    password = (
+        str(supplied_password)
+        if supplied_password not in (None, "")
+        else str(existing.get("password", ""))
+    )
     if not username or not password:
         raise ValueError("Camera username and password are required")
     return {
@@ -497,18 +543,20 @@ def normalize_camera_definition(payload: dict[str, Any], existing: dict[str, Any
 
 def capture_environment(item: dict[str, Any]) -> dict[str, str]:
     env = os.environ.copy()
-    env.update({
-        "TVT_ARCHIVE_BACKEND": str(item.get("archive_backend", "native_9008")),
-        "TVT_HOST": str(item.get("connect_host", item["host"])),
-        "TVT_PORT": str(item.get("connect_port", item.get("port", 9008))),
-        "TVT_RTSP_PORT": str(item.get("rtsp_port", 554)),
-        "TVT_RTSP_STREAM_TYPE": str(item.get("rtsp_stream_type", "main")),
-        "TVT_RTSP_TRANSPORT": str(item.get("rtsp_transport", "tcp")),
-        "TVT_RTSP_FPS": str(item.get("rtsp_fps", 25.0)),
-        "TVT_USER": str(item["username"]),
-        "TVT_PASSWORD": str(item["password"]),
-        "TVT_CHANNEL": str(item.get("channel", 0)),
-    })
+    env.update(
+        {
+            "TVT_ARCHIVE_BACKEND": str(item.get("archive_backend", "native_9008")),
+            "TVT_HOST": str(item.get("connect_host", item["host"])),
+            "TVT_PORT": str(item.get("connect_port", item.get("port", 9008))),
+            "TVT_RTSP_PORT": str(item.get("rtsp_port", 554)),
+            "TVT_RTSP_STREAM_TYPE": str(item.get("rtsp_stream_type", "main")),
+            "TVT_RTSP_TRANSPORT": str(item.get("rtsp_transport", "tcp")),
+            "TVT_RTSP_FPS": str(item.get("rtsp_fps", 25.0)),
+            "TVT_USER": str(item["username"]),
+            "TVT_PASSWORD": str(item["password"]),
+            "TVT_CHANNEL": str(item.get("channel", 0)),
+        }
+    )
     return env
 
 
@@ -516,15 +564,29 @@ def _metadata_client(item: dict[str, Any]) -> TVT9008Client:
     return TVT9008Client(
         str(item.get("connect_host", item["host"])),
         int(item.get("connect_port", item.get("port", 9008))),
-        str(item["username"]), str(item["password"]), timeout=8.0,
+        str(item["username"]),
+        str(item["password"]),
+        timeout=8.0,
     )
 
 
-def run_command(command: list[str], *, timeout: int, log_path: Path | None = None,
-                env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+def run_command(
+    command: list[str],
+    *,
+    timeout: int,
+    log_path: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     LOG.info("Running %s", " ".join(command[:2]) + (" …" if len(command) > 2 else ""))
-    completed = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                               text=True, timeout=timeout, check=False, env=env)
+    completed = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=timeout,
+        check=False,
+        env=env,
+    )
     output = completed.stdout or ""
     if env and env.get("TVT_PASSWORD"):
         output = output.replace(env["TVT_PASSWORD"], "***")
@@ -561,7 +623,10 @@ def _run_logged_process(
     timed_out = False
     with log_path.open("wb") as log_handle:
         process = subprocess.Popen(
-            command, stdout=log_handle, stderr=subprocess.STDOUT, env=env,
+            command,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            env=env,
         )
         try:
             while process.poll() is None:
@@ -595,6 +660,7 @@ def _run_logged_process(
     if process.returncode != 0:
         tail = "\n".join(output.splitlines()[-30:])
         raise RuntimeError(f"Command failed with exit code {process.returncode}:\n{tail}")
+
 
 def _read_json_if_ready(path: Path) -> dict[str, Any]:
     try:
@@ -640,12 +706,18 @@ def run_capture_with_progress(
             captured = min(float(duration), time.monotonic() - started)
         fraction = min(1.0, captured / max(1, duration))
         update_job(
-            job, progress=min(0.92, fraction * 0.92),
-            captured_seconds=captured, remaining_seconds=max(0.0, duration - captured),
+            job,
+            progress=min(0.92, fraction * 0.92),
+            captured_seconds=captured,
+            remaining_seconds=max(0.0, duration - captured),
         )
 
     _run_logged_process(
-        command, timeout=timeout, log_path=log_path, env=env, monitor=monitor,
+        command,
+        timeout=timeout,
+        log_path=log_path,
+        env=env,
+        monitor=monitor,
     )
     monitor()
     update_job(job, progress=0.92, captured_seconds=float(duration), remaining_seconds=0.0)
@@ -688,12 +760,17 @@ def run_ffmpeg_with_progress(
         processed = min(float(duration), _read_ffmpeg_out_time_seconds(progress_path))
         fraction = min(1.0, processed / max(1, duration))
         update_job(
-            job, progress=0.92 + fraction * 0.07,
-            processed_seconds=processed, remaining_seconds=0.0,
+            job,
+            progress=0.92 + fraction * 0.07,
+            processed_seconds=processed,
+            remaining_seconds=0.0,
         )
 
     _run_logged_process(
-        monitored_command, timeout=timeout, log_path=log_path, monitor=monitor,
+        monitored_command,
+        timeout=timeout,
+        log_path=log_path,
+        monitor=monitor,
     )
     monitor()
     update_job(job, progress=0.99, processed_seconds=float(duration), remaining_seconds=0.0)
@@ -701,11 +778,15 @@ def run_ffmpeg_with_progress(
 
 def camera_has_active_jobs(camera_id: str) -> bool:
     with JOBS_LOCK:
-        jobs = any(job.camera_id == camera_id and job.status in ("queued", "running")
-                   for job in JOBS.values())
+        jobs = any(
+            job.camera_id == camera_id and job.status in ("queued", "running")
+            for job in JOBS.values()
+        )
     with SESSIONS_LOCK:
-        sessions = any(value.camera_id == camera_id and value.status in ("queued", "running", "playing")
-                       for value in SESSIONS.values())
+        sessions = any(
+            value.camera_id == camera_id and value.status in ("queued", "running", "playing")
+            for value in SESSIONS.values()
+        )
     return jobs or sessions
 
 
@@ -715,9 +796,13 @@ def test_camera_definition(item: dict[str, Any]) -> dict[str, Any]:
     with _metadata_client(item) as client:
         segments = client.search(start, now)
         dates = client.recording_dates()
-    return {"online": True, "segments_found": len(segments),
-            "recording_dates": len(dates),
-            "archive_backend": item.get("archive_backend", "native_9008")}
+    return {
+        "online": True,
+        "segments_found": len(segments),
+        "recording_dates": len(dates),
+        "archive_backend": item.get("archive_backend", "native_9008"),
+    }
+
 
 def persist_camera_map(updated: dict[str, dict[str, Any]]) -> None:
     global CONFIG, CAMERAS, CAMERA_LOCKS, CAMERA_SESSION_SLOTS, METADATA_LOCKS
@@ -730,7 +815,9 @@ def persist_camera_map(updated: dict[str, dict[str, Any]]) -> None:
         old_metadata_locks = METADATA_LOCKS
         CONFIG = new_config
         CAMERAS = {camera_id: dict(item) for camera_id, item in updated.items()}
-        CAMERA_LOCKS = {camera_id: old_locks.get(camera_id, threading.Lock()) for camera_id in CAMERAS}
+        CAMERA_LOCKS = {
+            camera_id: old_locks.get(camera_id, threading.Lock()) for camera_id in CAMERAS
+        }
         CAMERA_SESSION_SLOTS = {
             camera_id: old_session_slots.get(
                 camera_id, threading.BoundedSemaphore(NATIVE_SESSION_LIMIT)
@@ -738,8 +825,7 @@ def persist_camera_map(updated: dict[str, dict[str, Any]]) -> None:
             for camera_id in CAMERAS
         }
         METADATA_LOCKS = {
-            camera_id: old_metadata_locks.get(camera_id, threading.Lock())
-            for camera_id in CAMERAS
+            camera_id: old_metadata_locks.get(camera_id, threading.Lock()) for camera_id in CAMERAS
         }
 
 
@@ -765,8 +851,16 @@ def update_camera_definition(camera_id: str, payload: dict[str, Any]) -> dict[st
         raise ValueError("Wait for this camera's active playback/download job to finish")
     item = normalize_camera_definition(payload, existing, fixed_id=camera_id)
     connection_keys = {
-        "host", "port", "rtsp_port", "channel", "username", "password",
-        "archive_backend", "rtsp_stream_type", "rtsp_transport", "rtsp_fps",
+        "host",
+        "port",
+        "rtsp_port",
+        "channel",
+        "username",
+        "password",
+        "archive_backend",
+        "rtsp_stream_type",
+        "rtsp_transport",
+        "rtsp_fps",
     }
     if any(item.get(key) != existing.get(key) for key in connection_keys):
         with camera_lock(camera_id):
@@ -782,9 +876,12 @@ def update_camera_definition(camera_id: str, payload: dict[str, Any]) -> dict[st
     camera_index = camera_index_directory(camera_id)
     if camera_index.exists():
         for cached in camera_index.iterdir():
-            if cached.name == "capabilities.json": continue
+            if cached.name == "capabilities.json":
+                continue
             try:
-                shutil.rmtree(cached, ignore_errors=True) if cached.is_dir() else cached.unlink(missing_ok=True)
+                shutil.rmtree(cached, ignore_errors=True) if cached.is_dir() else cached.unlink(
+                    missing_ok=True
+                )
             except OSError:
                 LOG.warning("Could not clear cached camera metadata: %s", cached)
     return {"camera": safe_camera(camera_id), "test": test}
@@ -797,8 +894,11 @@ def delete_camera_definition(camera_id: str) -> dict[str, Any]:
     lock = camera_lock(camera_id)
     with lock:
         with CONFIG_LOCK:
-            updated = {camera_id_: dict(value) for camera_id_, value in CAMERAS.items()
-                       if camera_id_ != camera_id}
+            updated = {
+                camera_id_: dict(value)
+                for camera_id_, value in CAMERAS.items()
+                if camera_id_ != camera_id
+            }
             if len(updated) == len(CAMERAS):
                 raise KeyError(f"Unknown camera: {camera_id}")
         persist_camera_map(updated)
@@ -848,9 +948,7 @@ def promote_completed_file(source: Path, destination: Path, *, mode: int = 0o600
         if error.errno != errno.EXDEV:
             raise
 
-    temporary = destination.with_name(
-        f".{destination.name}.{uuid.uuid4().hex}.tmp"
-    )
+    temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
     try:
         with source.open("rb") as input_file, temporary.open("xb") as output_file:
             shutil.copyfileobj(input_file, output_file, length=8 * 1024 * 1024)
@@ -863,8 +961,9 @@ def promote_completed_file(source: Path, destination: Path, *, mode: int = 0o600
         temporary.unlink(missing_ok=True)
 
 
-def merge_segments(raw_segments: list[dict[str, Any]], query_start: dt.datetime,
-                   query_stop: dt.datetime) -> dict[str, Any]:
+def merge_segments(
+    raw_segments: list[dict[str, Any]], query_start: dt.datetime, query_stop: dt.datetime
+) -> dict[str, Any]:
     intervals: list[tuple[dt.datetime, dt.datetime]] = []
     for segment in raw_segments:
         try:
@@ -892,18 +991,34 @@ def merge_segments(raw_segments: list[dict[str, Any]], query_start: dt.datetime,
     recorded_seconds = sum((stop - start).total_seconds() for start, stop in merged)
     return {
         "raw_segments": raw_segments,
-        "merged_ranges": [{"start": start.isoformat(timespec="seconds"),
-                           "stop": stop.isoformat(timespec="seconds")} for start, stop in merged],
-        "gaps": [{"start": start.isoformat(timespec="seconds"),
-                  "stop": stop.isoformat(timespec="seconds"),
-                  "seconds": int((stop - start).total_seconds())} for start, stop in gaps],
+        "merged_ranges": [
+            {
+                "start": start.isoformat(timespec="seconds"),
+                "stop": stop.isoformat(timespec="seconds"),
+            }
+            for start, stop in merged
+        ],
+        "gaps": [
+            {
+                "start": start.isoformat(timespec="seconds"),
+                "stop": stop.isoformat(timespec="seconds"),
+                "seconds": int((stop - start).total_seconds()),
+            }
+            for start, stop in gaps
+        ],
         "recorded_seconds": int(recorded_seconds),
         "recorded_hours": round(recorded_seconds / 3600, 2),
     }
 
 
-def search_window(camera_id: str, start: dt.datetime, stop: dt.datetime, *,
-                  cache_name: str | None = None, ttl: int = 60) -> dict[str, Any]:
+def search_window(
+    camera_id: str,
+    start: dt.datetime,
+    stop: dt.datetime,
+    *,
+    cache_name: str | None = None,
+    ttl: int = 60,
+) -> dict[str, Any]:
     item = camera(camera_id)
     camera_index = camera_index_directory(camera_id)
     camera_index.mkdir(parents=True, exist_ok=True)
@@ -948,16 +1063,20 @@ def search_window(camera_id: str, start: dt.datetime, stop: dt.datetime, *,
         json_dump_atomic(cache_path, result)
     return result
 
+
 def get_timeline(camera_id: str, day: dt.date, *, force: bool = False) -> dict[str, Any]:
     start = dt.datetime.combine(day, dt.time.min)
     stop = start + dt.timedelta(days=1)
-    result = search_window(camera_id, start, stop, cache_name=f"day-{day.isoformat()}",
-                           ttl=0 if force else 60)
+    result = search_window(
+        camera_id, start, stop, cache_name=f"day-{day.isoformat()}", ttl=0 if force else 60
+    )
     now = dt.datetime.now()
-    result["recording_now"] = (day == now.date() and any(
-        dt.datetime.fromisoformat(item["start"]) <= now <=
-        dt.datetime.fromisoformat(item["stop"]) + dt.timedelta(seconds=120)
-        for item in result["merged_ranges"]))
+    result["recording_now"] = day == now.date() and any(
+        dt.datetime.fromisoformat(item["start"])
+        <= now
+        <= dt.datetime.fromisoformat(item["stop"]) + dt.timedelta(seconds=120)
+        for item in result["merged_ranges"]
+    )
     return result
 
 
@@ -990,40 +1109,39 @@ def get_availability(camera_id: str, days: int) -> dict[str, Any]:
     return result
 
 
-def get_device_info(camera_id: str, *, force: bool = False) -> dict[str, Any]:
-    # The pure-Python interoperability backend currently implements archive
-    # metadata and playback only. Storage detail is deliberately reported as
-    # unavailable rather than retaining the proprietary SDK dependency.
-    item = camera(camera_id)
-    return {
-        "supported": False,
-        "disk_status": "unknown",
-        "disk_total_mb": 0,
-        "disks": [],
-        "archive_backend": str(item.get("archive_backend", "native_9008")),
-        "detail": "Storage details are not exposed by the current read-only protocol backend.",
-        "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
-    }
-
 def get_status(camera_id: str, *, force: bool = False) -> dict[str, Any]:
     try:
         today = get_timeline(camera_id, dt.date.today(), force=force)
         availability = get_availability(camera_id, int(PROCESSING.get("availability_days", 45)))
-        device = get_device_info(camera_id, force=force)
-        return {"camera": safe_camera(camera_id), "online": True, "timeline_today": today,
-                "availability": availability, "device": device,
-                "accelerator": acceleration_capabilities()}
+        return {
+            "camera": safe_camera(camera_id),
+            "online": True,
+            "timeline_today": today,
+            "availability": availability,
+            "accelerator": acceleration_capabilities(),
+        }
     except Exception as error:
         LOG.exception("Status failed for %s", camera_id)
-        return {"camera": safe_camera(camera_id), "online": False, "error": str(error),
-                "timeline_today": {}, "availability": {}, "device": {},
-                "accelerator": acceleration_capabilities()}
+        return {
+            "camera": safe_camera(camera_id),
+            "online": False,
+            "error": str(error),
+            "timeline_today": {},
+            "availability": {},
+            "accelerator": acceleration_capabilities(),
+        }
 
 
 def ffmpeg_version() -> str:
     try:
-        completed = subprocess.run(["ffmpeg", "-version"], stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT, text=True, timeout=10, check=False)
+        completed = subprocess.run(
+            ["ffmpeg", "-version"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=10,
+            check=False,
+        )
         return completed.stdout.splitlines()[0].strip() if completed.stdout else "unavailable"
     except Exception:
         return "unavailable"
@@ -1032,10 +1150,19 @@ def ffmpeg_version() -> str:
 @functools.lru_cache(maxsize=1)
 def ffmpeg_encoders() -> set[str]:
     try:
-        completed = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT, text=True, timeout=15, check=False)
-        return {match.group(1) for line in completed.stdout.splitlines()
-                if (match := re.match(r"^\s*[A-Z.]{6}\s+([^\s]+)", line))}
+        completed = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        return {
+            match.group(1)
+            for line in completed.stdout.splitlines()
+            if (match := re.match(r"^\s*[A-Z.]{6}\s+([^\s]+)", line))
+        }
     except Exception:
         return set()
 
@@ -1054,7 +1181,7 @@ def dri_vendor() -> str:
     return {"0x8086": "intel", "0x1002": "amd"}.get(value, value)
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def vaapi_runtime_driver_info(driver: str = "") -> str | None:
     if not _device_accessible(DRI_DEVICE):
         return None
@@ -1066,8 +1193,12 @@ def vaapi_runtime_driver_info(driver: str = "") -> str | None:
     try:
         completed = subprocess.run(
             ["vainfo", "--display", "drm", "--device", DRI_DEVICE],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-            timeout=15, check=False, env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=15,
+            check=False,
+            env=environment,
         )
     except Exception:
         return None
@@ -1080,7 +1211,7 @@ def vaapi_runtime_driver_info(driver: str = "") -> str | None:
     return None
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def encoder_works(candidate: str, vaapi_driver: str = "") -> bool:
     """Probe a complete decode, resize, and encode path before selecting it."""
     probe_dir = Path(tempfile.mkdtemp(prefix="accelerator-probe-", dir=WORK))
@@ -1092,11 +1223,36 @@ def encoder_works(candidate: str, vaapi_driver: str = "") -> bool:
         environment.pop("LIBVA_DRIVER_NAME", None)
     try:
         generated = subprocess.run(
-            ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
-             "-i", "testsrc2=size=1920x1080:rate=25", "-frames:v", "30",
-             "-pix_fmt", "yuvj420p", "-c:v", "libx264", "-preset", "ultrafast",
-             "-profile:v", "high", "-level:v", "4.1", "-f", "h264", str(source)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=45, check=False,
+            [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=1920x1080:rate=25",
+                "-frames:v",
+                "30",
+                "-pix_fmt",
+                "yuvj420p",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-profile:v",
+                "high",
+                "-level:v",
+                "4.1",
+                "-f",
+                "h264",
+                str(source),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=45,
+            check=False,
             env=environment,
         )
         if generated.returncode != 0 or not source.exists():
@@ -1104,65 +1260,184 @@ def encoder_works(candidate: str, vaapi_driver: str = "") -> bool:
         input_args = ["-f", "h264", "-i", str(source), "-frames:v", "20", "-an"]
         if candidate == "vaapi_full":
             command = [
-                "ffmpeg", "-hide_banner", "-loglevel", "error",
-                "-init_hw_device", f"vaapi=va:{DRI_DEVICE}", "-filter_hw_device", "va",
-                "-hwaccel", "vaapi", "-hwaccel_device", "va",
-                "-hwaccel_output_format", "vaapi", *input_args,
-                "-vf", "scale_vaapi=w=1280:h=720:format=nv12",
-                "-c:v", "h264_vaapi", "-profile:v", "high",
-                "-b:v", "2500k", "-maxrate", "3000k", "-bufsize", "5000k",
-                "-g", "50", "-f", "null", "-",
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-init_hw_device",
+                f"vaapi=va:{DRI_DEVICE}",
+                "-filter_hw_device",
+                "va",
+                "-hwaccel",
+                "vaapi",
+                "-hwaccel_device",
+                "va",
+                "-hwaccel_output_format",
+                "vaapi",
+                *input_args,
+                "-vf",
+                "scale_vaapi=w=1280:h=720:format=nv12",
+                "-c:v",
+                "h264_vaapi",
+                "-profile:v",
+                "high",
+                "-b:v",
+                "2500k",
+                "-maxrate",
+                "3000k",
+                "-bufsize",
+                "5000k",
+                "-g",
+                "50",
+                "-f",
+                "null",
+                "-",
             ]
         elif candidate == "intel_qsv_full":
             command = [
-                "ffmpeg", "-hide_banner", "-loglevel", "error",
-                "-init_hw_device", f"vaapi=va:{DRI_DEVICE}",
-                "-init_hw_device", "qsv=qs@va", "-filter_hw_device", "qs",
-                "-hwaccel", "qsv", "-hwaccel_device", "qs",
-                "-hwaccel_output_format", "qsv", *input_args,
-                "-vf", "vpp_qsv=w=1280:h=720", "-c:v", "h264_qsv",
-                "-global_quality", "24", "-look_ahead", "0", "-g", "50",
-                "-f", "null", "-",
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-init_hw_device",
+                f"vaapi=va:{DRI_DEVICE}",
+                "-init_hw_device",
+                "qsv=qs@va",
+                "-filter_hw_device",
+                "qs",
+                "-hwaccel",
+                "qsv",
+                "-hwaccel_device",
+                "qs",
+                "-hwaccel_output_format",
+                "qsv",
+                *input_args,
+                "-vf",
+                "vpp_qsv=w=1280:h=720",
+                "-c:v",
+                "h264_qsv",
+                "-global_quality",
+                "24",
+                "-look_ahead",
+                "0",
+                "-g",
+                "50",
+                "-f",
+                "null",
+                "-",
             ]
         elif candidate == "nvidia_full":
             command = [
-                "ffmpeg", "-hide_banner", "-loglevel", "error",
-                "-hwaccel", "cuda", "-hwaccel_output_format", "cuda", *input_args,
-                "-vf", "scale_cuda=1280:720", "-c:v", "h264_nvenc",
-                "-preset", "p4", "-cq", "24", "-b:v", "0", "-g", "50",
-                "-f", "null", "-",
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-hwaccel",
+                "cuda",
+                "-hwaccel_output_format",
+                "cuda",
+                *input_args,
+                "-vf",
+                "scale_cuda=1280:720",
+                "-c:v",
+                "h264_nvenc",
+                "-preset",
+                "p4",
+                "-cq",
+                "24",
+                "-b:v",
+                "0",
+                "-g",
+                "50",
+                "-f",
+                "null",
+                "-",
             ]
         elif candidate == "vaapi_hybrid":
             command = [
-                "ffmpeg", "-hide_banner", "-loglevel", "error",
-                "-init_hw_device", f"vaapi=va:{DRI_DEVICE}", "-filter_hw_device", "va",
-                *input_args, "-vf", "scale=1280:720:flags=fast_bilinear,format=nv12,hwupload",
-                "-c:v", "h264_vaapi", "-qp", "24", "-g", "50", "-f", "null", "-",
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-init_hw_device",
+                f"vaapi=va:{DRI_DEVICE}",
+                "-filter_hw_device",
+                "va",
+                *input_args,
+                "-vf",
+                "scale=1280:720:flags=fast_bilinear,format=nv12,hwupload",
+                "-c:v",
+                "h264_vaapi",
+                "-qp",
+                "24",
+                "-g",
+                "50",
+                "-f",
+                "null",
+                "-",
             ]
         elif candidate == "nvidia_hybrid":
             command = [
-                "ffmpeg", "-hide_banner", "-loglevel", "error", *input_args,
-                "-vf", "scale=1280:720:flags=fast_bilinear", "-c:v", "h264_nvenc",
-                "-preset", "p4", "-cq", "24", "-b:v", "0", "-g", "50",
-                "-f", "null", "-",
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                *input_args,
+                "-vf",
+                "scale=1280:720:flags=fast_bilinear",
+                "-c:v",
+                "h264_nvenc",
+                "-preset",
+                "p4",
+                "-cq",
+                "24",
+                "-b:v",
+                "0",
+                "-g",
+                "50",
+                "-f",
+                "null",
+                "-",
             ]
         elif candidate == "software":
             command = [
-                "ffmpeg", "-hide_banner", "-loglevel", "error", *input_args,
-                "-vf", "scale=1280:720:flags=fast_bilinear", "-c:v", "libx264",
-                "-preset", "veryfast", "-crf", "24", "-g", "50",
-                "-f", "null", "-",
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                *input_args,
+                "-vf",
+                "scale=1280:720:flags=fast_bilinear",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "24",
+                "-g",
+                "50",
+                "-f",
+                "null",
+                "-",
             ]
         else:
             return False
-        return subprocess.run(
-            command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            timeout=45, check=False, env=environment,
-        ).returncode == 0
+        return (
+            subprocess.run(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=45,
+                check=False,
+                env=environment,
+            ).returncode
+            == 0
+        )
     except Exception:
         return False
     finally:
         shutil.rmtree(probe_dir, ignore_errors=True)
+
 
 def _vaapi_driver_candidates() -> list[str]:
     if VAAPI_DRIVER_PREFERENCE.lower() not in ("auto", "default"):
@@ -1178,6 +1453,7 @@ def _vaapi_driver_candidates() -> list[str]:
             result.append(value)
     return result
 
+
 def acceleration_capabilities() -> dict[str, Any]:
     encoders = ffmpeg_encoders()
     available: list[str] = []
@@ -1185,25 +1461,50 @@ def acceleration_capabilities() -> dict[str, Any]:
     dri_ok = _device_accessible(DRI_DEVICE)
     selected_vaapi_driver = ""
 
-    qsv_driver = next((driver for driver in _vaapi_driver_candidates()
-                       if vendor == "intel" and dri_ok and "h264_qsv" in encoders
-                       and encoder_works("intel_qsv_full", driver)), None)
+    qsv_driver = next(
+        (
+            driver
+            for driver in _vaapi_driver_candidates()
+            if vendor == "intel"
+            and dri_ok
+            and "h264_qsv" in encoders
+            and encoder_works("intel_qsv_full", driver)
+        ),
+        None,
+    )
     if qsv_driver is not None:
         available.append("intel_qsv_full")
 
-    full_driver = next((driver for driver in _vaapi_driver_candidates()
-                        if dri_ok and "h264_vaapi" in encoders
-                        and encoder_works("vaapi_full", driver)), None)
+    full_driver = next(
+        (
+            driver
+            for driver in _vaapi_driver_candidates()
+            if dri_ok and "h264_vaapi" in encoders and encoder_works("vaapi_full", driver)
+        ),
+        None,
+    )
     if full_driver is not None:
         available.append("vaapi_full")
         selected_vaapi_driver = full_driver
 
-    if (Path("/dev/nvidia0").exists() or os.environ.get("NVIDIA_VISIBLE_DEVICES") not in (None, "", "void")) and "h264_nvenc" in encoders and encoder_works("nvidia_full"):
+    if (
+        (
+            Path("/dev/nvidia0").exists()
+            or os.environ.get("NVIDIA_VISIBLE_DEVICES") not in (None, "", "void")
+        )
+        and "h264_nvenc" in encoders
+        and encoder_works("nvidia_full")
+    ):
         available.append("nvidia_full")
 
-    hybrid_driver = next((driver for driver in _vaapi_driver_candidates()
-                          if dri_ok and "h264_vaapi" in encoders
-                          and encoder_works("vaapi_hybrid", driver)), None)
+    hybrid_driver = next(
+        (
+            driver
+            for driver in _vaapi_driver_candidates()
+            if dri_ok and "h264_vaapi" in encoders and encoder_works("vaapi_hybrid", driver)
+        ),
+        None,
+    )
     if hybrid_driver is not None:
         available.append("vaapi_hybrid")
         if not selected_vaapi_driver:
@@ -1215,12 +1516,22 @@ def acceleration_capabilities() -> dict[str, Any]:
         available.append("software")
 
     aliases = {
-        "qsv": "intel_qsv_full", "intel": "intel_qsv_full",
-        "vaapi": "vaapi_full", "nvidia": "nvidia_full", "cpu": "software",
+        "qsv": "intel_qsv_full",
+        "intel": "intel_qsv_full",
+        "vaapi": "vaapi_full",
+        "nvidia": "nvidia_full",
+        "cpu": "software",
     }
     preference = aliases.get(ACCELERATOR_PREFERENCE, ACCELERATOR_PREFERENCE)
     selected = "none"
-    order = ("vaapi_full", "intel_qsv_full", "nvidia_full", "vaapi_hybrid", "nvidia_hybrid", "software")
+    order = (
+        "vaapi_full",
+        "intel_qsv_full",
+        "nvidia_full",
+        "vaapi_hybrid",
+        "nvidia_hybrid",
+        "software",
+    )
     if preference == "auto":
         selected = next((candidate for candidate in order if candidate in available), "none")
     elif preference in available:
@@ -1237,7 +1548,8 @@ def acceleration_capabilities() -> dict[str, Any]:
         vaapi_runtime_driver_info(
             selected_vaapi_driver if selected.startswith("vaapi") else (qsv_driver or "")
         )
-        if selected in ("vaapi_full", "vaapi_hybrid", "intel_qsv_full") else None
+        if selected in ("vaapi_full", "vaapi_hybrid", "intel_qsv_full")
+        else None
     )
     reported_vaapi_driver = selected_vaapi_driver or None
     if not reported_vaapi_driver and runtime_driver:
@@ -1257,9 +1569,7 @@ def acceleration_capabilities() -> dict[str, Any]:
         "vaapi_driver_preference": VAAPI_DRIVER_PREFERENCE,
         "vaapi_driver": reported_vaapi_driver,
         "vaapi_runtime_driver": runtime_driver,
-        "packaged_intel_media_driver": os.environ.get(
-            "TVT_ARCHIVE_INTEL_MEDIA_DRIVER_VERSION"
-        ),
+        "packaged_intel_media_driver": os.environ.get("TVT_ARCHIVE_INTEL_MEDIA_DRIVER_VERSION"),
         "ffmpeg_version": ffmpeg_version(),
         "recording_playback_qualities": ["original", "balanced", "data_saver"],
         "playback_transport": "low_latency_hls_fmp4",
@@ -1275,42 +1585,135 @@ def transcode_video_args(quality: str) -> tuple[list[str], list[str], str]:
     width = 1280 if quality == "balanced" else 854
     height = 720 if quality == "balanced" else 480
     cq = "24" if quality == "balanced" else "29"
-    bitrate, maxrate, bufsize = (("2500k", "3000k", "5000k") if quality == "balanced"
-                                 else ("900k", "1200k", "2400k"))
+    bitrate, maxrate, bufsize = (
+        ("2500k", "3000k", "5000k") if quality == "balanced" else ("900k", "1200k", "2400k")
+    )
     if selected == "vaapi_full":
-        pre = ["-init_hw_device", f"vaapi=va:{DRI_DEVICE}", "-filter_hw_device", "va",
-               "-hwaccel", "vaapi", "-hwaccel_device", "va",
-               "-hwaccel_output_format", "vaapi"]
-        out = ["-vf", f"scale_vaapi=w={width}:h={height}:format=nv12",
-               "-c:v", "h264_vaapi", "-profile:v", "high",
-               "-b:v", bitrate, "-maxrate", maxrate, "-bufsize", bufsize, "-g", "50"]
+        pre = [
+            "-init_hw_device",
+            f"vaapi=va:{DRI_DEVICE}",
+            "-filter_hw_device",
+            "va",
+            "-hwaccel",
+            "vaapi",
+            "-hwaccel_device",
+            "va",
+            "-hwaccel_output_format",
+            "vaapi",
+        ]
+        out = [
+            "-vf",
+            f"scale_vaapi=w={width}:h={height}:format=nv12",
+            "-c:v",
+            "h264_vaapi",
+            "-profile:v",
+            "high",
+            "-b:v",
+            bitrate,
+            "-maxrate",
+            maxrate,
+            "-bufsize",
+            bufsize,
+            "-g",
+            "50",
+        ]
         return pre, out, selected
     if selected == "intel_qsv_full":
-        pre = ["-init_hw_device", f"vaapi=va:{DRI_DEVICE}", "-init_hw_device", "qsv=qs@va",
-               "-filter_hw_device", "qs", "-hwaccel", "qsv", "-hwaccel_device", "qs",
-               "-hwaccel_output_format", "qsv"]
-        out = ["-vf", f"vpp_qsv=w={width}:h={height}", "-c:v", "h264_qsv",
-               "-global_quality", cq, "-look_ahead", "0", "-g", "50"]
+        pre = [
+            "-init_hw_device",
+            f"vaapi=va:{DRI_DEVICE}",
+            "-init_hw_device",
+            "qsv=qs@va",
+            "-filter_hw_device",
+            "qs",
+            "-hwaccel",
+            "qsv",
+            "-hwaccel_device",
+            "qs",
+            "-hwaccel_output_format",
+            "qsv",
+        ]
+        out = [
+            "-vf",
+            f"vpp_qsv=w={width}:h={height}",
+            "-c:v",
+            "h264_qsv",
+            "-global_quality",
+            cq,
+            "-look_ahead",
+            "0",
+            "-g",
+            "50",
+        ]
         return pre, out, selected
     if selected == "nvidia_full":
         pre = ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
-        out = ["-vf", f"scale_cuda={width}:{height}", "-c:v", "h264_nvenc",
-               "-preset", "p4", "-cq", cq, "-b:v", "0", "-g", "50"]
+        out = [
+            "-vf",
+            f"scale_cuda={width}:{height}",
+            "-c:v",
+            "h264_nvenc",
+            "-preset",
+            "p4",
+            "-cq",
+            cq,
+            "-b:v",
+            "0",
+            "-g",
+            "50",
+        ]
         return pre, out, selected
     if selected == "vaapi_hybrid":
         pre = ["-init_hw_device", f"vaapi=va:{DRI_DEVICE}", "-filter_hw_device", "va"]
-        out = ["-vf", f"scale={width}:{height}:flags=fast_bilinear,format=nv12,hwupload",
-               "-c:v", "h264_vaapi", "-qp", cq, "-g", "50"]
+        out = [
+            "-vf",
+            f"scale={width}:{height}:flags=fast_bilinear,format=nv12,hwupload",
+            "-c:v",
+            "h264_vaapi",
+            "-qp",
+            cq,
+            "-g",
+            "50",
+        ]
         return pre, out, selected
     if selected == "nvidia_hybrid":
-        return [], ["-vf", f"scale={width}:{height}:flags=fast_bilinear",
-                    "-c:v", "h264_nvenc", "-preset", "p4", "-cq", cq,
-                    "-b:v", "0", "-g", "50"], selected
+        return (
+            [],
+            [
+                "-vf",
+                f"scale={width}:{height}:flags=fast_bilinear",
+                "-c:v",
+                "h264_nvenc",
+                "-preset",
+                "p4",
+                "-cq",
+                cq,
+                "-b:v",
+                "0",
+                "-g",
+                "50",
+            ],
+            selected,
+        )
     if selected == "software":
-        return [], ["-vf", f"scale={width}:{height}:flags=fast_bilinear",
-                    "-c:v", "libx264", "-preset", "veryfast", "-crf", cq,
-                    "-g", "50"], selected
+        return (
+            [],
+            [
+                "-vf",
+                f"scale={width}:{height}:flags=fast_bilinear",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                cq,
+                "-g",
+                "50",
+            ],
+            selected,
+        )
     raise RuntimeError("Reduced-quality playback requires an available video pipeline")
+
 
 def hls_video_pipeline(quality: str, source_fps: float = 25.0) -> tuple[list[str], list[str], str]:
     """Return a short-GOP browser playback pipeline.
@@ -1327,14 +1730,34 @@ def hls_video_pipeline(quality: str, source_fps: float = 25.0) -> tuple[list[str
     else:
         selected = str(acceleration_capabilities().get("selected", "none"))
         if selected == "vaapi_full":
-            pre = ["-init_hw_device", f"vaapi=va:{DRI_DEVICE}", "-filter_hw_device", "va",
-                   "-hwaccel", "vaapi", "-hwaccel_device", "va",
-                   "-hwaccel_output_format", "vaapi"]
+            pre = [
+                "-init_hw_device",
+                f"vaapi=va:{DRI_DEVICE}",
+                "-filter_hw_device",
+                "va",
+                "-hwaccel",
+                "vaapi",
+                "-hwaccel_device",
+                "va",
+                "-hwaccel_output_format",
+                "vaapi",
+            ]
             out = ["-c:v", "h264_vaapi", "-profile:v", "high", "-qp", "18", "-g", str(gop)]
         elif selected == "intel_qsv_full":
-            pre = ["-init_hw_device", f"vaapi=va:{DRI_DEVICE}", "-init_hw_device", "qsv=qs@va",
-                   "-filter_hw_device", "qs", "-hwaccel", "qsv", "-hwaccel_device", "qs",
-                   "-hwaccel_output_format", "qsv"]
+            pre = [
+                "-init_hw_device",
+                f"vaapi=va:{DRI_DEVICE}",
+                "-init_hw_device",
+                "qsv=qs@va",
+                "-filter_hw_device",
+                "qs",
+                "-hwaccel",
+                "qsv",
+                "-hwaccel_device",
+                "qs",
+                "-hwaccel_output_format",
+                "qsv",
+            ]
             out = ["-c:v", "h264_qsv", "-global_quality", "18", "-look_ahead", "0", "-g", str(gop)]
         elif selected == "nvidia_full":
             pre = ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
@@ -1358,9 +1781,9 @@ def hls_video_pipeline(quality: str, source_fps: float = 25.0) -> tuple[list[str
         out[index + 1] = str(gop)
     if "libx264" in out:
         out += ["-keyint_min", str(gop), "-sc_threshold", "0"]
-    out += ["-bf", "0", "-force_key_frames",
-            f"expr:gte(t,n_forced*{HLS_SEGMENT_SECONDS})"]
+    out += ["-bf", "0", "-force_key_frames", f"expr:gte(t,n_forced*{HLS_SEGMENT_SECONDS})"]
     return pre, out, selected
+
 
 def clean_cache() -> None:
     cutoff = time.time() - CACHE_HOURS * 3600
@@ -1374,12 +1797,17 @@ def clean_cache() -> None:
     for path in WORK.iterdir():
         try:
             if path.stat().st_mtime < work_cutoff:
-                shutil.rmtree(path, ignore_errors=True) if path.is_dir() else path.unlink(missing_ok=True)
+                shutil.rmtree(path, ignore_errors=True) if path.is_dir() else path.unlink(
+                    missing_ok=True
+                )
         except FileNotFoundError:
             pass
     with JOBS_LOCK:
-        stale = [job_id for job_id, job in JOBS.items()
-                 if job.finished_at and job.finished_at < time.time() - 12 * 3600]
+        stale = [
+            job_id
+            for job_id, job in JOBS.items()
+            if job.finished_at and job.finished_at < time.time() - 12 * 3600
+        ]
         for job_id in stale:
             cache_key = JOBS[job_id].cache_key
             JOBS.pop(job_id, None)
@@ -1388,8 +1816,11 @@ def clean_cache() -> None:
 
 
 def build_cache_key(camera_id: str, request: dict[str, Any]) -> str:
-    payload = json.dumps({"version": APP_VERSION, "camera_id": camera_id, **request},
-                         sort_keys=True, separators=(",", ":"))
+    payload = json.dumps(
+        {"version": APP_VERSION, "camera_id": camera_id, **request},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
@@ -1399,10 +1830,6 @@ def update_job(job: Job, **changes: Any) -> None:
             setattr(job, key, value)
 
 
-def safe_slug(value: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9_-]+", "_", value).strip("_") or "camera"
-
-
 def export_filename(camera_name: str, start: dt.datetime, duration: int, quality: str) -> str:
     component = re.sub(r"[^a-zA-Z0-9]+", "-", camera_name).strip("-") or "Camera"
     stop = start + dt.timedelta(seconds=duration)
@@ -1410,11 +1837,8 @@ def export_filename(camera_name: str, start: dt.datetime, duration: int, quality
         "original": "Original",
         "balanced": "Balanced-720p",
         "data_saver": "Data-Saver-480p",
-    }.get(quality, safe_slug(quality))
-    return (
-        f"{component}_{start:%Y-%m-%d_%H-%M-%S}_to_"
-        f"{stop:%Y-%m-%d_%H-%M-%S}_{quality_label}.mp4"
-    )
+    }.get(quality, "Original")
+    return f"{component}_{start:%Y-%m-%d_%H-%M-%S}_to_{stop:%Y-%m-%d_%H-%M-%S}_{quality_label}.mp4"
 
 
 def generate_job(job: Job) -> None:
@@ -1429,31 +1853,53 @@ def generate_job(job: Job) -> None:
     job_log = LOGS / f"{job.id}.log"
     work_directory = Path(tempfile.mkdtemp(prefix=f"job-{job.id[:8]}-", dir=WORK))
     update_job(
-        job, status="queued", phase="Waiting for camera", started_at=None,
-        progress=0.0, captured_seconds=0.0, processed_seconds=0.0,
+        job,
+        status="queued",
+        phase="Waiting for camera",
+        started_at=None,
+        progress=0.0,
+        captured_seconds=0.0,
+        processed_seconds=0.0,
         remaining_seconds=float(duration),
     )
     try:
         if output_path.exists() and output_path.stat().st_size > 1024:
             update_job(
-                job, status="ready", phase="Ready from cache", finished_at=time.time(),
-                output_path=str(output_path), output_name=output_name, progress=1.0,
-                captured_seconds=float(duration), processed_seconds=float(duration),
+                job,
+                status="ready",
+                phase="Ready from cache",
+                finished_at=time.time(),
+                output_path=str(output_path),
+                output_name=output_name,
+                progress=1.0,
+                captured_seconds=float(duration),
+                processed_seconds=float(duration),
                 remaining_seconds=0.0,
             )
             return
         capture_log = work_directory / "capture.log"
         capture_command = [
-            sys.executable, str(CAPTURE_HELPER), start.strftime("%Y-%m-%d %H:%M:%S"),
-            str(duration), str(work_directory),
+            sys.executable,
+            str(CAPTURE_HELPER),
+            start.strftime("%Y-%m-%d %H:%M:%S"),
+            str(duration),
+            str(work_directory),
         ]
         with camera_session_slot(job.camera_id):
             update_job(
-                job, status="running", phase="Receiving recording", started_at=time.time(),
+                job,
+                status="running",
+                phase="Receiving recording",
+                started_at=time.time(),
             )
             run_capture_with_progress(
-                capture_command, job=job, duration=duration, work_directory=work_directory,
-                timeout=duration * 2 + 90, env=capture_environment(item), log_path=capture_log,
+                capture_command,
+                job=job,
+                duration=duration,
+                work_directory=work_directory,
+                timeout=duration * 2 + 90,
+                env=capture_environment(item),
+                log_path=capture_log,
             )
         summary_path = work_directory / "summary.json"
         video_path = work_directory / "video.h264"
@@ -1465,35 +1911,67 @@ def generate_job(job: Job) -> None:
         audio_frames = int(summary.get("audio_frames", 0))
         has_audio = (
             bool(summary.get("has_audio", audio_frames > 0))
-            and audio_path.exists() and audio_path.stat().st_size > 0
+            and audio_path.exists()
+            and audio_path.stat().st_size > 0
         )
         if video_frames < 2 or not video_path.stat().st_size:
             raise RuntimeError(f"Incomplete archive capture: {video_frames} video frames")
         update_job(
-            job, video_frames=video_frames, audio_frames=audio_frames,
-            phase="Preparing browser file", progress=0.92, remaining_seconds=0.0,
+            job,
+            video_frames=video_frames,
+            audio_frames=audio_frames,
+            phase="Preparing browser file",
+            progress=0.92,
+            remaining_seconds=0.0,
         )
         first_video = float(summary.get("first_video_time_us", 0))
         last_video = float(summary.get("last_video_time_us", 0))
         first_audio = float(summary.get("first_audio_time_us", 0))
         fps = float(summary.get("source_fps", 0) or 0)
         if not 5 <= fps <= 120:
-            fps = ((video_frames - 1) * 1_000_000 / (last_video - first_video)
-                   if last_video > first_video else 25.0)
+            fps = (
+                (video_frames - 1) * 1_000_000 / (last_video - first_video)
+                if last_video > first_video
+                else 25.0
+            )
         if not 5 <= fps <= 120:
             fps = 25.0
-        offset_ms = (round((first_audio - first_video) / 1000)
-                     if has_audio and first_audio and first_video else 0)
+        offset_ms = (
+            round((first_audio - first_video) / 1000)
+            if has_audio and first_audio and first_video
+            else 0
+        )
         pre_input, video_args, accelerator_used = transcode_video_args(quality)
         ffmpeg = [
-            "ffmpeg", "-y", "-hide_banner", "-loglevel", "warning",
-            "-fflags", "+genpts", *pre_input,
-            "-r", f"{fps:.6f}", "-f", "h264", "-i", str(video_path),
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "warning",
+            "-fflags",
+            "+genpts",
+            *pre_input,
+            "-r",
+            f"{fps:.6f}",
+            "-f",
+            "h264",
+            "-i",
+            str(video_path),
         ]
         if has_audio:
             ffmpeg += [
-                "-f", "alaw", "-ar", "8000", "-ac", "1", "-i", str(audio_path),
-                "-map", "0:v:0", "-map", "1:a:0",
+                "-f",
+                "alaw",
+                "-ar",
+                "8000",
+                "-ac",
+                "1",
+                "-i",
+                str(audio_path),
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0",
             ]
         else:
             ffmpeg += ["-map", "0:v:0", "-an"]
@@ -1504,30 +1982,55 @@ def generate_job(job: Job) -> None:
                 audio_filters.append(f"adelay={offset_ms}:all=1")
             elif offset_ms < 0:
                 audio_filters += [
-                    f"atrim=start={abs(offset_ms) / 1000:.3f}", "asetpts=PTS-STARTPTS",
+                    f"atrim=start={abs(offset_ms) / 1000:.3f}",
+                    "asetpts=PTS-STARTPTS",
                 ]
             if gain_db:
                 audio_filters += [f"volume={gain_db}dB", "alimiter=limit=0.95"]
             audio_filters.append("aresample=async=1:first_pts=0")
             ffmpeg += [
-                "-c:a", "aac", "-b:a", "64k", "-ar", "48000", "-ac", "1",
-                "-af", ",".join(audio_filters),
+                "-c:a",
+                "aac",
+                "-b:a",
+                "64k",
+                "-ar",
+                "48000",
+                "-ac",
+                "1",
+                "-af",
+                ",".join(audio_filters),
             ]
         ffmpeg += [
-            "-t", str(duration), "-movflags", "+faststart", "-metadata",
+            "-t",
+            str(duration),
+            "-movflags",
+            "+faststart",
+            "-metadata",
             f"creation_time={start.isoformat(timespec='seconds')}",
             str(work_directory / "final.mp4"),
         ]
         ffmpeg_log = work_directory / "ffmpeg.log"
         run_ffmpeg_with_progress(
-            ffmpeg, job=job, duration=duration, work_directory=work_directory,
-            timeout=max(120, duration * 3), log_path=ffmpeg_log,
+            ffmpeg,
+            job=job,
+            duration=duration,
+            work_directory=work_directory,
+            timeout=max(120, duration * 3),
+            log_path=ffmpeg_log,
         )
         update_job(job, phase="Validating file", progress=0.995)
         probe = run_command(
-            ["ffprobe", "-v", "error", "-show_entries",
-             "stream=codec_type,codec_name,duration:format=duration,size",
-             "-of", "json", str(work_directory / "final.mp4")], timeout=30,
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=codec_type,codec_name,duration:format=duration,size",
+                "-of",
+                "json",
+                str(work_directory / "final.mp4"),
+            ],
+            timeout=30,
         )
         stream_types = {
             stream.get("codec_type") for stream in json.loads(probe.stdout).get("streams", [])
@@ -1539,15 +2042,23 @@ def generate_job(job: Job) -> None:
             )
         promote_completed_file(work_directory / "final.mp4", output_path, mode=0o600)
         job_log.write_text(
-            "\n=== Archive capture ===\n" + capture_log.read_text(errors="replace")
-            + "\n=== FFmpeg ===\n" + ffmpeg_log.read_text(errors="replace"),
+            "\n=== Archive capture ===\n"
+            + capture_log.read_text(errors="replace")
+            + "\n=== FFmpeg ===\n"
+            + ffmpeg_log.read_text(errors="replace"),
             encoding="utf-8",
         )
         update_job(
-            job, status="ready", phase="Ready", finished_at=time.time(),
-            output_path=str(output_path), output_name=output_name,
-            accelerator_used=accelerator_used, progress=1.0,
-            captured_seconds=float(duration), processed_seconds=float(duration),
+            job,
+            status="ready",
+            phase="Ready",
+            finished_at=time.time(),
+            output_path=str(output_path),
+            output_name=output_name,
+            accelerator_used=accelerator_used,
+            progress=1.0,
+            captured_seconds=float(duration),
+            processed_seconds=float(duration),
             remaining_seconds=0.0,
         )
         shutil.rmtree(work_directory, ignore_errors=True)
@@ -1561,9 +2072,14 @@ def generate_job(job: Job) -> None:
         except Exception:
             LOG.error("Could not retain diagnostics:\n%s", traceback.format_exc())
         update_job(
-            job, status="error", phase="Failed", finished_at=time.time(),
-            error=str(error), remaining_seconds=0.0,
+            job,
+            status="error",
+            phase="Failed",
+            finished_at=time.time(),
+            error=str(error),
+            remaining_seconds=0.0,
         )
+
 
 def create_job(camera_id: str, request: dict[str, Any]) -> Job:
     camera(camera_id)
@@ -1578,22 +2094,29 @@ def create_job(camera_id: str, request: dict[str, Any]) -> Job:
     gain_db = int(request.get("gain_db", DEFAULT_GAIN))
     if gain_db not in (0, 6, 12, 18, 24):
         raise ValueError("Audio gain must be 0, 6, 12, 18, or 24 dB")
-    quality = str(request.get("quality", ""))
-    if not quality:
-        quality = "balanced" if str(request.get("mode", "copy")) == "qsv" else "original"
+    quality = str(request.get("quality", "original"))
     if quality not in ("original", "balanced", "data_saver"):
         raise ValueError("Quality must be original, balanced, or data_saver")
     if kind == "download":
         quality = "original"
-    normalized = {"start": start.isoformat(timespec="seconds"), "duration": duration,
-                  "gain_db": gain_db, "quality": quality, "kind": kind}
+    normalized = {
+        "start": start.isoformat(timespec="seconds"),
+        "duration": duration,
+        "gain_db": gain_db,
+        "quality": quality,
+        "kind": kind,
+    }
     cache_key = build_cache_key(camera_id, normalized)
     output_path = CACHE / f"{cache_key}.mp4"
     item = camera(camera_id)
     output_name = export_filename(str(item.get("name", camera_id)), start, duration, quality)
     with JOBS_LOCK:
         existing_id = CACHE_TO_JOB.get(cache_key)
-        if existing_id and existing_id in JOBS and JOBS[existing_id].status in ("queued", "running", "ready"):
+        if (
+            existing_id
+            and existing_id in JOBS
+            and JOBS[existing_id].status in ("queued", "running", "ready")
+        ):
             return JOBS[existing_id]
         job = Job(id=uuid.uuid4().hex, camera_id=camera_id, cache_key=cache_key, request=normalized)
         if output_path.exists() and output_path.stat().st_size > 1024:
@@ -1603,7 +2126,8 @@ def create_job(camera_id: str, request: dict[str, Any]) -> Job:
             job.progress = 1.0
             job.captured_seconds = job.processed_seconds = float(duration)
             job.accelerator_used = (
-                "copy" if quality == "original"
+                "copy"
+                if quality == "original"
                 else str(acceleration_capabilities().get("selected", "software"))
             )
         JOBS[job.id] = job
@@ -1612,46 +2136,6 @@ def create_job(camera_id: str, request: dict[str, Any]) -> Job:
         EXECUTOR.submit(generate_job, job)
     return job
 
-
-
-
-def stream_ffmpeg_command(video_input: str | Path, audio_input: str | Path | None, duration: int,
-                          quality: str, gain_db: int, *, source_fps: float = 25.0,
-                          audio_offset_ms: int = 0) -> tuple[list[str], str]:
-    pre_input, video_output, accelerator_used = transcode_video_args(quality)
-    command = [
-        "ffmpeg", "-hide_banner", "-loglevel", "warning", "-fflags", "+genpts",
-        "-analyzeduration", "1000000", "-probesize", "1000000", *pre_input,
-        "-thread_queue_size", "512", "-r", f"{source_fps:.6f}",
-        "-f", "h264", "-i", str(video_input),
-    ]
-    if audio_input is not None:
-        command += [
-            "-thread_queue_size", "512", "-f", "alaw", "-ar", "8000", "-ac", "1",
-            "-i", str(audio_input), "-map", "0:v:0", "-map", "1:a:0",
-        ]
-    else:
-        command += ["-map", "0:v:0", "-an"]
-    command += video_output
-    if audio_input is not None:
-        filters: list[str] = []
-        total_offset = audio_offset_ms + STREAM_AUDIO_DELAY_MS
-        if total_offset > 0:
-            filters.append(f"adelay={total_offset}:all=1")
-        elif total_offset < 0:
-            filters += [f"atrim=start={abs(total_offset) / 1000:.3f}", "asetpts=PTS-STARTPTS"]
-        if gain_db:
-            filters += [f"volume={gain_db}dB", "alimiter=limit=0.95"]
-        filters.append("aresample=async=1:first_pts=0")
-        command += [
-            "-c:a", "aac", "-b:a", "64k", "-ar", "48000", "-ac", "1",
-            "-af", ",".join(filters),
-        ]
-    command += [
-        "-t", str(duration), "-movflags", "frag_keyframe+empty_moov+default_base_moof",
-        "-frag_duration", "1000000", "-flush_packets", "1", "-f", "mp4", "pipe:1",
-    ]
-    return command, accelerator_used
 
 def _tail_text(path: Path, limit: int = 12000) -> str:
     try:
@@ -1672,33 +2156,12 @@ def _stream_failure_detail(work_directory: Path) -> str:
     return "\n\n".join(parts) or "No native-capture or FFmpeg diagnostics were produced."
 
 
-def _retain_stream_diagnostics(work_directory: Path, camera_id: str, error: BaseException) -> Path | None:
-    try:
-        stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-        destination = LOGS / f"stream-{safe_slug(camera_id)}-{stamp}-{uuid.uuid4().hex[:8]}"
-        destination.mkdir(parents=True, exist_ok=False)
-        (destination / "error.txt").write_text(f"{type(error).__name__}: {error}\n", encoding="utf-8")
-        sizes: dict[str, int] = {}
-        for path in work_directory.iterdir():
-            try:
-                sizes[path.name] = path.stat().st_size
-            except OSError:
-                continue
-            if path.name in {"capture.log", "ffmpeg.log", "summary.json", "timing.json"} and path.is_file():
-                shutil.copy2(path, destination / path.name)
-        (destination / "artifacts.json").write_text(
-            json.dumps({"camera_id": camera_id, "files": sizes}, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        LOG.error("Retained recording-stream diagnostics at %s", destination)
-        return destination
-    except Exception:
-        LOG.exception("Could not retain recording-stream diagnostics")
-        return None
-
-
-def _feed_growing_file(source: Path, write_fd: int, capture_process: subprocess.Popen[bytes],
-                       stop_event: threading.Event) -> None:
+def _feed_growing_file(
+    source: Path,
+    write_fd: int,
+    capture_process: subprocess.Popen[bytes],
+    stop_event: threading.Event,
+) -> None:
     try:
         while not source.exists() and capture_process.poll() is None and not stop_event.wait(0.02):
             pass
@@ -1727,80 +2190,137 @@ def _feed_growing_file(source: Path, write_fd: int, capture_process: subprocess.
 
 
 def _timing_has_audio(value: dict[str, Any]) -> bool:
-    return bool(value.get("has_audio",False) or int(value.get("audio_frames",0) or 0)>0 or int(value.get("first_audio_time_us",0) or 0)>0)
+    return bool(
+        value.get("has_audio", False)
+        or int(value.get("audio_frames", 0) or 0) > 0
+        or int(value.get("first_audio_time_us", 0) or 0) > 0
+    )
+
 
 def _video_media_elapsed_seconds(value: dict[str, Any]) -> float:
-    first=int(value.get("first_video_time_us",0) or 0); last=int(value.get("last_video_time_us",0) or 0)
-    return max(0.0,(last-first)/1_000_000) if first>0 and last>first else 0.0
+    first = int(value.get("first_video_time_us", 0) or 0)
+    last = int(value.get("last_video_time_us", 0) or 0)
+    return max(0.0, (last - first) / 1_000_000) if first > 0 and last > first else 0.0
+
 
 def _audio_video_elapsed_samples(value: dict[str, Any]) -> int:
-    explicit=float(value.get("captured_seconds",0) or 0)
-    if explicit>0: return max(0,round(explicit*ALAW_SAMPLE_RATE))
-    first=int(value.get("first_video_time_us",0) or 0); last=int(value.get("last_video_time_us",0) or 0)
-    return max(0,round((last-first)*ALAW_SAMPLE_RATE/1_000_000)) if first>0 and last>first else 0
+    explicit = float(value.get("captured_seconds", 0) or 0)
+    if explicit > 0:
+        return max(0, round(explicit * ALAW_SAMPLE_RATE))
+    first = int(value.get("first_video_time_us", 0) or 0)
+    last = int(value.get("last_video_time_us", 0) or 0)
+    return (
+        max(0, round((last - first) * ALAW_SAMPLE_RATE / 1_000_000))
+        if first > 0 and last > first
+        else 0
+    )
+
 
 def _audio_offset_samples(value: dict[str, Any]) -> int:
-    v=int(value.get("first_video_time_us",0) or 0); a=int(value.get("first_audio_time_us",0) or 0)
-    return round((a-v)*ALAW_SAMPLE_RATE/1_000_000) if v and a else 0
+    v = int(value.get("first_video_time_us", 0) or 0)
+    a = int(value.get("first_audio_time_us", 0) or 0)
+    return round((a - v) * ALAW_SAMPLE_RATE / 1_000_000) if v and a else 0
 
-def _write_pipe_bytes(fd:int,payload:bytes,stop:threading.Event)->bool:
-    view=memoryview(payload)
+
+def _write_pipe_bytes(fd: int, payload: bytes, stop: threading.Event) -> bool:
+    view = memoryview(payload)
     while view and not stop.is_set():
-        try: n=os.write(fd,view)
-        except (BrokenPipeError,OSError): return False
-        view=view[n:]
+        try:
+            n = os.write(fd, view)
+        except (BrokenPipeError, OSError):
+            return False
+        view = view[n:]
     return not stop.is_set()
 
-def _feed_expected_archive_audio(source:Path,directory:Path,write_fd:int,capture_process:subprocess.Popen[bytes],stop_event:threading.Event,camera_id:str)->None:
-    handle=None; emitted=0; offset=None; real_started=False
+
+def _feed_expected_archive_audio(
+    source: Path,
+    directory: Path,
+    write_fd: int,
+    capture_process: subprocess.Popen[bytes],
+    stop_event: threading.Event,
+    camera_id: str,
+) -> None:
+    handle = None
+    emitted = 0
+    offset = None
+    real_started = False
     try:
         while not stop_event.is_set():
-            timing=_read_live_timing(directory) or {}
-            if _timing_has_audio(timing): _remember_archive_audio(camera_id)
+            timing = _read_live_timing(directory) or {}
+            if _timing_has_audio(timing):
+                _remember_archive_audio(camera_id)
             if handle is None and source.exists() and _timing_has_audio(timing):
                 try:
-                    if source.stat().st_size>0:
-                        handle=source.open("rb",buffering=0); offset=_audio_offset_samples(timing)
-                        if offset<0: handle.seek(-offset)
-                        elif emitted>offset: handle.seek(emitted-offset)
-                except OSError: handle=None
+                    if source.stat().st_size > 0:
+                        handle = source.open("rb", buffering=0)
+                        offset = _audio_offset_samples(timing)
+                        if offset < 0:
+                            handle.seek(-offset)
+                        elif emitted > offset:
+                            handle.seek(emitted - offset)
+                except OSError:
+                    handle = None
             if handle is None:
-                target=_audio_video_elapsed_samples(timing)
-                if target>emitted:
-                    count=min(4096,target-emitted)
-                    if not _write_pipe_bytes(write_fd,ALAW_SILENCE_BYTE*count,stop_event): return
-                    emitted+=count; continue
+                target = _audio_video_elapsed_samples(timing)
+                if target > emitted:
+                    count = min(4096, target - emitted)
+                    if not _write_pipe_bytes(write_fd, ALAW_SILENCE_BYTE * count, stop_event):
+                        return
+                    emitted += count
+                    continue
             else:
                 assert offset is not None
-                if offset>emitted:
-                    count=min(4096,offset-emitted)
-                    if not _write_pipe_bytes(write_fd,ALAW_SILENCE_BYTE*count,stop_event): return
-                    emitted+=count; continue
-                chunk=handle.read(256*1024)
+                if offset > emitted:
+                    count = min(4096, offset - emitted)
+                    if not _write_pipe_bytes(write_fd, ALAW_SILENCE_BYTE * count, stop_event):
+                        return
+                    emitted += count
+                    continue
+                chunk = handle.read(256 * 1024)
                 if chunk:
-                    if not _write_pipe_bytes(write_fd,chunk,stop_event): return
-                    emitted+=len(chunk); real_started=True; continue
+                    if not _write_pipe_bytes(write_fd, chunk, stop_event):
+                        return
+                    emitted += len(chunk)
+                    real_started = True
+                    continue
                 if not real_started:
-                    target=_audio_video_elapsed_samples(timing)
-                    if target>emitted:
-                        count=min(4096,target-emitted)
-                        if not _write_pipe_bytes(write_fd,ALAW_SILENCE_BYTE*count,stop_event): return
-                        emitted+=count
-                        try: handle.seek(max(0,emitted-offset))
-                        except OSError: pass
+                    target = _audio_video_elapsed_samples(timing)
+                    if target > emitted:
+                        count = min(4096, target - emitted)
+                        if not _write_pipe_bytes(write_fd, ALAW_SILENCE_BYTE * count, stop_event):
+                            return
+                        emitted += count
+                        try:
+                            handle.seek(max(0, emitted - offset))
+                        except OSError:
+                            pass
                         continue
-            if capture_process.poll() is not None: break
+            if capture_process.poll() is not None:
+                break
             stop_event.wait(0.02)
     finally:
-        if handle is not None: handle.close()
-        try: os.close(write_fd)
-        except OSError: pass
+        if handle is not None:
+            handle.close()
+        try:
+            os.close(write_fd)
+        except OSError:
+            pass
 
-def _watch_for_archive_audio(directory:Path,capture_process:subprocess.Popen[bytes],stop_event:threading.Event,camera_id:str)->None:
+
+def _watch_for_archive_audio(
+    directory: Path,
+    capture_process: subprocess.Popen[bytes],
+    stop_event: threading.Event,
+    camera_id: str,
+) -> None:
     while not stop_event.is_set():
-        timing=_read_live_timing(directory)
-        if timing and _timing_has_audio(timing): _remember_archive_audio(camera_id); return
-        if capture_process.poll() is not None: return
+        timing = _read_live_timing(directory)
+        if timing and _timing_has_audio(timing):
+            _remember_archive_audio(camera_id)
+            return
+        if capture_process.poll() is not None:
+            return
         stop_event.wait(0.04)
 
 
@@ -1873,7 +2393,11 @@ def _wait_for_capture_timing(
         first_audio = int(value.get("first_audio_time_us", 0) or 0)
         audio_frames = int(value.get("audio_frames", 0) or 0)
         has_audio = bool(value.get("has_audio", False) or first_audio or audio_frames)
-        offset = round((first_audio - first_video) / 1000) if has_audio and first_audio and first_video else 0
+        offset = (
+            round((first_audio - first_video) / 1000)
+            if has_audio and first_audio and first_video
+            else 0
+        )
         return fps, offset, has_audio
 
     while not stop_event.is_set():
@@ -1900,7 +2424,10 @@ def _wait_for_capture_timing(
                 if frames >= HLS_TIMING_SAMPLE_FRAMES and fps:
                     if has_audio:
                         return result_from(latest)
-                    if not probe_audio or _video_media_elapsed_seconds(latest) >= HLS_AUDIO_PROBE_MEDIA_SECONDS:
+                    if (
+                        not probe_audio
+                        or _video_media_elapsed_seconds(latest) >= HLS_AUDIO_PROBE_MEDIA_SECONDS
+                    ):
                         return fps, 0, False
                 if now >= probe_deadline:
                     LOG.warning(
@@ -1945,26 +2472,62 @@ def _friendly_capture_error(detail: str, return_code: int | None = None) -> str:
     suffix = f" (capture exited {return_code})" if return_code is not None else ""
     return f"Camera archive capture failed{suffix}." + (f" {text[-500:]}" if text else "")
 
-def _hls_command(video_input: str, audio_input: str | None,
-                 session: PlaybackSession) -> tuple[list[str], str]:
+
+def _hls_command(
+    video_input: str, audio_input: str | None, session: PlaybackSession
+) -> tuple[list[str], str]:
     request = session.request
     duration = int(request["duration"])
     quality = str(request["quality"])
     gain_db = int(request["gain_db"])
     pre_input, video_output, accelerator = hls_video_pipeline(quality, session.source_fps)
-    command = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "warning",
-               "-fflags", "+genpts", "-analyzeduration", "500000", "-probesize", "500000",
-               *pre_input, "-thread_queue_size", "512", "-r", f"{session.source_fps:.6f}",
-               "-f", "h264", "-i", video_input]
+    command = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-fflags",
+        "+genpts",
+        "-analyzeduration",
+        "500000",
+        "-probesize",
+        "500000",
+        *pre_input,
+        "-thread_queue_size",
+        "512",
+        "-r",
+        f"{session.source_fps:.6f}",
+        "-f",
+        "h264",
+        "-i",
+        video_input,
+    ]
     if audio_input is not None:
-        command += ["-thread_queue_size", "512", "-f", "alaw", "-ar", "8000", "-ac", "1",
-                    "-i", audio_input, "-map", "0:v:0", "-map", "1:a:0"]
+        command += [
+            "-thread_queue_size",
+            "512",
+            "-f",
+            "alaw",
+            "-ar",
+            "8000",
+            "-ac",
+            "1",
+            "-i",
+            audio_input,
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+        ]
     else:
         command += ["-map", "0:v:0", "-an"]
     command += video_output
     if audio_input is not None:
         filters: list[str] = []
-        total_offset = ((0 if session.audio_alignment_in_feeder else session.audio_offset_ms) + STREAM_AUDIO_DELAY_MS)
+        total_offset = (
+            0 if session.audio_alignment_in_feeder else session.audio_offset_ms
+        ) + STREAM_AUDIO_DELAY_MS
         if total_offset > 0:
             filters.append(f"adelay={total_offset}:all=1")
         elif total_offset < 0:
@@ -1972,16 +2535,49 @@ def _hls_command(video_input: str, audio_input: str | None,
         if gain_db:
             filters += [f"volume={gain_db}dB", "alimiter=limit=0.95"]
         filters.append("aresample=async=1:first_pts=0")
-        command += ["-c:a", "aac", "-b:a", "64k", "-ar", "48000", "-ac", "1",
-                    "-af", ",".join(filters)]
-    command += ["-t", str(duration), "-max_interleave_delta", "0",
-                "-f", "hls", "-hls_time", str(HLS_SEGMENT_SECONDS), "-hls_init_time", str(HLS_SEGMENT_SECONDS),
-                "-hls_list_size", "0", "-hls_playlist_type", "event", "-hls_segment_type", "fmp4",
-                "-hls_allow_cache", "0", "-flush_packets", "1",
-                "-hls_fmp4_init_filename", "init.mp4", "-hls_flags", "split_by_time+temp_file",
-                "-hls_segment_filename", str(session.directory / "segment-%05d.m4s"),
-                str(session.playlist_path)]
+        command += [
+            "-c:a",
+            "aac",
+            "-b:a",
+            "64k",
+            "-ar",
+            "48000",
+            "-ac",
+            "1",
+            "-af",
+            ",".join(filters),
+        ]
+    command += [
+        "-t",
+        str(duration),
+        "-max_interleave_delta",
+        "0",
+        "-f",
+        "hls",
+        "-hls_time",
+        str(HLS_SEGMENT_SECONDS),
+        "-hls_init_time",
+        str(HLS_SEGMENT_SECONDS),
+        "-hls_list_size",
+        "0",
+        "-hls_playlist_type",
+        "event",
+        "-hls_segment_type",
+        "fmp4",
+        "-hls_allow_cache",
+        "0",
+        "-flush_packets",
+        "1",
+        "-hls_fmp4_init_filename",
+        "init.mp4",
+        "-hls_flags",
+        "split_by_time+temp_file",
+        "-hls_segment_filename",
+        str(session.directory / "segment-%05d.m4s"),
+        str(session.playlist_path),
+    ]
     return command, accelerator
+
 
 def generate_hls_session(session: PlaybackSession) -> None:
     item = camera(session.camera_id)
@@ -2030,17 +2626,26 @@ def generate_hls_session(session: PlaybackSession) -> None:
                         raise RuntimeError("Archive playback startup was cancelled.")
 
                 session.capture_process = subprocess.Popen(
-                    [sys.executable, str(CAPTURE_HELPER), start.strftime("%Y-%m-%d %H:%M:%S"),
-                     str(session.request["duration"]), str(directory)],
-                    stdout=capture_log, stderr=subprocess.STDOUT, env=capture_environment(item),
+                    [
+                        sys.executable,
+                        str(CAPTURE_HELPER),
+                        start.strftime("%Y-%m-%d %H:%M:%S"),
+                        str(session.request["duration"]),
+                        str(directory),
+                    ],
+                    stdout=capture_log,
+                    stderr=subprocess.STDOUT,
+                    env=capture_environment(item),
                 )
                 try:
-                    session.source_fps, measured_offset, session.has_audio = _wait_for_capture_timing(
-                        directory,
-                        session.capture_process,
-                        session.stop_event,
-                        probe_audio=probe_audio,
-                        phase_callback=lambda phase: setattr(session, "phase", phase),
+                    session.source_fps, measured_offset, session.has_audio = (
+                        _wait_for_capture_timing(
+                            directory,
+                            session.capture_process,
+                            session.stop_event,
+                            probe_audio=probe_audio,
+                            phase_callback=lambda phase: setattr(session, "phase", phase),
+                        )
                     )
                     startup_error = None
                     break
@@ -2063,16 +2668,25 @@ def generate_hls_session(session: PlaybackSession) -> None:
 
             detected_audio = bool(session.has_audio)
             if detected_audio and native_audio:
-                _remember_archive_audio(session.camera_id); learned_audio = True
-            if not native_audio or audio_mode == "off": expected_audio = False
-            elif audio_mode == "on": expected_audio = True
-            else: expected_audio = detected_audio or learned_audio
+                _remember_archive_audio(session.camera_id)
+                learned_audio = True
+            if not native_audio or audio_mode == "off":
+                expected_audio = False
+            elif audio_mode == "on":
+                expected_audio = True
+            else:
+                expected_audio = detected_audio or learned_audio
             session.has_audio = expected_audio
             session.audio_offset_ms = measured_offset
             session.audio_alignment_in_feeder = bool(expected_audio and native_audio)
             LOG.info(
                 "Playback session %s measured %.4f fps, %d ms audio offset, detected_audio=%s expected_audio=%s mode=%s",
-                session.id, session.source_fps, session.audio_offset_ms, detected_audio, session.has_audio, audio_mode,
+                session.id,
+                session.source_fps,
+                session.audio_offset_ms,
+                detected_audio,
+                session.has_audio,
+                audio_mode,
             )
             video_read, video_write = os.pipe()
             audio_read = audio_write = None
@@ -2080,31 +2694,67 @@ def generate_hls_session(session: PlaybackSession) -> None:
                 audio_read, audio_write = os.pipe()
             try:
                 command, accelerator = _hls_command(
-                    f"pipe:{video_read}", f"pipe:{audio_read}" if audio_read is not None else None, session
+                    f"pipe:{video_read}",
+                    f"pipe:{audio_read}" if audio_read is not None else None,
+                    session,
                 )
                 session.accelerator_used = accelerator
                 session.phase = f"Preparing {session.request['quality'].replace('_', ' ')} HLS"
                 pass_fds = (video_read,) if audio_read is None else (video_read, audio_read)
                 session.ffmpeg_process = subprocess.Popen(
-                    command, stdout=subprocess.DEVNULL, stderr=ffmpeg_log, pass_fds=pass_fds,
+                    command,
+                    stdout=subprocess.DEVNULL,
+                    stderr=ffmpeg_log,
+                    pass_fds=pass_fds,
                 )
             finally:
                 os.close(video_read)
                 if audio_read is not None:
                     os.close(audio_read)
             assert session.capture_process is not None
-            feeder_threads.append(threading.Thread(
-                target=_feed_growing_file,
-                args=(video_path, video_write, session.capture_process, stop_feeders),
-                name=f"{session.camera_id}-hls-video", daemon=True,
-            ))
+            feeder_threads.append(
+                threading.Thread(
+                    target=_feed_growing_file,
+                    args=(video_path, video_write, session.capture_process, stop_feeders),
+                    name=f"{session.camera_id}-hls-video",
+                    daemon=True,
+                )
+            )
             if session.has_audio and audio_write is not None:
                 if session.audio_alignment_in_feeder:
-                    feeder_threads.append(threading.Thread(target=_feed_expected_archive_audio,args=(audio_path,directory,audio_write,session.capture_process,stop_feeders,session.camera_id),name=f"{session.camera_id}-hls-audio",daemon=True))
+                    feeder_threads.append(
+                        threading.Thread(
+                            target=_feed_expected_archive_audio,
+                            args=(
+                                audio_path,
+                                directory,
+                                audio_write,
+                                session.capture_process,
+                                stop_feeders,
+                                session.camera_id,
+                            ),
+                            name=f"{session.camera_id}-hls-audio",
+                            daemon=True,
+                        )
+                    )
                 else:
-                    feeder_threads.append(threading.Thread(target=_feed_growing_file,args=(audio_path,audio_write,session.capture_process,stop_feeders),name=f"{session.camera_id}-hls-audio",daemon=True))
+                    feeder_threads.append(
+                        threading.Thread(
+                            target=_feed_growing_file,
+                            args=(audio_path, audio_write, session.capture_process, stop_feeders),
+                            name=f"{session.camera_id}-hls-audio",
+                            daemon=True,
+                        )
+                    )
             elif native_audio and audio_mode == "auto" and not learned_audio:
-                feeder_threads.append(threading.Thread(target=_watch_for_archive_audio,args=(directory,session.capture_process,stop_feeders,session.camera_id),name=f"{session.camera_id}-audio-capability",daemon=True))
+                feeder_threads.append(
+                    threading.Thread(
+                        target=_watch_for_archive_audio,
+                        args=(directory, session.capture_process, stop_feeders, session.camera_id),
+                        name=f"{session.camera_id}-audio-capability",
+                        daemon=True,
+                    )
+                )
             for thread in feeder_threads:
                 thread.start()
             assert session.ffmpeg_process is not None
@@ -2170,6 +2820,7 @@ def generate_hls_session(session: PlaybackSession) -> None:
         session.finished_at = time.time()
         lock.release()
 
+
 def create_playback_session(camera_id: str, request: dict[str, Any]) -> PlaybackSession:
     camera(camera_id)
     start = parse_local_timestamp(str(request.get("start", "")))
@@ -2185,12 +2836,17 @@ def create_playback_session(camera_id: str, request: dict[str, Any]) -> Playback
     gain_db = int(request.get("gain_db", DEFAULT_GAIN))
     if gain_db not in (0, 6, 12, 18, 24):
         raise ValueError("Audio gain must be 0, 6, 12, 18, or 24 dB")
-    normalized = {"start": start.isoformat(timespec="seconds"), "duration": duration,
-                  "quality": quality, "gain_db": gain_db}
+    normalized = {
+        "start": start.isoformat(timespec="seconds"),
+        "duration": duration,
+        "quality": quality,
+        "gain_db": gain_db,
+    }
     session_id = uuid.uuid4().hex
     directory = WORK / f"hls-{session_id}"
-    value = PlaybackSession(id=session_id, camera_id=camera_id, request=normalized,
-                            work_directory=str(directory))
+    value = PlaybackSession(
+        id=session_id, camera_id=camera_id, request=normalized, work_directory=str(directory)
+    )
     with SESSIONS_LOCK:
         SESSIONS[session_id] = value
     PLAYBACK_EXECUTOR.submit(generate_hls_session, value)
@@ -2209,7 +2865,10 @@ def clean_sessions() -> None:
     remove: list[tuple[str, PlaybackSession]] = []
     with SESSIONS_LOCK:
         for session_id, value in list(SESSIONS.items()):
-            if value.status in ("queued", "running", "playing") and now - value.last_access > HLS_IDLE_SECONDS:
+            if (
+                value.status in ("queued", "running", "playing")
+                and now - value.last_access > HLS_IDLE_SECONDS
+            ):
                 value.stop_event.set()
             if value.finished_at and now - value.finished_at > HLS_RETAIN_SECONDS:
                 remove.append((session_id, value))
@@ -2217,6 +2876,7 @@ def clean_sessions() -> None:
             SESSIONS.pop(session_id, None)
     for _, value in remove:
         shutil.rmtree(value.directory, ignore_errors=True)
+
 
 def cleanup_loop() -> None:
     while True:
@@ -2293,7 +2953,9 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             LOG.info("Player-library client disconnected")
 
-    def _serve_file(self, path: Path, filename: str, download: bool, *, head_only: bool = False) -> None:
+    def _serve_file(
+        self, path: Path, filename: str, download: bool, *, head_only: bool = False
+    ) -> None:
         if not path.is_file():
             self._error(404, "File not found", head_only=head_only)
             return
@@ -2302,13 +2964,19 @@ class Handler(BaseHTTPRequestHandler):
         if range_header:
             match = re.match(r"bytes=(\d*)-(\d*)$", range_header.strip())
             if not match:
-                self._error(416, "Invalid byte range", head_only=head_only); return
-            if match.group(1): start = int(match.group(1))
-            if match.group(2): end = int(match.group(2))
+                self._error(416, "Invalid byte range", head_only=head_only)
+                return
+            if match.group(1):
+                start = int(match.group(1))
+            if match.group(2):
+                end = int(match.group(2))
             if not match.group(1) and match.group(2):
                 start, end = max(0, size - int(match.group(2))), size - 1
             if start >= size or start > end:
-                self.send_response(416); self.send_header("Content-Range", f"bytes */{size}"); self.end_headers(); return
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.end_headers()
+                return
             end, status = min(end, size - 1), 206
         length = end - start + 1
         self.send_response(status)
@@ -2316,10 +2984,16 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(length))
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("Cache-Control", "private, max-age=3600")
-        if status == 206: self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
-        self.send_header("Content-Disposition", f'{"attachment" if download else "inline"}; filename="{filename}"')
-        self._headers(); self.end_headers()
-        if head_only: return
+        if status == 206:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.send_header(
+            "Content-Disposition",
+            f'{"attachment" if download else "inline"}; filename="{filename}"',
+        )
+        self._headers()
+        self.end_headers()
+        if head_only:
+            return
         try:
             with path.open("rb") as handle:
                 handle.seek(start)
@@ -2332,7 +3006,6 @@ class Handler(BaseHTTPRequestHandler):
                     remaining -= len(block)
         except (BrokenPipeError, ConnectionResetError):
             LOG.info("Prepared-file client disconnected: %s", filename)
-
 
     def _serve_hls_asset(self, session_id: str, asset: str, *, head_only: bool = False) -> None:
         value = _session(session_id)
@@ -2357,24 +3030,34 @@ class Handler(BaseHTTPRequestHandler):
         if range_header:
             match = re.match(r"bytes=(\d*)-(\d*)$", range_header.strip())
             if not match:
-                self._error(416, "Invalid byte range", head_only=head_only); return
-            if match.group(1): start = int(match.group(1))
-            if match.group(2): end = int(match.group(2))
+                self._error(416, "Invalid byte range", head_only=head_only)
+                return
+            if match.group(1):
+                start = int(match.group(1))
+            if match.group(2):
+                end = int(match.group(2))
             if not match.group(1) and match.group(2):
                 start, end = max(0, size - int(match.group(2))), size - 1
             if start >= size or start > end:
-                self.send_response(416); self.send_header("Content-Range", f"bytes */{size}"); self.end_headers(); return
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.end_headers()
+                return
             end, status = min(end, size - 1), 206
         length = end - start + 1
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(length))
         self.send_header("Accept-Ranges", "bytes")
-        self.send_header("Cache-Control", "no-store" if asset.endswith(".m3u8") else "private, max-age=3600, immutable")
+        self.send_header(
+            "Cache-Control",
+            "no-store" if asset.endswith(".m3u8") else "private, max-age=3600, immutable",
+        )
         self.send_header("X-TVT-Archive-Accelerator", value.accelerator_used)
         if status == 206:
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
-        self._headers(); self.end_headers()
+        self._headers()
+        self.end_headers()
         if head_only:
             return
         with path.open("rb") as handle:
@@ -2387,193 +3070,105 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(block)
                 remaining -= len(block)
 
-
-    def _serve_recording_stream(self, camera_id: str, query: dict[str, list[str]], *, head_only: bool = False) -> None:
-        if head_only:
-            self._error(405, "HEAD is not supported for live recording streams", head_only=True)
-            return
-        start = parse_local_timestamp(query.get("start", [""])[0])
-        duration = int(query.get("duration", [str(PLAYBACK_MAX_SECONDS)])[0])
-        if not 5 <= duration <= PLAYBACK_MAX_SECONDS:
-            raise ValueError(f"Duration must be 5-{PLAYBACK_MAX_SECONDS} seconds")
-        quality = str(query.get("quality", ["original"])[0])
-        if quality == "auto":
-            quality = "balanced" if acceleration_capabilities().get("selected") not in (None, "none", "software") else "original"
-        if quality not in ("original", "balanced", "data_saver"):
-            raise ValueError("Quality must be auto, original, balanced, or data_saver")
-        gain_db = int(query.get("gain_db", [str(DEFAULT_GAIN)])[0])
-        if gain_db not in (0, 6, 12, 18, 24):
-            raise ValueError("Audio gain must be 0, 6, 12, 18, or 24 dB")
-
-        item = camera(camera_id)
-        lock = camera_session_slot(camera_id)
-        work_directory = Path(tempfile.mkdtemp(prefix="stream-", dir=WORK))
-        video_path = work_directory / "video.h264"
-        audio_path = work_directory / "audio.alaw"
-        ffmpeg_log = (work_directory / "ffmpeg.log").open("wb")
-        capture_log = (work_directory / "capture.log").open("wb")
-        ffmpeg_process: subprocess.Popen[bytes] | None = None
-        capture_process: subprocess.Popen[bytes] | None = None
-        feeder_threads: list[threading.Thread] = []
-        stop_feeders = threading.Event()
-        stop_capture = threading.Event()
-        failure: BaseException | None = None
-        response_started = False
-        lock.acquire()
-        try:
-            capture_process = subprocess.Popen(
-                [sys.executable, str(CAPTURE_HELPER), start.strftime("%Y-%m-%d %H:%M:%S"),
-                 str(duration), str(work_directory)],
-                stdout=capture_log, stderr=subprocess.STDOUT, env=capture_environment(item),
-            )
-            source_fps, audio_offset_ms, has_audio = _wait_for_capture_timing(
-                work_directory, capture_process, stop_capture
-            )
-            video_read, video_write = os.pipe()
-            audio_read = audio_write = None
-            if has_audio:
-                audio_read, audio_write = os.pipe()
-            try:
-                command, accelerator_used = stream_ffmpeg_command(
-                    f"pipe:{video_read}", f"pipe:{audio_read}" if audio_read is not None else None,
-                    duration, quality, gain_db, source_fps=source_fps,
-                    audio_offset_ms=audio_offset_ms,
-                )
-                pass_fds = (video_read,) if audio_read is None else (video_read, audio_read)
-                ffmpeg_process = subprocess.Popen(
-                    command, stdout=subprocess.PIPE, stderr=ffmpeg_log, pass_fds=pass_fds,
-                )
-            finally:
-                os.close(video_read)
-                if audio_read is not None:
-                    os.close(audio_read)
-
-            feeder_threads.append(threading.Thread(
-                target=_feed_growing_file,
-                args=(video_path, video_write, capture_process, stop_feeders),
-                name=f"{camera_id}-video-feed", daemon=True,
-            ))
-            if has_audio and audio_write is not None:
-                feeder_threads.append(threading.Thread(
-                    target=_feed_growing_file,
-                    args=(audio_path, audio_write, capture_process, stop_feeders),
-                    name=f"{camera_id}-audio-feed", daemon=True,
-                ))
-            for thread in feeder_threads:
-                thread.start()
-
-            assert ffmpeg_process.stdout is not None
-            ready, _, _ = select.select([ffmpeg_process.stdout], [], [], 30)
-            if not ready:
-                raise RuntimeError("Timed out waiting for the first recording media fragment.\n" +
-                                   _stream_failure_detail(work_directory))
-            first = os.read(ffmpeg_process.stdout.fileno(), 256 * 1024)
-            if not first:
-                raise RuntimeError("FFmpeg ended before producing recording media.\n" +
-                                   _stream_failure_detail(work_directory))
-            self.send_response(200)
-            self.send_header("Content-Type", "video/mp4")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("X-TVT-Archive-Accelerator", accelerator_used)
-            self.send_header("X-TVT-Archive-Audio", "1" if has_audio else "0")
-            self._headers()
-            self.end_headers()
-            response_started = True
-            self.wfile.write(first)
-            self.wfile.flush()
-            while True:
-                block = os.read(ffmpeg_process.stdout.fileno(), 256 * 1024)
-                if not block:
-                    break
-                self.wfile.write(block)
-                self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError):
-            LOG.info("Recording stream client disconnected: %s", camera_id)
-        except Exception as error:
-            failure = error
-            if response_started:
-                LOG.exception("Recording stream failed after HTTP response started")
-                return
-            raise
-        finally:
-            stop_capture.set()
-            stop_feeders.set()
-            for process in (capture_process, ffmpeg_process):
-                _terminate_process(process)
-            for thread in feeder_threads:
-                thread.join(timeout=2)
-            ffmpeg_log.close()
-            capture_log.close()
-            if failure is not None:
-                _retain_stream_diagnostics(work_directory, camera_id, failure)
-            lock.release()
-            shutil.rmtree(work_directory, ignore_errors=True)
-
     def _route_get(self, *, head_only: bool = False) -> None:
         parsed, query = self._parse()
         path = parsed.path.rstrip("/") or "/"
         if path == "/":
-            self._json({"name": "TVT Archive Bridge", "version": APP_VERSION}, head_only=head_only); return
+            self._json({"name": "TVT Archive Bridge", "version": APP_VERSION}, head_only=head_only)
+            return
         if path == "/api/health":
-            self._json({"ok": True, "version": APP_VERSION,
-                        "camera_count": len(CAMERAS), "accelerator": acceleration_capabilities(),
-                        "normal_video_mode": "H.264 stream copy",
-                        "playback_transport": "HLS fMP4 sessions",
-                        "hls_player": f"hls.js {HLS_JS_VERSION}",
-                        "native_session_limit_per_camera": NATIVE_SESSION_LIMIT,
-                        "active_jobs": sum(j.status in ("queued", "running") for j in JOBS.values()),
-                        "active_playback_sessions": sum(x.status in ("queued", "running", "playing") for x in SESSIONS.values())},
-                       head_only=head_only); return
+            self._json(
+                {
+                    "ok": True,
+                    "version": APP_VERSION,
+                    "camera_count": len(CAMERAS),
+                    "accelerator": acceleration_capabilities(),
+                    "normal_video_mode": "H.264 stream copy",
+                    "playback_transport": "HLS fMP4 sessions",
+                    "hls_player": f"hls.js {HLS_JS_VERSION}",
+                    "native_session_limit_per_camera": NATIVE_SESSION_LIMIT,
+                    "active_jobs": sum(j.status in ("queued", "running") for j in JOBS.values()),
+                    "active_playback_sessions": sum(
+                        x.status in ("queued", "running", "playing") for x in SESSIONS.values()
+                    ),
+                },
+                head_only=head_only,
+            )
+            return
         if not self._authorized():
-            self._error(401, "Missing or invalid access token", head_only=head_only); return
+            self._error(401, "Missing or invalid access token", head_only=head_only)
+            return
         try:
             if path == "/api/player/hls.js":
-                self._serve_javascript(HLS_JS_PATH, head_only=head_only); return
+                self._serve_javascript(HLS_JS_PATH, head_only=head_only)
+                return
             if path == "/api/cameras":
-                self._json({"cameras": list_cameras()}, head_only=head_only); return
+                self._json({"cameras": list_cameras()}, head_only=head_only)
+                return
             match = re.fullmatch(r"/api/cameras/([^/]+)", path)
             if match:
-                self._json({"camera": safe_camera(match.group(1))}, head_only=head_only); return
-            match = re.fullmatch(r"/api/sessions/([a-f0-9]{32})/(index\.m3u8|init\.mp4|segment-\d{5}\.m4s)", path)
+                self._json({"camera": safe_camera(match.group(1))}, head_only=head_only)
+                return
+            match = re.fullmatch(
+                r"/api/sessions/([a-f0-9]{32})/(index\.m3u8|init\.mp4|segment-\d{5}\.m4s)", path
+            )
             if match:
-                self._serve_hls_asset(match.group(1), match.group(2), head_only=head_only); return
+                self._serve_hls_asset(match.group(1), match.group(2), head_only=head_only)
+                return
             match = re.fullmatch(r"/api/sessions/([a-f0-9]{32})", path)
             if match:
-                self._json(_session(match.group(1)).public(), head_only=head_only); return
-            match = re.fullmatch(r"/api/cameras/([^/]+)/stream", path)
-            if match:
-                self._serve_recording_stream(match.group(1), query, head_only=head_only); return
+                self._json(_session(match.group(1)).public(), head_only=head_only)
+                return
             match = re.fullmatch(r"/api/cameras/([^/]+)/(timeline|availability|status)", path)
             if match:
                 camera_id, action = match.groups()
                 if action == "timeline":
                     day = validate_date(query.get("date", [dt.date.today().isoformat()])[0])
                     force = query.get("refresh", ["0"])[0].lower() in ("1", "true", "yes")
-                    self._json(get_timeline(camera_id, day, force=force), head_only=head_only); return
+                    self._json(get_timeline(camera_id, day, force=force), head_only=head_only)
+                    return
                 if action == "availability":
-                    self._json(get_availability(camera_id, int(query.get("days", ["45"])[0])), head_only=head_only); return
+                    self._json(
+                        get_availability(camera_id, int(query.get("days", ["45"])[0])),
+                        head_only=head_only,
+                    )
+                    return
                 force = query.get("refresh", ["0"])[0].lower() in ("1", "true", "yes")
-                self._json(get_status(camera_id, force=force), head_only=head_only); return
+                self._json(get_status(camera_id, force=force), head_only=head_only)
+                return
             match = re.fullmatch(r"/api/jobs/([a-f0-9]{32})(?:/file)?", path)
             if match:
                 job = JOBS.get(match.group(1))
-                if job is None: self._error(404, "Unknown job", head_only=head_only); return
+                if job is None:
+                    self._error(404, "Unknown job", head_only=head_only)
+                    return
                 if path.endswith("/file"):
                     if job.status != "ready" or not job.output_path:
-                        self._error(409, "The file is not ready", head_only=head_only); return
-                    self._serve_file(Path(job.output_path), job.output_name or "recording.mp4",
-                                     query.get("download", ["0"])[0] == "1", head_only=head_only); return
-                self._json(job.public(), head_only=head_only); return
+                        self._error(409, "The file is not ready", head_only=head_only)
+                        return
+                    self._serve_file(
+                        Path(job.output_path),
+                        job.output_name or "recording.mp4",
+                        query.get("download", ["0"])[0] == "1",
+                        head_only=head_only,
+                    )
+                    return
+                self._json(job.public(), head_only=head_only)
+                return
             self._error(404, "Not found", head_only=head_only)
         except KeyError as error:
             self._error(404, str(error), head_only=head_only)
         except ValueError as error:
             self._error(400, str(error), head_only=head_only)
-        except Exception as error:
-            LOG.exception("GET %s failed", path); self._error(500, "Internal bridge error", head_only=head_only)
+        except Exception:
+            LOG.exception("GET %s failed", path)
+            self._error(500, "Internal bridge error", head_only=head_only)
 
-    def do_GET(self) -> None: self._route_get()
-    def do_HEAD(self) -> None: self._route_get(head_only=True)
+    def do_GET(self) -> None:
+        self._route_get()
+
+    def do_HEAD(self) -> None:
+        self._route_get(head_only=True)
 
     def do_POST(self) -> None:
         parsed, _ = self._parse()
@@ -2600,7 +3195,7 @@ class Handler(BaseHTTPRequestHandler):
             self._error(400, str(error))
         except KeyError as error:
             self._error(404, str(error))
-        except Exception as error:
+        except Exception:
             LOG.exception("POST %s failed", path)
             self._error(500, "Internal bridge error")
 
@@ -2620,7 +3215,7 @@ class Handler(BaseHTTPRequestHandler):
             self._error(400, str(error))
         except KeyError as error:
             self._error(404, str(error))
-        except Exception as error:
+        except Exception:
             LOG.exception("PUT %s failed", path)
             self._error(500, "Internal bridge error")
 
@@ -2647,7 +3242,7 @@ class Handler(BaseHTTPRequestHandler):
             self._error(400, str(error))
         except KeyError as error:
             self._error(404, str(error))
-        except Exception as error:
+        except Exception:
             LOG.exception("DELETE %s failed", path)
             self._error(500, "Internal bridge error")
 

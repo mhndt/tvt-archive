@@ -5,6 +5,7 @@ This module implements only the read-only operations required by TVT Archive:
 login, recording searches, and recorded-media playback. It does not change
 camera settings or delete recordings.
 """
+
 from __future__ import annotations
 
 import json
@@ -16,10 +17,11 @@ import threading
 import time
 import uuid
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import BinaryIO, Callable, Optional
+from typing import BinaryIO
 
 OUTER_MAGIC = b"1111"
 HEAD_MAGIC = b"head"
@@ -175,8 +177,8 @@ class ApplicationObjectReader:
                     raise TVT9008Error(f"Invalid normal object length {declared}")
                 return self.read_exact(declared), False, None
 
-            object_id, chunk_count, total_length, chunk_index, chunk_length, reserved = struct.unpack(
-                "<IIIIII", self.read_exact(24)
+            object_id, chunk_count, total_length, chunk_index, chunk_length, reserved = (
+                struct.unpack("<IIIIII", self.read_exact(24))
             )
             if reserved != 0:
                 raise TVT9008Error(f"Fragment {object_id} has nonzero reserved field")
@@ -207,7 +209,9 @@ class ApplicationObjectReader:
                 self.fragment_chunks += 1
                 if existing != chunk:
                     self._discard_fragment(object_id)
-                    raise TVT9008Error(f"Fragment {object_id} duplicate chunk {chunk_index} changed")
+                    raise TVT9008Error(
+                        f"Fragment {object_id} duplicate chunk {chunk_index} changed"
+                    )
                 continue
 
             retained = assembly.received_bytes + chunk_length
@@ -249,13 +253,17 @@ def _command(kind: int, request_id: int, body: bytes = b"", target: int = TARGET
     return _outer(struct.pack("<IIII", kind, request_id, target, len(body)) + body)
 
 
-def _parse_inner(payload: bytes, fragmented: bool = False, fragment_id: int | None = None) -> InnerFrame:
+def _parse_inner(
+    payload: bytes, fragmented: bool = False, fragment_id: int | None = None
+) -> InnerFrame:
     if len(payload) < 16:
         raise TVT9008Error("Inner object is shorter than its header")
     kind, request_id, target, body_length = struct.unpack_from("<IIII", payload, 0)
     if body_length > len(payload) - 16:
         raise TVT9008Error("Inner body length exceeds available payload")
-    return InnerFrame(kind, request_id, target, payload[16:16 + body_length], fragmented, fragment_id)
+    return InnerFrame(
+        kind, request_id, target, payload[16 : 16 + body_length], fragmented, fragment_id
+    )
 
 
 def _client_tag() -> bytes:
@@ -273,9 +281,9 @@ def _login_body(username: str, password: str, key: bytes) -> bytes:
         raise ValueError("Password must contain 1-31 UTF-8 bytes")
     body = bytearray(116)
     username_plain = username_bytes + b"\x00"
-    body[0x04:0x04 + len(username_plain)] = _xor_repeating(username_plain, key)
+    body[0x04 : 0x04 + len(username_plain)] = _xor_repeating(username_plain, key)
     password_field = bytearray(32)
-    password_field[:len(password_bytes)] = password_bytes
+    password_field[: len(password_bytes)] = password_bytes
     body[0x24:0x44] = _xor_repeating(bytes(password_field), key)
     body[0x68:0x6E] = _client_tag()
     struct.pack_into("<I", body, 0x70, 3)
@@ -293,17 +301,17 @@ def _search_xml(start: datetime, stop: datetime) -> bytes:
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<config version="1.0" xmlns="http://www.ipc.com/ver10">\n'
-        '  <search>\n'
+        "  <search>\n"
         '    <recTypes type="list">\n'
         '      <itemType type="recType"/>\n'
-        '      <item>manual</item><item>nic broken</item><item>schedule</item>\n'
-        '      <item>motion</item><item>sensor</item><item>intel detection</item>\n'
-        '    </recTypes>\n'
+        "      <item>manual</item><item>nic broken</item><item>schedule</item>\n"
+        "      <item>motion</item><item>sensor</item><item>intel detection</item>\n"
+        "    </recTypes>\n"
         f'    <starttime type="string"><![CDATA[{start:%Y-%m-%d %H:%M:%S}]]></starttime>\n'
         f'    <endtime type="string"><![CDATA[{stop:%Y-%m-%d %H:%M:%S}]]></endtime>\n'
-        '  </search>\n'
-        '</config>'
-    ).encode("utf-8")
+        "  </search>\n"
+        "</config>"
+    ).encode()
 
 
 def _strip_http(payload: bytes) -> bytes:
@@ -311,7 +319,7 @@ def _strip_http(payload: bytes) -> bytes:
     if position >= 0:
         return payload[position:].rstrip(b"\x00")
     separator = payload.find(b"\r\n\r\n")
-    return payload[separator + 4:].rstrip(b"\x00") if separator >= 0 else payload.rstrip(b"\x00")
+    return payload[separator + 4 :].rstrip(b"\x00") if separator >= 0 else payload.rstrip(b"\x00")
 
 
 def _local_name(tag: str) -> str:
@@ -334,7 +342,9 @@ def _atomic_json(path: Path, value: dict[str, object]) -> None:
 
 
 class TVT9008Client:
-    def __init__(self, host: str, port: int, username: str, password: str, timeout: float = 8.0) -> None:
+    def __init__(
+        self, host: str, port: int, username: str, password: str, timeout: float = 8.0
+    ) -> None:
         self.host = host
         self.port = port
         self.username = username
@@ -346,7 +356,7 @@ class TVT9008Client:
         self._heartbeat_stop = threading.Event()
         self._heartbeat_thread: threading.Thread | None = None
 
-    def __enter__(self) -> "TVT9008Client":
+    def __enter__(self) -> TVT9008Client:
         self.connect()
         return self
 
@@ -364,14 +374,16 @@ class TVT9008Client:
         if hello[:4] != HEAD_MAGIC:
             sock.close()
             raise TVT9008Error(f"Expected 'head' greeting, got {hello[:4]!r}")
-        key = hello[KEY_OFFSET:KEY_OFFSET + KEY_SIZE]
+        key = hello[KEY_OFFSET : KEY_OFFSET + KEY_SIZE]
         if key == b"\x00" * KEY_SIZE:
             sock.close()
             raise TVT9008Error("Camera returned an invalid zero login key")
         self.sock = sock
         self.reader = reader
         try:
-            self.send(KIND_LOGIN_REQUEST, LOGIN_REQUEST_ID, _login_body(self.username, self.password, key))
+            self.send(
+                KIND_LOGIN_REQUEST, LOGIN_REQUEST_ID, _login_body(self.username, self.password, key)
+            )
             self.wait_for(KIND_LOGIN_RESPONSE, LOGIN_REQUEST_ID, self.timeout)
             sock.settimeout(0.75)
             self._heartbeat_stop.clear()
@@ -424,7 +436,7 @@ class TVT9008Client:
         while time.monotonic() < deadline:
             try:
                 frame = self.read_frame()
-            except socket.timeout:
+            except TimeoutError:
                 continue
             if frame is None or frame.kind != kind:
                 continue
@@ -444,7 +456,9 @@ class TVT9008Client:
             text = (element.text or "").strip()
             if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
                 dates.add(text)
-        dates.update(re.findall(r"\b\d{4}-\d{2}-\d{2}\b", xml_bytes.decode("utf-8", errors="replace")))
+        dates.update(
+            re.findall(r"\b\d{4}-\d{2}-\d{2}\b", xml_bytes.decode("utf-8", errors="replace"))
+        )
         return sorted(dates)
 
     def search(self, start: datetime, stop: datetime) -> list[dict[str, object]]:
@@ -467,12 +481,14 @@ class TVT9008Client:
             if seconds <= 0:
                 continue
             item_stop = item_start + timedelta(seconds=seconds)
-            results.append({
-                "start": item_start.isoformat(timespec="seconds"),
-                "stop": item_stop.isoformat(timespec="seconds"),
-                "seconds": seconds,
-                "type": element.attrib.get("recType", "unknown"),
-            })
+            results.append(
+                {
+                    "start": item_start.isoformat(timespec="seconds"),
+                    "stop": item_stop.isoformat(timespec="seconds"),
+                    "seconds": seconds,
+                    "type": element.attrib.get("recType", "unknown"),
+                }
+            )
         return results
 
     @staticmethod
@@ -494,7 +510,7 @@ class TVT9008Client:
         data_length = struct.unpack_from("<I", body, 32)[0]
         if data_length > len(body) - MEDIA_HEADER_SIZE:
             return "other", b"", timestamp_us, False
-        data = body[MEDIA_HEADER_SIZE:MEDIA_HEADER_SIZE + data_length]
+        data = body[MEDIA_HEADER_SIZE : MEDIA_HEADER_SIZE + data_length]
         if marker == AUDIO_MARKER:
             if len(data) < AUDIO_PREFIX_SIZE:
                 return "other", b"", timestamp_us, False
@@ -537,27 +553,39 @@ class TVT9008Client:
         def write_timing() -> None:
             value = summary.as_dict()
             value["source_fps"] = (
-                (summary.video_frames - 1) * 1_000_000 /
-                (summary.last_video_time_us - summary.first_video_time_us)
-                if summary.video_frames > 1 and summary.last_video_time_us > summary.first_video_time_us
+                (summary.video_frames - 1)
+                * 1_000_000
+                / (summary.last_video_time_us - summary.first_video_time_us)
+                if summary.video_frames > 1
+                and summary.last_video_time_us > summary.first_video_time_us
                 else 25.0
             )
-            value["captured_seconds"] = max(
-                0.0,
-                (
-                    max(summary.last_video_time_us, summary.last_audio_time_us)
-                    - min(
-                        value for value in (
-                            summary.first_video_time_us,
-                            summary.first_audio_time_us,
-                        ) if value > 0
+            value["captured_seconds"] = (
+                max(
+                    0.0,
+                    (
+                        max(summary.last_video_time_us, summary.last_audio_time_us)
+                        - min(
+                            value
+                            for value in (
+                                summary.first_video_time_us,
+                                summary.first_audio_time_us,
+                            )
+                            if value > 0
+                        )
                     )
-                ) / 1_000_000,
-            ) if summary.first_video_time_us or summary.first_audio_time_us else 0.0
+                    / 1_000_000,
+                )
+                if summary.first_video_time_us or summary.first_audio_time_us
+                else 0.0
+            )
             _atomic_json(timing_path, value)
 
         write_timing()
-        with video_path.open("wb", buffering=0) as video, audio_path.open("wb", buffering=0) as audio:
+        with (
+            video_path.open("wb", buffering=0) as video,
+            audio_path.open("wb", buffering=0) as audio,
+        ):
             while time.monotonic() < deadline:
                 now = time.monotonic()
                 if (
@@ -573,9 +601,13 @@ class TVT9008Client:
                     break
                 try:
                     frame = self.read_frame()
-                except socket.timeout:
+                except TimeoutError:
                     continue
-                if frame is None or frame.kind != KIND_RECORDED_MEDIA or frame.request_id != request_id:
+                if (
+                    frame is None
+                    or frame.kind != KIND_RECORDED_MEDIA
+                    or frame.request_id != request_id
+                ):
                     continue
                 media_type, payload, timestamp_us, keyframe = self._extract_media(frame)
                 if media_type == "video":
@@ -606,7 +638,9 @@ class TVT9008Client:
                     write_timing()
                 latest = max(summary.last_video_time_us, summary.last_audio_time_us)
                 enough_video = summary.video_frames >= max(2, int(duration * 25 * 0.75))
-                audio_ok = not summary.has_audio or summary.audio_frames >= max(2, int(duration * 25 * 0.60))
+                audio_ok = not summary.has_audio or summary.audio_frames >= max(
+                    2, int(duration * 25 * 0.60)
+                )
                 if latest >= target_end_us - 40_000 and enough_video and audio_ok:
                     break
             else:

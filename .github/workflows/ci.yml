@@ -29,6 +29,12 @@ jobs:
       - name: Install ShellCheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
 
+      - name: Lint
+        run: |
+          pip install ruff
+          ruff check .
+          ruff format --check .
+
       - name: Repository consistency
         run: python3 scripts/check-version.py
 

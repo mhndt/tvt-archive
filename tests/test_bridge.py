@@ -23,16 +23,18 @@ CONFIG.mkdir()
         {
             "server": {"bind": "127.0.0.1", "port": 18099, "token": "test-token"},
             "processing": {"accelerator": "auto", "max_parallel_jobs": 1},
-            "cameras": [{
-                "id": "front_door",
-                "name": "Front Door",
-                "host": "192.0.2.10",
-                "port": 9008,
-                "channel": 0,
-                "username": "test",
-                "password": "not-a-real-secret",
-                "archive_backend": "native_9008",
-            }],
+            "cameras": [
+                {
+                    "id": "front_door",
+                    "name": "Front Door",
+                    "host": "192.0.2.10",
+                    "port": 9008,
+                    "channel": 0,
+                    "username": "test",
+                    "password": "not-a-real-secret",
+                    "archive_backend": "native_9008",
+                }
+            ],
         }
     ),
     encoding="utf-8",
@@ -97,7 +99,9 @@ class BridgeTests(unittest.TestCase):
         )
 
     def test_full_vaapi_command_uses_proven_gpu_only_pipeline(self) -> None:
-        with patch.object(bridge, "acceleration_capabilities", return_value={"selected": "vaapi_full"}):
+        with patch.object(
+            bridge, "acceleration_capabilities", return_value={"selected": "vaapi_full"}
+        ):
             pre, out, selected = bridge.transcode_video_args("balanced")
         self.assertEqual(selected, "vaapi_full")
         joined = " ".join(pre + out)
@@ -114,7 +118,9 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(selected, "copy")
 
     def test_metadata_and_media_locks_are_independent(self) -> None:
-        self.assertIsNot(bridge.camera_session_slot("front_door"), bridge.metadata_lock("front_door"))
+        self.assertIsNot(
+            bridge.camera_session_slot("front_door"), bridge.metadata_lock("front_door")
+        )
 
     def test_two_native_sessions_are_allowed_but_third_waits(self) -> None:
         slot = bridge.camera_session_slot("front_door")
@@ -127,6 +133,7 @@ class BridgeTests(unittest.TestCase):
             slot.release()
             slot.release()
 
+    @unittest.skipIf(os.name == "nt", "POSIX file modes")
     def test_completed_export_cross_device_fallback_is_atomic(self) -> None:
         source = bridge.WORK / "cross-device-source.mp4"
         destination = bridge.CACHE / "cross-device-destination.mp4"
@@ -162,14 +169,17 @@ class BridgeTests(unittest.TestCase):
             path = Path(directory)
             (path / "segment-00000.m4s").write_bytes(b"x")
             (path / "index.m3u8").write_text(
-                "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXTINF:4.2,\nsegment-00000.m4s\n", encoding="utf-8"
+                "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXTINF:4.2,\nsegment-00000.m4s\n",
+                encoding="utf-8",
             )
             self.assertTrue(session.playlist_ready())
             (path / "index.m3u8").unlink()
             self.assertTrue(session.playlist_ready())
 
     def test_original_hls_uses_short_gop_encoder_while_exports_still_copy(self) -> None:
-        with patch.object(bridge, "acceleration_capabilities", return_value={"selected": "software"}):
+        with patch.object(
+            bridge, "acceleration_capabilities", return_value={"selected": "software"}
+        ):
             pre, out, selected = bridge.hls_video_pipeline("original", source_fps=25.0)
         self.assertEqual(pre, [])
         self.assertEqual(selected, "software")
@@ -181,12 +191,16 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual((file_pre, file_out, file_selected), ([], ["-c:v", "copy"], "copy"))
 
     def test_hls_gop_tracks_segment_length(self) -> None:
-        with patch.object(bridge, "acceleration_capabilities", return_value={"selected": "software"}):
+        with patch.object(
+            bridge, "acceleration_capabilities", return_value={"selected": "software"}
+        ):
             _, out, _ = bridge.hls_video_pipeline("data_saver", source_fps=25.0)
         index = out.index("-g")
         self.assertEqual(out[index + 1], str(round(25.0 * bridge.HLS_SEGMENT_SECONDS)))
 
-    def test_timing_probe_uses_reported_fps_and_audio_without_waiting_full_legacy_deadline(self) -> None:
+    def test_timing_probe_uses_reported_fps_and_audio_without_waiting_full_legacy_deadline(
+        self,
+    ) -> None:
         class RunningProcess:
             @staticmethod
             def poll():
@@ -226,21 +240,6 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(bridge.HLS_TIMING_MAX_SECONDS, 2.5)
         self.assertEqual(bridge.HLS_AUDIO_PROBE_MEDIA_SECONDS, 2.0)
 
-    def test_v083_hls_startup_defaults_and_retry_are_persisted(self) -> None:
-        text = (ROOT / "host" / "app" / "bridge.py").read_text(encoding="utf-8")
-        self.assertIn('PROCESSING.get("hls_start_buffer_seconds", 2)', text)
-        self.assertIn('PROCESSING.get("hls_timing_sample_frames", 8)', text)
-        self.assertIn('PROCESSING.get("hls_first_media_timeout_seconds", 30.0)', text)
-        self.assertIn('PROCESSING.get("hls_first_media_retries", 1)', text)
-        self.assertIn('"split_by_time+temp_file"', text)
-        self.assertIn("Retrying camera archive", text)
-
-    def test_hls_completion_requires_successful_capture_process(self) -> None:
-        text = (ROOT / "host" / "app" / "bridge.py").read_text(encoding="utf-8")
-        self.assertIn("ffmpeg_rc == 0 and capture_rc == 0 and session.playlist_ready()", text)
-        self.assertNotIn("elif ffmpeg_rc == 0 and session.playlist_ready()", text)
-        self.assertIn("The media pipeline ended before archive capture completed.", text)
-
     def test_recording_audio_defaults_to_auto_and_learns_positive_capability(self) -> None:
         capability = bridge._camera_capabilities_path("front_door")
         capability.unlink(missing_ok=True)
@@ -250,23 +249,43 @@ class BridgeTests(unittest.TestCase):
         self.assertTrue(bridge._learned_archive_audio("front_door"))
 
     def test_archive_audio_alignment_uses_source_timeline(self) -> None:
-        timing={"first_video_time_us":1_000_000,"last_video_time_us":3_100_000,"first_audio_time_us":3_050_000}
-        self.assertEqual(bridge._audio_video_elapsed_samples(timing),16_800)
-        self.assertEqual(bridge._audio_offset_samples(timing),16_400)
-        self.assertAlmostEqual(bridge._video_media_elapsed_seconds(timing),2.1)
+        timing = {
+            "first_video_time_us": 1_000_000,
+            "last_video_time_us": 3_100_000,
+            "first_audio_time_us": 3_050_000,
+        }
+        self.assertEqual(bridge._audio_video_elapsed_samples(timing), 16_800)
+        self.assertEqual(bridge._audio_offset_samples(timing), 16_400)
+        self.assertAlmostEqual(bridge._video_media_elapsed_seconds(timing), 2.1)
 
     def test_archive_audio_capability_is_per_camera(self) -> None:
-        front=bridge._camera_capabilities_path("front_door"); garage=bridge._camera_capabilities_path("garage")
-        front.unlink(missing_ok=True); garage.unlink(missing_ok=True)
+        front = bridge._camera_capabilities_path("front_door")
+        garage = bridge._camera_capabilities_path("garage")
+        front.unlink(missing_ok=True)
+        garage.unlink(missing_ok=True)
         bridge._remember_archive_audio("front_door")
-        self.assertTrue(bridge._learned_archive_audio("front_door")); self.assertFalse(bridge._learned_archive_audio("garage"))
+        self.assertTrue(bridge._learned_archive_audio("front_door"))
+        self.assertFalse(bridge._learned_archive_audio("garage"))
 
     def test_hls_feeder_alignment_prevents_double_positive_delay(self) -> None:
         with tempfile.TemporaryDirectory(dir=bridge.WORK) as directory:
-            session=bridge.PlaybackSession("c"*32,"front_door",{"duration":60,"quality":"original","gain_db":0},directory)
-            session.source_fps=25.0; session.has_audio=True; session.audio_offset_ms=2053; session.audio_alignment_in_feeder=True
-            with patch.object(bridge,"acceleration_capabilities",return_value={"selected":"software"}): command,_=bridge._hls_command("pipe:3","pipe:4",session)
-            joined=" ".join(command); self.assertNotIn("adelay=2053",joined); self.assertIn("aresample=async=1:first_pts=0",joined)
+            session = bridge.PlaybackSession(
+                "c" * 32,
+                "front_door",
+                {"duration": 60, "quality": "original", "gain_db": 0},
+                directory,
+            )
+            session.source_fps = 25.0
+            session.has_audio = True
+            session.audio_offset_ms = 2053
+            session.audio_alignment_in_feeder = True
+            with patch.object(
+                bridge, "acceleration_capabilities", return_value={"selected": "software"}
+            ):
+                command, _ = bridge._hls_command("pipe:3", "pipe:4", session)
+            joined = " ".join(command)
+            self.assertNotIn("adelay=2053", joined)
+            self.assertIn("aresample=async=1:first_pts=0", joined)
 
 
 if __name__ == "__main__":

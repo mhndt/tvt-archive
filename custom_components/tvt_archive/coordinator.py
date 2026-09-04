@@ -13,8 +13,12 @@ from .const import DOMAIN
 
 class TVTArchiveCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def __init__(self, hass: HomeAssistant, api: TVTArchiveApi) -> None:
-        super().__init__(hass, logger=__import__("logging").getLogger(__name__),
-                         name=DOMAIN, update_interval=timedelta(minutes=2))
+        super().__init__(
+            hass,
+            logger=__import__("logging").getLogger(__name__),
+            name=DOMAIN,
+            update_interval=timedelta(minutes=2),
+        )
         self.api = api
 
     async def _async_update_data(self) -> dict[str, Any]:

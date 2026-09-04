@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from hashlib import sha256
 from pathlib import Path
-from urllib.parse import urlencode
 
-from homeassistant.components.panel_custom import async_register_panel
 from homeassistant.components.http import StaticPathConfig
+from homeassistant.components.panel_custom import async_register_panel
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_URL, Platform
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import TVTArchiveApi
@@ -62,9 +62,7 @@ async def _async_register_frontend(hass: HomeAssistant) -> None:
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    api = TVTArchiveApi(
-        async_get_clientsession(hass), entry.data[CONF_URL], entry.data[CONF_TOKEN]
-    )
+    api = TVTArchiveApi(async_get_clientsession(hass), entry.data[CONF_URL], entry.data[CONF_TOKEN])
     coordinator = TVTArchiveCoordinator(hass, api)
     await coordinator.async_config_entry_first_refresh()
     domain_data = hass.data.setdefault(DOMAIN, {})
@@ -92,22 +90,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         }
         if matching_ids and matching_ids.isdisjoint(current_camera_ids):
             device_registry.async_remove_device(device.id)
-
-    for camera in cameras:
-        camera_id = str(camera["id"])
-        identifier = (DOMAIN, f"{entry.entry_id}:{camera_id}")
-        if device := device_registry.async_get_device(identifiers={identifier}):
-            device_registry.async_update_device(
-                device.id,
-                manufacturer=None,
-                model=None,
-                configuration_url=f"homeassistant://tvt-archive?{urlencode({'camera': camera_id, 'mode': 'recording'})}",
-            )
-        for obsolete_key in ("archive_days", "storage_free", "storage_used", "sd_status", "sd_capacity"):
-            unique_id = f"{entry.entry_id}:{camera_id}:{obsolete_key}"
-            entity_id = registry.async_get_entity_id("sensor", DOMAIN, unique_id)
-            if entity_id is not None:
-                registry.async_remove(entity_id)
 
     if not domain_data.get(DATA_VIEWS_REGISTERED):
         register_views(hass)

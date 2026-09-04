@@ -120,7 +120,7 @@ class TVTFmp4Player {
       this._adaptiveTick();
     };
     this._boundWaiting = () => this._handleWaiting();
-    this._boundStalled = () => this._handleWaiting();
+    this._boundError = () => this._handleMediaError();
     this._boundEnded = () => {
       if (!this.serverComplete && !this.destroyed) this._enterRebuffer("event");
     };
@@ -166,7 +166,7 @@ class TVTFmp4Player {
     this.video.addEventListener("seeking", this._boundSeeking);
     this.video.addEventListener("seeked", this._boundSeeked);
     this.video.addEventListener("waiting", this._boundWaiting);
-    this.video.addEventListener("stalled", this._boundStalled);
+    this.video.addEventListener("error", this._boundError);
     this.video.addEventListener("ended", this._boundEnded);
     this.video.addEventListener("playing", this._boundPlaying);
     this.video.addEventListener("pointerenter", this._boundControlsActivity);
@@ -303,15 +303,6 @@ class TVTFmp4Player {
 
   _bufferedAhead() { return this._bufferWindow()?.ahead || 0; }
 
-  _nextPlayableTime() {
-    const ranges = this.video.buffered;
-    if (!ranges.length) return null;
-    const now = Number(this.video.currentTime || 0);
-    for (let i = 0; i < ranges.length; i += 1) {
-      if (now < ranges.end(i) - 0.05) return Math.max(now, ranges.start(i) + 0.02);
-    }
-    return null;
-  }
 
   _maybeStart() {
     if (this.started || this.destroyed || !this.video.buffered.length) return;
@@ -326,26 +317,21 @@ class TVTFmp4Player {
     try { this.video.currentTime = window.start + 0.03; } catch (_) {}
     this._startAdaptiveClock();
     this.onReady?.();
-    this.resume();
+    this._play();
   }
-
-  resume() {
-    if (this.destroyed || !this.started) return;
-    if (this.rebuffering && !this.serverComplete) {
-      this._maybeRecover();
-      return;
-    }
-    const next = this._nextPlayableTime();
-    if (next != null && (this.video.ended || this._bufferedAhead() < 0.05)) {
-      try { this.video.currentTime = next; } catch (_) {}
-    }
+  _play() {
     const result = this.video.play();
-    if (result?.then) {
-      result.then(() => this._state("playing")).catch(() => {
-        this.video.controls = true;
-        this._state("play-required");
-      });
-    }
+    if (!result?.then) { this._state("playing"); return; }
+    result.then(() => this._state("playing")).catch((error) => {
+      if (error?.name === "NotAllowedError") this.video.controls = true;
+    });
+  }
+  _handleMediaError() {
+    if (this.destroyed || this.hls) return;
+    const error = this.video.error;
+    if (!error) return;
+    const detail = {2: "network error", 3: "decode error", 4: "source not supported"}[error.code] || error.message || `code ${error.code}`;
+    this._fatal(`Recording playback failed: ${detail}`);
   }
 
   _setPlaybackRate(rate) {
@@ -360,6 +346,7 @@ class TVTFmp4Player {
 
   _handleWaiting() {
     if (this.destroyed || !this.started || this.serverComplete || this.video.seeking) return;
+    if (this._bufferedAhead() > 0.35) return;
     this._enterRebuffer("event");
   }
 
@@ -400,16 +387,8 @@ class TVTFmp4Player {
     this.freezeTime = null;
     this.freezeReason = null;
     this._setPlaybackRate(0.45);
-    const result = this.video.play();
-    if (result?.then) {
-      result.then(() => { this._state("playing"); this._adaptiveTick(); }).catch(() => {
-        this.video.controls = true;
-        this._state("play-required");
-      });
-    } else {
-      this._state("playing");
-      this._adaptiveTick();
-    }
+    this._play();
+    this._adaptiveTick();
   }
 
   _watchPlaybackProgress(window, ahead, now) {
@@ -522,7 +501,7 @@ class TVTFmp4Player {
       this.video.removeEventListener("seeking", this._boundSeeking);
       this.video.removeEventListener("seeked", this._boundSeeked);
       this.video.removeEventListener("waiting", this._boundWaiting);
-      this.video.removeEventListener("stalled", this._boundStalled);
+      this.video.removeEventListener("error", this._boundError);
       this.video.removeEventListener("ended", this._boundEnded);
       this.video.removeEventListener("playing", this._boundPlaying);
       this.video.removeEventListener("pointerenter", this._boundControlsActivity);
@@ -836,7 +815,7 @@ class TVTArchivePanel extends HTMLElement {
       .shell{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:14px}.card{background:var(--card-background-color);border-radius:14px;box-shadow:var(--ha-card-box-shadow,0 2px 2px rgba(0,0,0,.15));overflow:hidden;min-width:0}
       .player-head{padding:11px 14px;display:flex;justify-content:space-between;align-items:center;gap:10px;border-bottom:1px solid var(--divider-color)}
       .player{background:#000;min-height:min(62vh,640px);display:grid;place-items:center;position:relative;overflow:hidden}
-      .player video{width:100%;height:min(62vh,640px);object-fit:contain;background:#000;display:block}.player-state{display:none;grid-area:1/1;z-index:2;align-items:center;justify-content:center;pointer-events:none;color:var(--secondary-text-color);font-size:.92rem}.player-state.visible{display:flex}.player-state.action{pointer-events:auto}.player-state-content{display:flex;align-items:center;gap:10px;padding:10px 13px;border-radius:10px;background:rgba(0,0,0,.58);color:var(--secondary-text-color)}.player-spinner{width:18px;height:18px;border-radius:50%;border:3px solid rgba(255,255,255,.25);border-top-color:var(--secondary-text-color);animation:tvt-spin .8s linear infinite}@keyframes tvt-spin{to{transform:rotate(360deg)}}
+      .player video{width:100%;height:min(62vh,640px);object-fit:contain;background:#000;display:block;grid-area:1/1}.player-state{display:none;grid-area:1/1;align-self:stretch;justify-self:stretch;z-index:2;align-items:center;justify-content:center;pointer-events:none;color:var(--secondary-text-color);font-size:.92rem}.player-state.visible{display:flex}.player-state-content{display:flex;align-items:center;gap:10px;padding:10px 13px;border-radius:10px;background:rgba(0,0,0,.58);color:var(--secondary-text-color)}.player-spinner{width:18px;height:18px;border-radius:50%;border:3px solid rgba(255,255,255,.25);border-top-color:var(--secondary-text-color);animation:tvt-spin .8s linear infinite}@keyframes tvt-spin{to{transform:rotate(360deg)}}
       .empty{padding:32px;text-align:center;color:var(--secondary-text-color)}.sidebar{padding:14px;display:grid;gap:10px;align-content:start}.stat{padding:10px 12px;background:var(--secondary-background-color);border-radius:10px}.stat span{color:var(--secondary-text-color);font-size:.8rem}.stat b{display:block;margin-top:3px;overflow-wrap:anywhere}
       .timeline-card{padding:12px}.timeline-title{display:flex;justify-content:space-between;gap:10px;margin-bottom:8px}.timeline{height:112px;overflow-x:auto;overflow-y:hidden;position:relative;background:var(--secondary-background-color);border-radius:10px;cursor:crosshair}.timeline-inner{height:100%;position:relative;min-width:100%}.segment{position:absolute;top:38px;height:42px;border-radius:6px;background:var(--success-color,#43a047)}.tick{position:absolute;top:0;bottom:0;width:1px;background:var(--divider-color)}.tick span{position:absolute;left:0;top:7px;transform:translateX(-50%);font-size:.7rem;color:var(--secondary-text-color);white-space:nowrap}.tick:first-child span{left:6px;transform:none}.tick:last-child span{left:auto;right:6px;transform:none}.marker{position:absolute;top:28px;bottom:12px;width:2px;background:var(--error-color,#e53935)}.marker:after{content:"";position:absolute;top:-5px;left:-4px;width:10px;height:10px;border-radius:50%;background:inherit}
       .lower{display:grid;grid-template-columns:1fr 1fr;gap:14px}.box{padding:13px;min-width:0;overflow:hidden}.selection-controls{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:end}.selection-controls>*{min-width:0;max-width:100%}.range{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;gap:8px;align-items:end}.range>*{min-width:0;max-width:100%}.download-link{display:inline-flex;align-items:center;justify-content:center;padding:10px 14px;border-radius:8px;background:var(--primary-color);color:var(--text-primary-color,#fff);text-decoration:none;font-weight:600}.download-progress{display:none;grid-column:1/-1;align-items:center;gap:9px;font-size:.78rem;color:var(--secondary-text-color)}.download-progress.visible{display:flex}.download-track{height:5px;flex:1;overflow:hidden;border-radius:999px;background:var(--divider-color)}.download-bar{height:100%;width:0;background:var(--primary-color);transition:width .25s ease}.download-percent{min-width:34px;text-align:right;font-variant-numeric:tabular-nums}.statusline{min-height:22px;color:var(--secondary-text-color)}.error{color:var(--error-color)}
@@ -951,12 +930,7 @@ class TVTArchivePanel extends HTMLElement {
       overlay.replaceChildren();
       return;
     }
-    overlay.className = `player-state visible${state === "play-required" ? " action" : ""}`;
-    if (state === "play-required") {
-      overlay.innerHTML = `<div class="player-state-content"><button id="resume-recording">Play recording</button></div>`;
-      overlay.querySelector("#resume-recording")?.addEventListener("click", () => this._recordingController?.resume());
-      return;
-    }
+    overlay.className = "player-state visible";
     const label = state === "opening" ? "Opening recording" : "Buffering recording";
     overlay.innerHTML = `<div class="player-state-content"><span class="player-spinner"></span><span>${label}</span></div>`;
   }
@@ -1094,7 +1068,7 @@ class TVTArchivePanel extends HTMLElement {
   }
 
   _recoverablePlaybackError(message) {
-    return /(no route to host|network is unreachable|temporarily unreachable|connection refused|timed out|timeout|networkerror|fragloaderror|levelloaderror|manifestloaderror|camera archive capture failed)/i.test(String(message || ""));
+    return /(no route to host|network is unreachable|temporarily unreachable|connection refused|timed out|timeout|network ?error|fragloaderror|levelloaderror|manifestloaderror|camera archive capture failed)/i.test(String(message || ""));
   }
 
   async _handlePlaybackFailure(message) {

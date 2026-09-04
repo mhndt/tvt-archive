@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any
 
 import voluptuous as vol
-
 from homeassistant import config_entries
 from homeassistant.const import (
     CONF_HOST,
@@ -38,7 +37,11 @@ BACKENDS = {
     "native_9008": "Native TCP/9008",
     "rtsp": "Recorded RTSP",
 }
-RECORDING_AUDIO_MODES = {"auto": "Auto (recommended)", "on": "Always expect audio", "off": "Disabled"}
+RECORDING_AUDIO_MODES = {
+    "auto": "Auto (recommended)",
+    "on": "Always expect audio",
+    "off": "Disabled",
+}
 RTSP_STREAMS = {"main": "Main stream", "sub": "Sub stream"}
 RTSP_TRANSPORTS = {"tcp": "TCP", "udp": "UDP"}
 
@@ -51,7 +54,9 @@ def _camera_schema(
     """Common camera fields; RTSP-only details live on a second UI page."""
     defaults = defaults or {}
     password_field = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
-    password_key = vol.Optional(CONF_PASSWORD, default="") if editing else vol.Required(CONF_PASSWORD)
+    password_key = (
+        vol.Optional(CONF_PASSWORD, default="") if editing else vol.Required(CONF_PASSWORD)
+    )
     fields: dict[Any, Any] = {
         vol.Required(CONF_NAME, default=defaults.get(CONF_NAME, "")): str,
         vol.Required(CONF_HOST, default=defaults.get(CONF_HOST, "")): str,
@@ -59,7 +64,9 @@ def _camera_schema(
             CONF_ARCHIVE_BACKEND,
             default=defaults.get(CONF_ARCHIVE_BACKEND, "native_9008"),
         ): vol.In(BACKENDS),
-        vol.Required(CONF_RECORDING_AUDIO, default=defaults.get(CONF_RECORDING_AUDIO, "auto")): vol.In(RECORDING_AUDIO_MODES),
+        vol.Required(
+            CONF_RECORDING_AUDIO, default=defaults.get(CONF_RECORDING_AUDIO, "auto")
+        ): vol.In(RECORDING_AUDIO_MODES),
         vol.Required(CONF_PORT, default=int(defaults.get(CONF_PORT, 9008))): vol.All(
             vol.Coerce(int), vol.Range(min=1, max=65535)
         ),
@@ -93,6 +100,7 @@ def _rtsp_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
             ),
         }
     )
+
 
 def _camera_defaults(camera: dict[str, Any]) -> dict[str, Any]:
     return {
@@ -235,9 +243,7 @@ class TVTArchiveOptionsFlow(config_entries.OptionsFlow):
 
     async def _refresh_cameras(self) -> None:
         payload = await self._api().cameras()
-        self._cameras = {
-            str(camera["id"]): camera for camera in payload.get("cameras", [])
-        }
+        self._cameras = {str(camera["id"]): camera for camera in payload.get("cameras", [])}
 
     async def _finish_change(self) -> None:
         await self._refresh_cameras()
@@ -246,9 +252,7 @@ class TVTArchiveOptionsFlow(config_entries.OptionsFlow):
             self._entry,
             title=f"TVT Archive ({count} camera{'s' if count != 1 else ''})",
         )
-        self.hass.async_create_task(
-            self.hass.config_entries.async_reload(self._entry.entry_id)
-        )
+        self.hass.async_create_task(self.hass.config_entries.async_reload(self._entry.entry_id))
 
     def _selected_camera(self) -> dict[str, Any]:
         if not self._selected_camera_id or self._selected_camera_id not in self._cameras:

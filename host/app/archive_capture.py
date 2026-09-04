@@ -7,6 +7,7 @@ sessions can terminate capture cleanly. Backends:
 * native_9008: pure-Python private TCP/9008 playback with H.264 + G.711 A-law.
 * rtsp: TVT recorded RTSP playback with H.264 video and no assumed audio.
 """
+
 from __future__ import annotations
 
 import json
@@ -61,8 +62,6 @@ def rtsp_url(start: datetime, duration: int) -> str:
     )
 
 
-
-
 def ffmpeg_progress_seconds(path: Path) -> float:
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -83,13 +82,26 @@ def ffmpeg_progress_seconds(path: Path) -> float:
             continue
     return 0.0
 
+
 def probe_h264(path: Path, fallback_fps: float) -> tuple[int, float]:
     result = subprocess.run(
         [
-            "ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0",
-            "-show_entries", "stream=nb_read_frames,avg_frame_rate", "-of", "json", str(path),
+            "ffprobe",
+            "-v",
+            "error",
+            "-count_frames",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=nb_read_frames,avg_frame_rate",
+            "-of",
+            "json",
+            str(path),
         ],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=45, check=False,
+        capture_output=True,
+        text=True,
+        timeout=45,
+        check=False,
     )
     if result.returncode != 0:
         return 0, fallback_fps
@@ -119,28 +131,55 @@ def capture_rtsp(start: datetime, duration: int, directory: Path) -> int:
         raise ValueError("TVT_RTSP_FPS must be between 5 and 120")
     first = int(time.mktime(start.timetuple())) * 1_000_000
     value = {
-        "video_frames": 0, "audio_frames": 0,
-        "video_bytes": 0, "audio_bytes": 0,
+        "video_frames": 0,
+        "audio_frames": 0,
+        "video_bytes": 0,
+        "audio_bytes": 0,
         "first_video_time_us": first,
         "last_video_time_us": 0,
-        "first_audio_time_us": 0, "last_audio_time_us": 0,
-        "source_fps": fps, "has_audio": False, "backend": "rtsp",
+        "first_audio_time_us": 0,
+        "last_audio_time_us": 0,
+        "source_fps": fps,
+        "has_audio": False,
+        "backend": "rtsp",
         "captured_seconds": 0.0,
     }
     atomic_json(timing, value)
     url = rtsp_url(start, duration)
     command = [
-        "ffmpeg", "-y", "-hide_banner", "-loglevel", "warning",
-        "-progress", str(progress), "-nostats",
-        "-rtsp_transport", os.environ.get("TVT_RTSP_TRANSPORT", "tcp"),
-        "-rw_timeout", "12000000", "-i", url,
-        "-map", "0:v:0", "-an", "-c:v", "copy", "-bsf:v", "h264_mp4toannexb",
-        "-t", str(duration), "-f", "h264", str(video),
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-progress",
+        str(progress),
+        "-nostats",
+        "-rtsp_transport",
+        os.environ.get("TVT_RTSP_TRANSPORT", "tcp"),
+        "-rw_timeout",
+        "12000000",
+        "-i",
+        url,
+        "-map",
+        "0:v:0",
+        "-an",
+        "-c:v",
+        "copy",
+        "-bsf:v",
+        "h264_mp4toannexb",
+        "-t",
+        str(duration),
+        "-f",
+        "h264",
+        str(video),
     ]
     password = required("TVT_PASSWORD")
     with ffmpeg_log.open("wb") as log_handle:
         CHILD = subprocess.Popen(
-            command, stdout=subprocess.DEVNULL, stderr=log_handle,
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=log_handle,
         )
         while CHILD.poll() is None:
             if STOP:
@@ -171,14 +210,16 @@ def capture_rtsp(start: datetime, duration: int, directory: Path) -> int:
     if frames <= 0:
         frames = max(2, round(duration * measured_fps))
     last = first + round((frames - 1) * 1_000_000 / measured_fps)
-    value.update({
-        "video_frames": frames,
-        "video_bytes": video.stat().st_size,
-        "last_video_time_us": last,
-        "source_fps": measured_fps,
-        "captured_seconds": min(float(duration), max(0.0, (last - first) / 1_000_000)),
-        "timed_out": False,
-    })
+    value.update(
+        {
+            "video_frames": frames,
+            "video_bytes": video.stat().st_size,
+            "last_video_time_us": last,
+            "source_fps": measured_fps,
+            "captured_seconds": min(float(duration), max(0.0, (last - first) / 1_000_000)),
+            "timed_out": False,
+        }
+    )
     atomic_json(timing, value)
     atomic_json(summary, value)
     return 0
@@ -238,7 +279,10 @@ def capture_native(start: datetime, duration: int, directory: Path) -> int:
 
 def main() -> int:
     if len(sys.argv) != 4:
-        print("Usage: archive_capture.py START_TIMESTAMP DURATION_SECONDS WORK_DIRECTORY", file=sys.stderr)
+        print(
+            "Usage: archive_capture.py START_TIMESTAMP DURATION_SECONDS WORK_DIRECTORY",
+            file=sys.stderr,
+        )
         return 2
     start = datetime.strptime(sys.argv[1].replace("T", " "), "%Y-%m-%d %H:%M:%S")
     duration = int(sys.argv[2])
@@ -260,7 +304,7 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except KeyboardInterrupt:
-        raise SystemExit(130)
+        raise SystemExit(130) from None
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
-        raise SystemExit(1)
+        raise SystemExit(1) from None

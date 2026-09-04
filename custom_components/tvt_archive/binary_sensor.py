@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from homeassistant.components.binary_sensor import BinarySensorEntity, BinarySensorDeviceClass
+from homeassistant.components.binary_sensor import BinarySensorDeviceClass, BinarySensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
@@ -9,15 +9,22 @@ from .const import DOMAIN
 from .entity import TVTArchiveEntity
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry,
-                            async_add_entities: AddConfigEntryEntitiesCallback) -> None:
+async def async_setup_entry(
+    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddConfigEntryEntitiesCallback
+) -> None:
     data = hass.data[DOMAIN][entry.entry_id]
     coordinator = data["coordinator"]
-    async_add_entities([
-        TVTRecordingSensor(coordinator, entry.entry_id, str(camera["id"]),
-                           str(camera.get("name", camera["id"])))
-        for camera in coordinator.data.get("cameras", [])
-    ])
+    async_add_entities(
+        [
+            TVTRecordingSensor(
+                coordinator,
+                entry.entry_id,
+                str(camera["id"]),
+                str(camera.get("name", camera["id"])),
+            )
+            for camera in coordinator.data.get("cameras", [])
+        ]
+    )
 
 
 class TVTRecordingSensor(TVTArchiveEntity, BinarySensorEntity):

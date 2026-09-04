@@ -46,7 +46,7 @@ required_version_references = {
     ".env.example": f"ghcr.io/mhndt/tvt-archive:{version}",
     "compose/build-local.yaml": f"tvt-archive:{version}-local",
     "setup.sh": f"ghcr.io/mhndt/tvt-archive:{version}",
-    "host/app/bridge.py": f'TVTArchiveBridge/{version}',
+    "host/app/bridge.py": f"TVTArchiveBridge/{version}",
     "custom_components/tvt_archive/frontend/tvt-archive-panel.js": f'const VERSION = "{version}";',
 }
 for path, expected in required_version_references.items():

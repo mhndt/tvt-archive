@@ -85,9 +85,7 @@ class TVTArchiveApi:
         )
 
     async def create_session(self, camera_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return await self.request(
-            "POST", f"/api/cameras/{camera_id}/sessions", json_data=payload
-        )
+        return await self.request("POST", f"/api/cameras/{camera_id}/sessions", json_data=payload)
 
     async def playback_session(self, session_id: str) -> dict[str, Any]:
         return await self.request("GET", f"/api/sessions/{session_id}")
@@ -122,33 +120,6 @@ class TVTArchiveApi:
         response = await self.session.get(
             self._url(f"/api/sessions/{session_id}/{asset}"),
             headers=headers,
-            timeout=None,
-        )
-        if response.status >= 400:
-            text = await response.text()
-            response.release()
-            raise TVTArchiveApiError(text or f"Bridge returned HTTP {response.status}")
-        return response
-
-    async def open_stream(
-        self,
-        camera_id: str,
-        *,
-        start: str,
-        duration: int,
-        quality: str,
-        gain_db: int = 0,
-    ) -> ClientResponse:
-        """Legacy progressive-MP4 endpoint retained for diagnostics."""
-        response = await self.session.get(
-            self._url(f"/api/cameras/{camera_id}/stream"),
-            headers=self.headers,
-            params={
-                "start": start,
-                "duration": str(duration),
-                "quality": quality,
-                "gain_db": str(gain_db),
-            },
             timeout=None,
         )
         if response.status >= 400:
