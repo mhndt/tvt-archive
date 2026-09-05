@@ -573,7 +573,7 @@ class TVTFramePlayer {
     this.decoder = null; this.sps = null; this.pps = null; this.configured = false; this.needKey = true;
     this.paused = false; this.destroyed = false; this.ended = false; this.started = false;
     this.lastPts = null; this.lastWall = 0; this.rendered = 0; this.generation = 0; this.speed = null;
-    this.audio = null; this.gain = null; this.muted = false; this.hasAudio = false; this.utcOffset = null;
+    this.audio = null; this.gain = null; this.muted = false; this.hasAudio = false; this.offsets = [];
     this.abort = null; this.roomResolve = null; this.barTimer = null; this.timer = 0;
     // Controls only while a mouse is over the player; a tap toggles them on touch screens.
     this.element.addEventListener("click", (event) => {
@@ -650,7 +650,13 @@ class TVTFramePlayer {
   _decodedCount() { return this.frames.length + (this.decoder?.decodeQueueSize || 0); }
 
   _record(kind, flags, pts, payload) {
-    if (kind === REC_INFO) { try { this.utcOffset = JSON.parse(new TextDecoder().decode(payload)).utc_offset ?? null; } catch (_) {} return; }
+    if (kind === REC_INFO) {
+      try {
+        const offset = JSON.parse(new TextDecoder().decode(payload)).utc_offset;
+        if (Number.isFinite(offset)) { this.offsets.push({pts, offset}); this.offsets.sort((a, b) => a.pts - b.pts); }
+      } catch (_) {}
+      return;
+    }
     if (kind === REC_VIDEO) { this._video(pts, Boolean(flags & 1), payload); return; }
     if (kind === REC_AUDIO) { this.hasAudio = true; this.audioQueue.push({pts, data: payload.slice()}); this._syncButtons(); return; }
     if (kind === REC_MARK) { this._flush(); try { this.generation = JSON.parse(new TextDecoder().decode(payload)).generation || 0; } catch (_) {} this._state("seeking"); return; }
@@ -787,10 +793,12 @@ class TVTFramePlayer {
     }
   }
 
-  // Timestamps are epoch microseconds; the camera's own clock is epoch plus the bridge's UTC offset.
+  // Timestamps are epoch microseconds; the camera's clock is epoch plus the UTC offset that
+  // applied at that moment, which the bridge sends whenever it changes.
   get secondsOfDay() {
     if (this.lastPts === null) return null;
-    const offset = this.utcOffset ?? -new Date().getTimezoneOffset() * 60;
+    let offset = this.offsets.length ? this.offsets[0].offset : -new Date().getTimezoneOffset() * 60;
+    for (const entry of this.offsets) { if (entry.pts <= this.lastPts) offset = entry.offset; else break; }
     return Math.floor((this.lastPts / 1e6 + offset) % 86400 + 86400) % 86400;
   }
   get clock() {
@@ -1204,7 +1212,7 @@ class TVTArchivePanel extends HTMLElement {
 
       .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap;max-width:100%}.controls label{flex:1 1 150px}
       label{display:grid;gap:4px;color:var(--secondary-text-color);font-size:.78rem;min-width:0}label>span{white-space:nowrap}
-      input,select{font:inherit;color:var(--primary-text-color);background:var(--card-background-color);border:1px solid var(--divider-color);border-radius:10px;padding:9px 11px;min-width:0;max-width:100%;width:100%}
+      input,select{font:inherit;color:var(--primary-text-color);background:var(--card-background-color);border:1px solid var(--divider-color);border-radius:10px;padding:9px 11px;min-width:0;max-width:100%;width:100%}input[type="time"],input[type="date"]{display:block;-webkit-appearance:none;appearance:none}
       button,.download-link{cursor:pointer;font:inherit;font-weight:500;font-size:14px;color:var(--primary-color);background:none;border:0;border-radius:var(--ha-button-border-radius,var(--ha-border-radius-pill,4px));padding:0 var(--ha-space-4,12px);height:var(--ha-button-height,var(--button-height,36px));white-space:nowrap;display:inline-flex;align-items:center;justify-content:center;text-decoration:none;transition:background-color .15s}button:hover,.download-link:hover{background:rgba(var(--rgb-primary-color,3,169,244),.08)}button:active,.download-link:active{background:rgba(var(--rgb-primary-color,3,169,244),.18)}button.filled{background:var(--ha-color-fill-primary-normal-resting,rgba(var(--rgb-primary-color,3,169,244),.16));color:var(--ha-color-on-primary-normal,var(--primary-color))}button.filled:hover{background:var(--ha-color-fill-primary-normal-hover,rgba(var(--rgb-primary-color,3,169,244),.28))}button.filled:active{background:var(--ha-color-fill-primary-normal-active,rgba(var(--rgb-primary-color,3,169,244),.16))}button.outlined{border:1px solid var(--ha-color-border-primary-loud,var(--primary-color));color:var(--ha-color-on-primary-normal,var(--primary-color))}button.outlined:hover{background:var(--ha-color-fill-primary-quiet-hover,rgba(var(--rgb-primary-color,3,169,244),.08))}button.outlined:active{background:var(--ha-color-fill-primary-quiet-active,rgba(var(--rgb-primary-color,3,169,244),.14))}button:disabled{cursor:default;color:var(--ha-color-on-disabled-normal,var(--disabled-text-color,#9b9b9b));background:none;border-color:var(--ha-color-on-disabled-quiet,var(--disabled-color,rgba(128,128,128,.3)))}button.filled:disabled{background:var(--ha-color-fill-disabled-normal-resting,var(--disabled-color,rgba(128,128,128,.2)))}
       .shell{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:14px}.card{background:var(--ha-card-background,var(--card-background-color));border-radius:var(--ha-card-border-radius,12px);border:var(--ha-card-border-width,1px) solid var(--ha-card-border-color,var(--divider-color));box-shadow:var(--ha-card-box-shadow,none);overflow:hidden;min-width:0}
       .player-head{padding:11px 14px;display:flex;justify-content:space-between;align-items:center;gap:10px;border-bottom:1px solid var(--divider-color)}

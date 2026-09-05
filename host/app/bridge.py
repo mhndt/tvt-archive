@@ -84,8 +84,6 @@ def drop_privileges(uid: int = 10001, gid: int = 10001) -> None:
     os.setuid(uid)
 
 
-drop_privileges()
-
 for directory in (CACHE, WORK, INDEX, LOGS):
     directory.mkdir(parents=True, exist_ok=True)
 
@@ -509,6 +507,7 @@ class FrameSession:
     readers: int = 0
     reader_left: float = 0.0
     last_progress: float = 0.0
+    utc_offset: int | None = None
     seek_to: dt.datetime | None = None
     request_id: int = FIRST_REQUEST_ID
     pending_request_id: int | None = None
@@ -967,7 +966,11 @@ def camera_has_active_jobs(camera_id: str) -> bool:
             value.camera_id == camera_id and value.status in ("queued", "running", "playing")
             for value in SESSIONS.values()
         )
-    return jobs or sessions
+        streams = any(
+            value.camera_id == camera_id and not value.finished()
+            for value in FRAME_SESSIONS.values()
+        )
+    return jobs or sessions or streams
 
 
 def test_camera_definition(item: dict[str, Any]) -> dict[str, Any]:
@@ -1020,7 +1023,7 @@ def add_camera_definition(payload: dict[str, Any]) -> dict[str, Any]:
         if camera_id in updated:
             raise ValueError(f"Camera ID already exists: {camera_id}")
         updated[camera_id] = item
-    persist_camera_map(updated)
+        persist_camera_map(updated)
     return {"camera": safe_camera(camera_id), "test": test}
 
 
@@ -1036,11 +1039,13 @@ def update_camera_definition(camera_id: str, payload: dict[str, Any]) -> dict[st
     else:
         test = {"online": True, "connection_test_skipped": True}
     with CONFIG_LOCK:
+        if camera_has_active_jobs(camera_id):
+            raise ValueError("Wait for this camera's active playback/download job to finish")
         updated = {camera_id_: dict(value) for camera_id_, value in CAMERAS.items()}
         if camera_id not in updated:
             raise KeyError(f"Unknown camera: {camera_id}")
         updated[camera_id] = item
-    persist_camera_map(updated)
+        persist_camera_map(updated)
     camera_index = camera_index_directory(camera_id)
     if camera_index.exists():
         for cached in camera_index.iterdir():
@@ -1060,15 +1065,16 @@ def delete_camera_definition(camera_id: str) -> dict[str, Any]:
     if camera_has_active_jobs(camera_id):
         raise ValueError("Wait for this camera's active playback/download job to finish")
     lock = camera_lock(camera_id)
-    with lock:
-        with CONFIG_LOCK:
-            updated = {
-                camera_id_: dict(value)
-                for camera_id_, value in CAMERAS.items()
-                if camera_id_ != camera_id
-            }
-            if len(updated) == len(CAMERAS):
-                raise KeyError(f"Unknown camera: {camera_id}")
+    with lock, CONFIG_LOCK:
+        if camera_has_active_jobs(camera_id):
+            raise ValueError("Wait for this camera's active playback/download job to finish")
+        updated = {
+            camera_id_: dict(value)
+            for camera_id_, value in CAMERAS.items()
+            if camera_id_ != camera_id
+        }
+        if len(updated) == len(CAMERAS):
+            raise KeyError(f"Unknown camera: {camera_id}")
         persist_camera_map(updated)
     shutil.rmtree(camera_index_directory(camera_id), ignore_errors=True)
     return {"removed": existing}
@@ -1684,7 +1690,8 @@ def create_job(camera_id: str, request: dict[str, Any]) -> Job:
     cache_key = build_cache_key(camera_id, normalized)
     output_path = CACHE / f"{cache_key}.mp4"
     output_name = export_filename(str(item.get("name", camera_id)), start, duration)
-    with JOBS_LOCK:
+    with CONFIG_LOCK, JOBS_LOCK:
+        camera(camera_id)
         existing_id = CACHE_TO_JOB.get(cache_key)
         if (
             existing_id
@@ -2403,6 +2410,23 @@ def _range_body(start: dt.datetime, stop: dt.datetime) -> bytes:
     )
 
 
+def utc_offset_at(pts_us: int) -> int:
+    """The bridge runs in the camera's timezone; DST may differ at the recording's time."""
+    offset = dt.datetime.fromtimestamp(pts_us / 1_000_000).astimezone().utcoffset()
+    return int(offset.total_seconds()) if offset is not None else 0
+
+
+def _push_info(session: FrameSession, pts_us: int) -> None:
+    session.utc_offset = utc_offset_at(pts_us)
+    info = {
+        "width": session.width,
+        "height": session.height,
+        "start": session.request["start"],
+        "utc_offset": session.utc_offset,
+    }
+    session.push(REC_INFO, frame_record(REC_INFO, 0, pts_us, json.dumps(info).encode()))
+
+
 def _end_of_day(start: dt.datetime) -> dt.datetime:
     return start.replace(hour=23, minute=59, second=59)
 
@@ -2601,6 +2625,8 @@ def _pump_frames(session: FrameSession, transcoder: Transcoder | None) -> None:
         if marker == BAG_END and body[:2] == b"\x00\x00":
             session.bag_pending = True
             _release_bag(session)
+            if session.width and utc_offset_at(session.position_us) != session.utc_offset:
+                _push_info(session, session.position_us)
             continue
         if marker == END_EVENT and body[:2] == b"\x00\x00":
             session.status = "complete"
@@ -2613,13 +2639,7 @@ def _pump_frames(session: FrameSession, transcoder: Transcoder | None) -> None:
                 session.status = "playing"
                 session.phase = "Playing"
                 session.wall_start = time.monotonic()
-                info = {
-                    "width": session.width,
-                    "height": session.height,
-                    "start": session.request["start"],
-                    "utc_offset": time.localtime().tm_gmtoff,
-                }
-                session.push(REC_INFO, frame_record(REC_INFO, 0, pts_us, json.dumps(info).encode()))
+                _push_info(session, pts_us)
             if not session.first_us:
                 session.first_us = pts_us
             session.media_us = max(session.media_us, pts_us - session.first_us)
@@ -2720,7 +2740,8 @@ def create_frame_session(camera_id: str, request: dict[str, Any]) -> FrameSessio
             "quality": quality,
         },
     )
-    with SESSIONS_LOCK:
+    with CONFIG_LOCK, SESSIONS_LOCK:
+        camera(camera_id)
         for other in FRAME_SESSIONS.values():
             if other.camera_id == camera_id and not other.finished():
                 other.stop_event.set()
@@ -2775,7 +2796,8 @@ def create_playback_session(camera_id: str, request: dict[str, Any]) -> Playback
     value = PlaybackSession(
         id=session_id, camera_id=camera_id, request=normalized, work_directory=str(directory)
     )
-    with SESSIONS_LOCK:
+    with CONFIG_LOCK, SESSIONS_LOCK:
+        camera(camera_id)
         SESSIONS[session_id] = value
     PLAYBACK_EXECUTOR.submit(generate_hls_session, value)
     return value
@@ -3231,6 +3253,7 @@ if __name__ == "__main__":
         raise SystemExit(0)
     if sys.argv[1:] not in ([], ["run"]):
         raise SystemExit(f"usage: {sys.argv[0]} [run|show-token]")
+    drop_privileges()
     if ENCODER == "vaapi" and not Path(DRI_DEVICE).exists():
         raise SystemExit(
             f"encoder is vaapi but {DRI_DEVICE} does not exist; use software or pass the GPU through"

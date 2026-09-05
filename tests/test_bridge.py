@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -193,6 +194,43 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(bytes(stream), aud + p_frame[:3])
         self.assertTrue(bridge.access_unit_is_keyframe(units[0]))
         self.assertFalse(bridge.access_unit_is_keyframe(units[1]))
+
+    def test_frame_stream_counts_as_camera_use(self) -> None:
+        stream = bridge.FrameSession(id="a" * 32, camera_id="front_door", request={})
+        with bridge.SESSIONS_LOCK:
+            bridge.FRAME_SESSIONS[stream.id] = stream
+        try:
+            self.assertTrue(bridge.camera_has_active_jobs("front_door"))
+            with self.assertRaises(ValueError):
+                bridge.delete_camera_definition("front_door")
+            stream.status = "stopped"
+            self.assertFalse(bridge.camera_has_active_jobs("front_door"))
+        finally:
+            with bridge.SESSIONS_LOCK:
+                bridge.FRAME_SESSIONS.pop(stream.id, None)
+
+    def test_utc_offset_follows_the_timestamp(self) -> None:
+        for month in (1, 7):
+            stamp = int(datetime(2026, month, 15, 12).timestamp() * 1_000_000)
+            expected = datetime.fromtimestamp(stamp / 1_000_000).astimezone().utcoffset()
+            self.assertEqual(bridge.utc_offset_at(stamp), int(expected.total_seconds()))
+
+    def test_importing_the_bridge_does_not_drop_privileges(self) -> None:
+        # A child that looks like root and blows up on any privilege or ownership call.
+        probe = (
+            "import os, sys\n"
+            "def boom(*_): raise SystemExit('privileges touched at import')\n"
+            "os.geteuid = lambda: 0\n"
+            "for name in ('setuid', 'setgid', 'setgroups', 'chown'): setattr(os, name, boom)\n"
+            f"sys.path.insert(0, {str(Path(bridge.__file__).parent)!r})\n"
+            "import bridge\n"
+            "print('imported')\n"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", probe], capture_output=True, text=True, env=os.environ.copy()
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("imported", completed.stdout)
 
     def test_stream_request_is_validated(self) -> None:
         with self.assertRaises(ValueError):
