@@ -10,7 +10,6 @@ image: ghcr.io/mhndt/tvt-archive
 init: false
 startup: services
 hassio_api: true
-hassio_role: default
 discovery:
   - tvt_archive
 devices:

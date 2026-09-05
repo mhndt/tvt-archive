@@ -1,22 +1,16 @@
-<p align="center">
-  <img src="https://raw.githubusercontent.com/mhndt/tvt-archive/main/assets/TVTArchiveLogo.png" alt="" width="160">
-</p>
-
 # TVT Archive
 
 [![HACS](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration) [![Release](https://img.shields.io/github/v/release/mhndt/tvt-archive)](https://github.com/mhndt/tvt-archive/releases) [![CI](https://github.com/mhndt/tvt-archive/actions/workflows/ci.yml/badge.svg)](https://github.com/mhndt/tvt-archive/actions/workflows/ci.yml)
 
-TVT Archive lets you browse, play, and export recordings from a TVT camera's SD card in Home Assistant. It adds a Recordings panel to the sidebar and creates entities for recording status and available footage.
+Browse, play, and export recordings from a TVT camera's SD card in Home Assistant. The integration adds a Recordings panel to the sidebar and creates entities for recording status and available footage.
 
 A small bridge on your network reads recordings directly from the camera. Nothing leaves your LAN and no vendor account is needed.
-
-![Recordings panel](docs/images/panel.png)
 
 # Installation
 
 ## Home Assistant app
 
-On Home Assistant OS or Supervised, add this repository under Settings > Apps and install TVT Archive:
+On Home Assistant OS or Supervised, add this repository under Settings > Apps and install the app:
 
 [![Add repository to the app store](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fmhndt%2Ftvt-archive)
 
@@ -54,16 +48,16 @@ git pull && docker compose pull && docker compose up -d
 [![Open TVT Archive in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=mhndt&repository=tvt-archive&category=integration)
 
 1. Add `https://github.com/mhndt/tvt-archive` to HACS as a custom Integration repository.
-2. Install TVT Archive.
+2. Install the integration.
 3. Restart Home Assistant.
 
 For a manual install, copy `custom_components/tvt_archive` into `config/custom_components` and restart Home Assistant.
 
 ## Configuration
 
-With the Home Assistant app, open Settings > Devices & services and configure the discovered TVT Archive integration.
+With the Home Assistant app, open Settings > Devices & services and configure the discovered integration.
 
-With Docker Compose, add the TVT Archive integration and enter the bridge URL and access token printed by `setup.sh`.
+With Docker Compose, add the integration and enter the bridge URL and access token printed by `setup.sh`.
 
 Configure your first camera with:
 
@@ -104,8 +98,6 @@ Each camera is added as a device with these entities:
 
 Sensors update every two minutes.
 
-![Camera entities](docs/images/entities.png)
-
 <details>
 <summary>Bridge settings</summary>
 
@@ -130,7 +122,7 @@ Bridge settings are stored in `config.json` in the app data directory, or in the
 
 # Compatibility
 
-TVT Archive has been tested with the TVT TD-C12. Other TVT cameras, recorders, and OEM devices may also work. If you test another model, please open an issue so it can be added here.
+Tested with the TVT TD-C12. Other TVT cameras, recorders, and OEM devices may also work. If you test another model, please open an issue so it can be added here.
 
 # Development
 
