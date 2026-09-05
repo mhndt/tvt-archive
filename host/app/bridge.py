@@ -2625,8 +2625,6 @@ def _pump_frames(session: FrameSession, transcoder: Transcoder | None) -> None:
         if marker == BAG_END and body[:2] == b"\x00\x00":
             session.bag_pending = True
             _release_bag(session)
-            if session.width and utc_offset_at(session.position_us) != session.utc_offset:
-                _push_info(session, session.position_us)
             continue
         if marker == END_EVENT and body[:2] == b"\x00\x00":
             session.status = "complete"
@@ -2639,6 +2637,7 @@ def _pump_frames(session: FrameSession, transcoder: Transcoder | None) -> None:
                 session.status = "playing"
                 session.phase = "Playing"
                 session.wall_start = time.monotonic()
+            if utc_offset_at(pts_us) != session.utc_offset:
                 _push_info(session, pts_us)
             if not session.first_us:
                 session.first_us = pts_us

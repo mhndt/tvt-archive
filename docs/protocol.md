@@ -246,4 +246,3 @@ Other commands seen in TVT's own software, and what the TD-C12 did with them:
 A second `0x0000090B` with a new request ID on the same connection starts a second stream after about ten seconds while the first keeps going; the first dies once its bags are no longer requested. The bridge seeks that way instead of reconnecting. Two connections can play at once but share the camera's output and were reset after a minute, so the bridge keeps one session per camera.
 
 The camera's output rate is the camera's own limit. On the test unit, which is on Wi-Fi, it was about 240 KB/s for playback and live video combined, roughly 0.6x real time for its 1080p recording, whatever the request pattern.
-

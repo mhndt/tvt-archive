@@ -74,6 +74,10 @@ const loadHlsLibrary = (url) => {
   return hlsLibraryPromise;
 };
 
+// Fallback for browsers without WebCodecs: the bridge turns the capture into an HLS event
+// playlist and hls.js plays it. Playback runs at 1x; when the camera is slower than real
+// time the video simply waits on its last frame until the next segment lands, the same
+// way the frame player holds a frame, with no rate changes and no overlay once started.
 class TVTFmp4Player {
   constructor(video, url, playerScriptUrl, mimeType, startBufferSeconds, onReady, onError, onState) {
     this.video = video;
@@ -87,95 +91,39 @@ class TVTFmp4Player {
     this.destroyed = false;
     this.started = false;
     this.serverComplete = false;
-    this.rebuffering = false;
-    this.videoEventsBound = false;
-    this.rateTimer = null;
-    this.adaptiveRate = 1;
-    this.bufferSupplyRate = null;
-    this.bufferSupplySamples = [];
-    this.freezeTime = null;
-    this.freezeReason = null;
+    this.eventsBound = false;
     this.mediaRecoveryAttempts = 0;
     this.networkRecoveryTimer = null;
-    this.playbackProgressPosition = null;
-    this.playbackProgressAt = null;
     this.controlsHideTimer = null;
-    this.controlsHideDelayMs = 2000;
-    this.initialControlsShown = false;
     this.startBufferSeconds = Math.max(2, Math.min(12, Number(startBufferSeconds || 3)));
-    // Firefox reports slightly less buffered media than the playlist duration.
-    this.startBufferToleranceSeconds = 0.45;
-    this.resumeBufferSeconds = 0.6;
-    this._boundSeeking = () => {
-      this.rebuffering = false;
-      this.playbackProgressPosition = null;
-      this.playbackProgressAt = null;
-      this._setPlaybackRate(1);
-      this._state("seeking");
-    };
-    this._boundSeeked = () => {
-      if (!this.video.paused) this._state("playing");
-      this._adaptiveTick();
-    };
-    this._boundWaiting = () => this._handleWaiting();
-    this._boundError = () => this._handleMediaError();
-    this._boundEnded = () => {
-      if (!this.serverComplete && !this.destroyed) this._enterRebuffer("event");
-    };
-    this._boundPlaying = () => {
-      if (this.rebuffering && !this.serverComplete) {
-        try { this.video.pause(); } catch (_) {}
-        return;
-      }
-      if (this.started) {
-        this.playbackProgressPosition = Number(this.video.currentTime || 0);
-        this.playbackProgressAt = performance.now() / 1000;
-        this._state("playing");
-        if (!this.initialControlsShown) {
-          this.initialControlsShown = true;
-          this._showControlsTemporarily();
-        }
-      }
-    };
-    this._boundControlsActivity = () => this._showControlsTemporarily();
-    this._boundProgress = () => this._bufferChanged();
+    this._onSeeking = () => this._state("seeking");
+    this._onPlaying = () => { if (this.started) this._state("playing"); };
+    this._onError = () => this._handleMediaError();
+    this._onActivity = () => this._showControls();
+    this._onBuffered = () => this._maybeStart();
   }
 
-  _state(name, detail = {}) { this.onState?.(name, detail); }
-
-  _scheduleControlsHide() {
-    clearTimeout(this.controlsHideTimer);
-    if (this.destroyed || !this.started || this.video.paused) return;
-    this.controlsHideTimer = setTimeout(() => {
-      if (this.destroyed || !this.started || this.video.paused || this.video.seeking) return;
-      this.video.controls = false;
-    }, this.controlsHideDelayMs);
-  }
-
-  _showControlsTemporarily() {
-    if (this.destroyed || !this.started) return;
-    this.video.controls = true;
-    this._scheduleControlsHide();
-  }
+  _state(name) { this.onState?.(name); }
 
   _bindVideoEvents() {
-    if (this.videoEventsBound) return;
-    this.videoEventsBound = true;
-    this.video.addEventListener("seeking", this._boundSeeking);
-    this.video.addEventListener("seeked", this._boundSeeked);
-    this.video.addEventListener("waiting", this._boundWaiting);
-    this.video.addEventListener("error", this._boundError);
-    this.video.addEventListener("ended", this._boundEnded);
-    this.video.addEventListener("playing", this._boundPlaying);
-    this.video.addEventListener("pointerenter", this._boundControlsActivity);
-    this.video.addEventListener("pointermove", this._boundControlsActivity);
-    this.video.addEventListener("pointerdown", this._boundControlsActivity);
-    this.video.addEventListener("progress", this._boundProgress);
-    this.video.addEventListener("durationchange", this._boundProgress);
-    this.video.addEventListener("loadedmetadata", this._boundProgress);
+    if (this.eventsBound) return;
+    this.eventsBound = true;
+    this.video.addEventListener("seeking", this._onSeeking);
+    this.video.addEventListener("playing", this._onPlaying);
+    this.video.addEventListener("error", this._onError);
+    for (const type of ["pointerenter", "pointermove", "pointerdown"]) this.video.addEventListener(type, this._onActivity);
+    for (const type of ["progress", "durationchange", "loadedmetadata"]) this.video.addEventListener(type, this._onBuffered);
+  }
+
+  _showControls() {
+    if (this.destroyed || !this.started) return;
+    this.video.controls = true;
+    clearTimeout(this.controlsHideTimer);
+    this.controlsHideTimer = setTimeout(() => { if (!this.video.paused && !this.video.seeking) this.video.controls = false; }, 2500);
   }
 
   prime() {
+    // Runs inside the Play tap: load() here lifts the gesture requirement for later play() calls.
     if (this.destroyed) return;
     this._bindVideoEvents();
     try { this.video.load(); } catch (_) {}
@@ -192,81 +140,62 @@ class TVTFmp4Player {
     this.url = url;
     this.playerScriptUrl = playerScriptUrl || this.playerScriptUrl;
     if (mimeType) this.mimeType = mimeType;
-    if (startBufferSeconds) {
-      this.startBufferSeconds = Math.max(2, Math.min(12, Number(startBufferSeconds)));
-      this.resumeBufferSeconds = 0.6;
-    }
+    if (startBufferSeconds) this.startBufferSeconds = Math.max(2, Math.min(12, Number(startBufferSeconds)));
     this._bindVideoEvents();
-    this._state("buffering", {ahead:0, target:this.startBufferSeconds});
-
-    // hls.js everywhere it can run, including iOS 17.1+ through ManagedMediaSource,
-    // so playback pacing behaves the same on every device. Native HLS is the fallback.
+    this._state("buffering");
     const Hls = await loadHlsLibrary(this.playerScriptUrl).catch(() => null);
     if (this.destroyed) return;
     if (!Hls?.isSupported()) {
-      if (this.video.canPlayType("application/vnd.apple.mpegurl")) {
-        this.video.src = this.url;
-        this.video.load();
-        return;
-      }
-      throw new Error("This browser does not support recorded HLS playback.");
+      if (!this.video.canPlayType("application/vnd.apple.mpegurl")) throw new Error("This browser does not support recorded HLS playback.");
+      this.video.src = this.url;
+      this.video.load();
+      return;
     }
     this.hls = new Hls({
-      autoStartLoad: true,
       startPosition: 0,
-      lowLatencyMode: false,
       enableWorker: true,
-      startFragPrefetch: true,
-      maxBufferHole: 0.5,
       maxBufferLength: 30,
       maxMaxBufferLength: 120,
       backBufferLength: 180,
-      liveBackBufferLength: 180,
-      liveDurationInfinity: false,
-      highBufferWatchdogPeriod: 1,
-      nudgeOffset: 0.1,
-      nudgeMaxRetry: 5,
-      manifestLoadingTimeOut: 10000,
       manifestLoadingMaxRetry: 20,
-      manifestLoadingRetryDelay: 250,
-      levelLoadingTimeOut: 10000,
       levelLoadingMaxRetry: 20,
-      levelLoadingRetryDelay: 250,
-      fragLoadingTimeOut: 20000,
       fragLoadingMaxRetry: 20,
+      manifestLoadingRetryDelay: 250,
+      levelLoadingRetryDelay: 250,
       fragLoadingRetryDelay: 250,
     });
-    this.hls.on(Hls.Events.MEDIA_ATTACHED, () => {
-      if (!this.destroyed) this.hls?.loadSource(this.url);
-    });
-    this.hls.on(Hls.Events.MANIFEST_PARSED, () => {
-      if (this.destroyed) return;
-      this._state("buffering", {ahead:this._bufferedAhead(), target:this.startBufferSeconds});
-      this._bufferChanged();
-    });
-    const buffered = () => this._bufferChanged();
-    this.hls.on(Hls.Events.BUFFER_APPENDED, buffered);
-    this.hls.on(Hls.Events.FRAG_BUFFERED, buffered);
-    this.hls.on(Hls.Events.LEVEL_UPDATED, buffered);
+    this.hls.on(Hls.Events.MEDIA_ATTACHED, () => { if (!this.destroyed) this.hls?.loadSource(this.url); });
+    for (const event of [Hls.Events.MANIFEST_PARSED, Hls.Events.BUFFER_APPENDED, Hls.Events.FRAG_BUFFERED]) this.hls.on(event, this._onBuffered);
     this.hls.on(Hls.Events.ERROR, (_event, data) => this._handleHlsError(Hls, data));
     this.hls.attachMedia(this.video);
   }
 
-  _handleHlsError(Hls, data) {
-    if (this.destroyed || !data) return;
-    if (!data.fatal) {
-      if (data.type === Hls.ErrorTypes.NETWORK_ERROR && this.started && this._bufferedAhead() < 0.15) this._enterRebuffer("event");
-      return;
+  _bufferedAhead() {
+    const ranges = this.video.buffered, now = Number(this.video.currentTime || 0);
+    for (let i = 0; i < ranges.length; i += 1) {
+      if (now <= ranges.end(i) + 0.35) return Math.max(0, ranges.end(i) - Math.max(now, ranges.start(i)));
     }
+    return 0;
+  }
+
+  // Start once the first seconds are buffered; after that the browser paces itself.
+  _maybeStart() {
+    if (this.started || this.destroyed || !this.video.buffered.length) return;
+    const ahead = this._bufferedAhead();
+    if (ahead <= 0.05 || (ahead + 0.5 < this.startBufferSeconds && !this.serverComplete)) return;
+    this.started = true;
+    try { this.video.currentTime = this.video.buffered.start(0) + 0.03; } catch (_) {}
+    this.onReady?.();
+    const result = this.video.play();
+    if (result?.then) result.then(() => this._state("playing")).catch((error) => { if (error?.name === "NotAllowedError") this.video.controls = true; });
+    else this._state("playing");
+  }
+
+  _handleHlsError(Hls, data) {
+    if (this.destroyed || !data?.fatal) return;
     if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
       clearTimeout(this.networkRecoveryTimer);
-      this._state(this.started ? "rebuffering" : "buffering", {
-        ahead:this._bufferedAhead(),
-        target:this.started ? this.resumeBufferSeconds : this.startBufferSeconds,
-      });
-      this.networkRecoveryTimer = setTimeout(() => {
-        if (!this.destroyed) this.hls?.startLoad(Math.max(0, Number(this.video.currentTime || 0)));
-      }, 500);
+      this.networkRecoveryTimer = setTimeout(() => { if (!this.destroyed) this.hls?.startLoad(Math.max(0, Number(this.video.currentTime || 0))); }, 500);
       return;
     }
     if (data.type === Hls.ErrorTypes.MEDIA_ERROR && this.mediaRecoveryAttempts < 3) {
@@ -277,214 +206,16 @@ class TVTFmp4Player {
     this._fatal(`Recording playback failed${data.details ? `: ${data.details}` : ""}`);
   }
 
-  _bufferChanged() {
-    if (this.destroyed) return;
-    this._maybeStart();
-    this._maybeRecover();
-  }
-
-  _bufferWindow() {
-    const ranges = this.video.buffered;
-    if (!ranges.length) return null;
-    const now = Number(this.video.currentTime || 0);
-    let index = -1;
-    for (let i = 0; i < ranges.length; i += 1) {
-      if (now >= ranges.start(i) - 0.35 && now <= ranges.end(i) + 0.35) { index = i; break; }
-      if (now < ranges.start(i)) { index = i; break; }
-    }
-    if (index < 0) return null;
-    const start = ranges.start(index);
-    let end = ranges.end(index);
-    for (let i = index + 1; i < ranges.length; i += 1) {
-      if (ranges.start(i) - end > 0.5) break;
-      end = Math.max(end, ranges.end(i));
-    }
-    const position = Math.max(start, now);
-    return {start, end, ahead:Math.max(0, end - position)};
-  }
-
-  _bufferedAhead() { return this._bufferWindow()?.ahead || 0; }
-
-
-  _maybeStart() {
-    if (this.started || this.destroyed || !this.video.buffered.length) return;
-    const window = this._bufferWindow();
-    const ahead = window?.ahead || 0;
-    this._state("buffering", {ahead, target:this.startBufferSeconds});
-    const startupThreshold = Math.max(2.25, this.startBufferSeconds - this.startBufferToleranceSeconds);
-    if (ahead + 0.05 < startupThreshold && !this.serverComplete) return;
-    if (!window || ahead <= 0.05) return;
-    this.started = true;
-    this.rebuffering = false;
-    try { this.video.currentTime = window.start + 0.03; } catch (_) {}
-    this._startAdaptiveClock();
-    this.onReady?.();
-    this._play();
-  }
-  _play() {
-    const result = this.video.play();
-    if (!result?.then) { this._state("playing"); return; }
-    result.then(() => this._state("playing")).catch((error) => {
-      if (error?.name === "NotAllowedError") this.video.controls = true;
-    });
-  }
   _handleMediaError() {
-    if (this.destroyed || this.hls) return;
-    const error = this.video.error;
-    if (!error) return;
-    const detail = {2: "network error", 3: "decode error", 4: "source not supported"}[error.code] || error.message || `code ${error.code}`;
+    if (this.destroyed || this.hls || !this.video.error) return;
+    const detail = {2: "network error", 3: "decode error", 4: "source not supported"}[this.video.error.code] || `code ${this.video.error.code}`;
     this._fatal(`Recording playback failed: ${detail}`);
-  }
-
-  _setPlaybackRate(rate) {
-    const normalized = Math.max(0.45, Math.min(1.03, Number(rate || 1)));
-    if (Math.abs(normalized - this.adaptiveRate) < 0.005) return;
-    this.adaptiveRate = normalized;
-    try {
-      this.video.defaultPlaybackRate = normalized;
-      this.video.playbackRate = normalized;
-    } catch (_) {}
-  }
-
-  _handleWaiting() {
-    if (this.destroyed || !this.started || this.serverComplete || this.video.seeking) return;
-    if (this._bufferedAhead() > 0.35) return;
-    this._enterRebuffer("event");
-  }
-
-  _enterRebuffer(reason = "starvation") {
-    if (this.destroyed || this.rebuffering || this.serverComplete) return;
-    this.rebuffering = true;
-    this.freezeReason = reason;
-    const current = Number(this.video.currentTime || 0);
-    this.freezeTime = Number.isFinite(current) ? Math.max(0, current) : 0;
-    clearTimeout(this.controlsHideTimer);
-    this.video.controls = false;
-    try { this.video.pause(); } catch (_) {}
-    this._setPlaybackRate(1);
-    this.hls?.startLoad(this.freezeTime);
-    this._state("rebuffering", {
-      ahead:this._bufferedAhead(),
-      target:Math.max(0.9, this.resumeBufferSeconds),
-      frozenAt:this.freezeTime,
-      reason,
-    });
-  }
-
-  _maybeRecover() {
-    if (!this.rebuffering || this.destroyed) return;
-    const frozenAt = this.freezeTime == null ? Number(this.video.currentTime || 0) : Number(this.freezeTime);
-    const window = this._bufferWindow();
-    const bufferedEnd = window?.end || 0;
-    const newAhead = Math.max(0, bufferedEnd - frozenAt);
-    const target = Math.max(0.9, this.resumeBufferSeconds);
-    this._state("rebuffering", {ahead:newAhead, target, frozenAt, reason:this.freezeReason});
-    if (newAhead + 0.03 < target && !this.serverComplete) return;
-    if (newAhead <= 0.05) return;
-    const now = Number(this.video.currentTime || 0);
-    if (Number.isFinite(now) && now + 0.08 < frozenAt) {
-      try { this.video.currentTime = frozenAt; } catch (_) {}
-    }
-    this.rebuffering = false;
-    this.freezeTime = null;
-    this.freezeReason = null;
-    this._setPlaybackRate(0.45);
-    this._play();
-    this._adaptiveTick();
-  }
-
-  _watchPlaybackProgress(window, ahead, now) {
-    if (!window || this.video.paused || this.video.seeking || this.rebuffering) {
-      this.playbackProgressPosition = null;
-      this.playbackProgressAt = null;
-      return;
-    }
-    const current = Number(this.video.currentTime || 0);
-    if (!Number.isFinite(current)) return;
-    if (
-      this.playbackProgressPosition == null ||
-      this.playbackProgressAt == null ||
-      current > this.playbackProgressPosition + 0.03 ||
-      current + 0.15 < this.playbackProgressPosition
-    ) {
-      this.playbackProgressPosition = current;
-      this.playbackProgressAt = now;
-      return;
-    }
-    if (ahead < 0.5 || now - this.playbackProgressAt < 2.5) return;
-    const target = Math.min(window.end - 0.05, current + 0.08);
-    this.playbackProgressPosition = target;
-    this.playbackProgressAt = now;
-    if (target <= current + 0.01) return;
-    try { this.video.currentTime = target; } catch (_) {}
-    this.hls?.startLoad(target);
-    const result = this.video.play();
-    if (result?.catch) result.catch(() => {});
-  }
-
-  _adaptiveTick() {
-    if (this.destroyed || !this.started) return;
-    if (this.rebuffering) { this._maybeRecover(); return; }
-    if (this.video.seeking || !this.video.buffered.length) {
-      this.bufferSupplySamples = [];
-      this.bufferSupplyRate = null;
-      this._setPlaybackRate(1);
-      return;
-    }
-    if (this.video.ended && !this.serverComplete) {
-      this._enterRebuffer("ended");
-      return;
-    }
-    const window = this._bufferWindow();
-    const ahead = window?.ahead || 0;
-    const now = performance.now() / 1000;
-    this._watchPlaybackProgress(window, ahead, now);
-    if (!this.serverComplete && !this.video.paused && ahead < 0.20) {
-      this._enterRebuffer("low-buffer");
-      return;
-    }
-    if (window) {
-      this.bufferSupplySamples.push({at:now, end:window.end});
-      while (this.bufferSupplySamples.length > 2 && now - this.bufferSupplySamples[0].at > 8) {
-        this.bufferSupplySamples.shift();
-      }
-      const oldest = this.bufferSupplySamples[0];
-      const span = oldest ? now - oldest.at : 0;
-      if (oldest && span >= 6) {
-        const observed = Math.max(0, Math.min(2, (window.end - oldest.end) / span));
-        this.bufferSupplyRate = this.bufferSupplyRate == null
-          ? observed
-          : this.bufferSupplyRate * 0.72 + observed * 0.28;
-      }
-    }
-    let target = 1;
-    if (!this.serverComplete) {
-      if (ahead < 0.7) target = 0.45;
-      else if (ahead < 1.3) target = 0.62;
-      else if (ahead < 2.2) target = 0.78;
-      else if (ahead < 3.5) target = 0.90;
-      else if (ahead < 5.5) target = 0.97;
-      else if (ahead > 10) target = 1.02;
-      if (ahead < 3.5 && this.bufferSupplyRate != null && this.bufferSupplyRate < 0.98) {
-        const sustainable = Math.max(0.45, Math.min(0.97, this.bufferSupplyRate * 0.94));
-        target = Math.min(target, sustainable);
-      }
-    }
-    this._setPlaybackRate(target);
-  }
-
-  _startAdaptiveClock() {
-    if (this.rateTimer || this.destroyed) return;
-    this.rateTimer = setInterval(() => this._adaptiveTick(), 400);
-    this._adaptiveTick();
   }
 
   setComplete(complete) {
     if (!complete || this.serverComplete) return;
     this.serverComplete = true;
-    this._setPlaybackRate(1);
     this._maybeStart();
-    this._maybeRecover();
   }
 
   _fatal(message) {
@@ -496,24 +227,15 @@ class TVTFmp4Player {
   destroy() {
     if (this.destroyed) return;
     this.destroyed = true;
-    clearInterval(this.rateTimer);
     clearTimeout(this.networkRecoveryTimer);
     clearTimeout(this.controlsHideTimer);
-    if (this.videoEventsBound) {
-      this.video.removeEventListener("seeking", this._boundSeeking);
-      this.video.removeEventListener("seeked", this._boundSeeked);
-      this.video.removeEventListener("waiting", this._boundWaiting);
-      this.video.removeEventListener("error", this._boundError);
-      this.video.removeEventListener("ended", this._boundEnded);
-      this.video.removeEventListener("playing", this._boundPlaying);
-      this.video.removeEventListener("pointerenter", this._boundControlsActivity);
-      this.video.removeEventListener("pointermove", this._boundControlsActivity);
-      this.video.removeEventListener("pointerdown", this._boundControlsActivity);
-      this.video.removeEventListener("progress", this._boundProgress);
-      this.video.removeEventListener("durationchange", this._boundProgress);
-      this.video.removeEventListener("loadedmetadata", this._boundProgress);
+    if (this.eventsBound) {
+      this.video.removeEventListener("seeking", this._onSeeking);
+      this.video.removeEventListener("playing", this._onPlaying);
+      this.video.removeEventListener("error", this._onError);
+      for (const type of ["pointerenter", "pointermove", "pointerdown"]) this.video.removeEventListener(type, this._onActivity);
+      for (const type of ["progress", "durationchange", "loadedmetadata"]) this.video.removeEventListener(type, this._onBuffered);
     }
-    this._setPlaybackRate(1);
     try { this.hls?.destroy(); } catch (_) {}
     this.hls = null;
     try { this.video.pause(); this.video.removeAttribute("src"); this.video.load(); } catch (_) {}
@@ -1374,16 +1096,13 @@ class TVTArchivePanel extends HTMLElement {
     const overlay = this.shadowRoot.getElementById("player-state");
     if (!overlay) return;
     const alreadyStarted = Boolean(this._recordingController?.started);
-    const transientPlaybackWait = alreadyStarted &&
-      (state === "buffering" || state === "rebuffering" || state === "opening");
-    if (state === "playing" || state === "seeking" || transientPlaybackWait) {
+    if (state === "playing" || state === "seeking" || alreadyStarted) {
       overlay.className = "player-state";
       overlay.replaceChildren();
       return;
     }
     overlay.className = "player-state visible";
-    const label = state === "opening" ? "Opening recording" : "Buffering recording";
-    overlay.innerHTML = `<div class="player-state-content"><span class="player-spinner"></span><span>${label}</span></div>`;
+    overlay.innerHTML = `<div class="player-state-content"><span class="player-spinner"></span><span>Opening recording</span></div>`;
   }
 
   _createRecordingPlayer(host, url = null) {

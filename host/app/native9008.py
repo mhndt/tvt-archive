@@ -32,7 +32,8 @@ KIND_CONFIG_RESPONSE = 0x0100040F
 KIND_PLAYBACK_START = 0x0000090B
 KIND_PLAYBACK_START_RESPONSE = 0x01000909
 KIND_PLAYBACK_CONTINUE = 0x0000090A
-CONTINUATION_INTERVAL_FRAMES = 25
+BAG_END_MARKER = 2
+CONTINUATION_SILENCE_SECONDS = 1.0
 NATIVE_VIDEO_STALL_SECONDS = max(
     5.0, min(float(os.environ.get("TVT_ARCHIVE_NATIVE_VIDEO_STALL_SECONDS", "15")), 120.0)
 )
@@ -297,6 +298,10 @@ def _login_body(username: str, password: str, key: bytes) -> bytes:
     return bytes(body)
 
 
+def is_bag_end(body: bytes) -> bool:
+    return len(body) >= MEDIA_HEADER_SIZE and body[3] == BAG_END_MARKER and body[:2] == b"\x00\x00"
+
+
 def _command_field(name: str) -> bytes:
     encoded = name.encode("ascii")
     if len(encoded) >= 64:
@@ -551,7 +556,11 @@ class TVT9008Client:
         target_end_us = stop_epoch * 1_000_000
         # Delivery can be far slower than realtime; the stall watchdog catches a stuck connection.
         deadline = time.monotonic() + duration * NATIVE_CAPTURE_DEADLINE_FACTOR + 60
-        next_continue_frame = CONTINUATION_INTERVAL_FRAMES
+        # The camera sends 100-frame bags and marks the end of each; one 0x090A per marker
+        # keeps it going. Firmware that never marks a bag gets the request when it falls
+        # silent after delivering video.
+        bag_markers = 0
+        last_nudge = 0.0
         last_video_wall: float | None = None
         last_keyframe_us = 0
 
@@ -607,12 +616,27 @@ class TVT9008Client:
                 try:
                     frame = self.read_frame()
                 except TimeoutError:
+                    now = time.monotonic()
+                    if (
+                        not bag_markers
+                        and last_video_wall is not None
+                        and now - last_video_wall >= CONTINUATION_SILENCE_SECONDS
+                        and now - last_nudge >= CONTINUATION_SILENCE_SECONDS
+                    ):
+                        last_nudge = now
+                        self.send(KIND_PLAYBACK_CONTINUE, request_id)
+                        summary.continuation_commands += 1
                     continue
                 if (
                     frame is None
                     or frame.kind != KIND_RECORDED_MEDIA
                     or frame.request_id != request_id
                 ):
+                    continue
+                if is_bag_end(frame.body):
+                    bag_markers += 1
+                    self.send(KIND_PLAYBACK_CONTINUE, request_id)
+                    summary.continuation_commands += 1
                     continue
                 media_type, payload, timestamp_us, keyframe = self._extract_media(frame)
                 if media_type == "video":
@@ -628,11 +652,6 @@ class TVT9008Client:
                     if not summary.first_video_time_us:
                         summary.first_video_time_us = timestamp_us
                     summary.last_video_time_us = timestamp_us
-                    if summary.video_frames >= next_continue_frame:
-                        self.send(KIND_PLAYBACK_CONTINUE, request_id)
-                        summary.continuation_commands += 1
-                        while next_continue_frame <= summary.video_frames:
-                            next_continue_frame += CONTINUATION_INTERVAL_FRAMES
                 elif media_type == "audio":
                     audio.write(payload)
                     summary.audio_frames += 1

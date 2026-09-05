@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import json
 import struct
 import sys
 import tempfile
@@ -143,33 +142,59 @@ class NativePlaybackTests(unittest.TestCase):
         self.assertFalse(reader.fragments)
         self.assertEqual(reader.fragment_bytes, 0)
 
-    def test_continuation_every_25_video_frames_and_no_0907(self) -> None:
+    def _capture_client(self, frames):
         client = native9008.TVT9008Client("camera", 9008, "user", "password")
         sent: list[tuple[int, int, bytes]] = []
         client.send = lambda kind, request_id, body=b"": sent.append((kind, request_id, body))  # type: ignore[method-assign]
         client.wait_for = lambda kind, request_id, timeout: native9008.InnerFrame(
             kind, request_id or 0, 3, b""
         )  # type: ignore[method-assign]
+        iterator = iter(frames)
+        client.read_frame = lambda: next(iterator)  # type: ignore[method-assign]
+        return client, sent
 
+    def test_continuation_follows_the_bag_end_marker(self) -> None:
         start = datetime(2026, 7, 30, 6, 49, 14)
-        start_epoch = int(time.mktime(start.timetuple()))
-        frames = iter(video_frame(start_epoch * 1_000_000 + index * 40_000) for index in range(51))
-        client.read_frame = lambda: next(frames)  # type: ignore[method-assign]
-
+        base = int(time.mktime(start.timetuple())) * 1_000_000
+        marker = native9008.InnerFrame(
+            native9008.KIND_RECORDED_MEDIA, 11, 3, bytes([0, 0, 0, 2]) + bytes(36)
+        )
+        frames = [video_frame(base + index * 40_000) for index in range(40)]
+        frames.insert(20, marker)
+        frames.append(video_frame(base + 60 * 40_000))
+        client, sent = self._capture_client(frames)
         with tempfile.TemporaryDirectory() as directory:
             summary = client.capture(start, 2, Path(directory))
-            timing = json.loads((Path(directory) / "timing.json").read_text())
-            saved = json.loads((Path(directory) / "summary.json").read_text())
-
         kinds = [kind for kind, _, _ in sent]
-        self.assertEqual(kinds[0], native9008.KIND_PLAYBACK_START)
-        self.assertEqual(kinds[1:], [native9008.KIND_PLAYBACK_CONTINUE] * 2)
-        self.assertEqual(summary.video_frames, 50)
-        self.assertEqual(summary.continuation_commands, 2)
-        self.assertEqual(saved["continuation_commands"], 2)
-        self.assertGreaterEqual(timing["captured_seconds"], 1.95)
+        self.assertEqual(kinds, [native9008.KIND_PLAYBACK_START, native9008.KIND_PLAYBACK_CONTINUE])
+        self.assertEqual(summary.continuation_commands, 1)
+        self.assertEqual(summary.housekeeping_frames, 0)
         self.assertNotIn(0x00000907, kinds)
-        self.assertFalse(hasattr(native9008, "KIND_PLAYBACK_FLOW"))
+
+    def test_continuation_nudges_a_silent_camera_without_markers(self) -> None:
+        start = datetime(2026, 7, 30, 6, 49, 14)
+        base = int(time.mktime(start.timetuple())) * 1_000_000
+        first = [video_frame(base + index * 40_000) for index in range(100)]
+        rest = [video_frame(base + index * 40_000) for index in range(100, 160)]
+        client, sent = self._capture_client(first)
+        produced = iter(first)
+
+        def read_frame():
+            try:
+                return next(produced)
+            except StopIteration:
+                # silent until the continuation arrives, then the next bag
+                if any(kind == native9008.KIND_PLAYBACK_CONTINUE for kind, _, _ in sent) and rest:
+                    return rest.pop(0)
+                time.sleep(0.05)
+                raise TimeoutError("timed out") from None
+
+        client.read_frame = read_frame  # type: ignore[method-assign]
+        with tempfile.TemporaryDirectory() as directory:
+            summary = client.capture(start, 6, Path(directory))
+        kinds = [kind for kind, _, _ in sent]
+        self.assertEqual(kinds.count(native9008.KIND_PLAYBACK_CONTINUE), 1)
+        self.assertGreaterEqual(summary.video_frames, 150)
 
     def test_midstream_video_stall_raises_timeout(self) -> None:
         client = native9008.TVT9008Client("camera", 9008, "user", "password")
