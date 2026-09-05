@@ -94,5 +94,5 @@ jobs:
             dist/SHA256SUMS.txt \
             --verify-tag \
             --generate-notes \
-            --title "TVT Archive $GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
             "${prerelease[@]}"

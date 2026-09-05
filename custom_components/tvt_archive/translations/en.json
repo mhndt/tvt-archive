@@ -29,8 +29,8 @@
         }
       },
       "hassio_confirm": {
-        "title": "TVT Archive add-on",
-        "description": "Set up Home Assistant to use the TVT Archive add-on?"
+        "title": "TVT Archive app",
+        "description": "Set up Home Assistant to use the TVT Archive app?"
       }
     },
     "error": {

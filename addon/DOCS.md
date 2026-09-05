@@ -4,11 +4,11 @@ Runs the TVT Archive bridge, which reads recordings from a TVT camera's SD card 
 
 ## Setup
 
-1. Start the add-on.
+1. Start the app.
 2. Install the TVT Archive integration from HACS and restart Home Assistant.
 3. Open Settings > Devices & services. The bridge appears as discovered; press Configure and add your first camera.
 
-The camera must be reachable from the Home Assistant host. Cameras, credentials, and cached exports are stored in the add-on's data directory.
+The camera must be reachable from the Home Assistant host. Cameras, credentials, and cached exports are stored in the app's data directory.
 
 ## Options
 
@@ -20,4 +20,4 @@ Encoding is only used for Low quality and for Original playback from cameras who
 
 ## Docker Compose instead
 
-On Home Assistant Container or Core there are no add-ons. Run the same image with Docker Compose as described in the [README](https://github.com/mhndt/tvt-archive#readme).
+On Home Assistant Container or Core there are no apps. Run the same image with Docker Compose as described in the [README](https://github.com/mhndt/tvt-archive#readme).

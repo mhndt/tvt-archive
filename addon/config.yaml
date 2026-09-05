@@ -14,7 +14,8 @@ hassio_role: default
 discovery:
   - tvt_archive
 devices:
-  - /dev/dri
+  - /dev/dri/renderD128
+  - /dev/dri/card0
 environment:
   TVT_ARCHIVE_CONFIG_DIRECTORY: /data/config
   STATE_DIRECTORY: /data/state

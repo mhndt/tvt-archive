@@ -2635,6 +2635,10 @@ if __name__ == "__main__":
         raise SystemExit(0)
     if sys.argv[1:] not in ([], ["run"]):
         raise SystemExit(f"usage: {sys.argv[0]} [run|show-token]")
+    if ENCODER == "vaapi" and not Path(DRI_DEVICE).exists():
+        raise SystemExit(
+            f"encoder is vaapi but {DRI_DEVICE} does not exist; use software or pass the GPU through"
+        )
     threading.Thread(target=cleanup_loop, name="cache-cleanup", daemon=True).start()
     threading.Thread(target=announce_to_supervisor, name="discovery", daemon=True).start()
     clean_cache()

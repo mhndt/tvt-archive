@@ -4,9 +4,7 @@
 
 # TVT Archive
 
-[![HACS](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
-[![Release](https://img.shields.io/github/v/release/mhndt/tvt-archive)](https://github.com/mhndt/tvt-archive/releases)
-[![License](https://img.shields.io/github/license/mhndt/tvt-archive)](LICENSE)
+[![HACS](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration) [![Release](https://img.shields.io/github/v/release/mhndt/tvt-archive)](https://github.com/mhndt/tvt-archive/releases) [![License](https://img.shields.io/github/license/mhndt/tvt-archive)](LICENSE)
 
 TVT Archive lets you browse, play, and export the recordings on a TVT camera's SD card from Home Assistant. It adds a Recordings panel to the sidebar and, for each camera, a sensor that shows whether it is recording and sensors for how much footage is on the card.
 
@@ -21,14 +19,14 @@ A small bridge container on your network reads the recordings straight from the 
 
 ## Prerequisites
 
-- The bridge, either as the add-on or as a container on a machine on the camera's network. See below.
+- The bridge, either as a Home Assistant app or as a container on a machine on the camera's network. See below.
 - The camera's local address and an account that is allowed to play back recordings.
 
-### Bridge as an add-on
+### Bridge as an app
 
-On Home Assistant OS or Supervised, add this repository to the add-on store and install TVT Archive:
+On Home Assistant OS or Supervised, add this repository under Settings > Apps and install TVT Archive:
 
-[![Add repository to the add-on store](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fmhndt%2Ftvt-archive)
+[![Add repository to the app store](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fmhndt%2Ftvt-archive)
 
 Start it. Home Assistant discovers it once the integration is installed, so there is no URL or token to copy. Set the `encoder` option to `vaapi` to encode on an Intel or AMD GPU.
 
@@ -73,7 +71,7 @@ To install manually, copy `custom_components/tvt_archive` into your `config/cust
 
 ## Configure
 
-With the add-on, Settings > Devices & services shows TVT Archive as discovered. Press Configure.
+With the app, Settings > Devices & services shows TVT Archive as discovered. Press Configure.
 
 With Docker Compose, choose Add integration, search for TVT Archive, and enter:
 
@@ -125,7 +123,7 @@ Exports always contain the original video with audio converted to AAC.
 
 # Bridge settings
 
-Settings live in `config.json` in the `tvt-archive-config` volume, or in the add-on's data directory. Cameras are managed from Home Assistant; the optional `processing` keys are:
+Settings live in `config.json` in the `tvt-archive-config` volume, or in the app's data directory. Cameras are managed from Home Assistant; the optional `processing` keys are:
 
 | Key | Default | Description |
 |---|---|---|
@@ -143,19 +141,13 @@ Settings live in `config.json` in the `tvt-archive-config` volume, or in the add
 
 The bridge encodes only for Low quality and for Original playback from cameras with a long keyframe interval. Setting the camera's I-frame interval to 2 s or less (25 to 50 frames at 25 fps) lets Original play without any CPU cost.
 
-# Limitations
-
-- The bridge speaks plain HTTP with a bearer token and is meant for a trusted network. Keep ports 8099 and 9008 off the Internet.
-- Cameras on weak Wi-Fi can send recordings slower than real time. The player slows down and pauses when that happens.
-- Software encoding of Low quality keeps up on x86 hosts and on a Raspberry Pi 4 or newer.
-
 # Troubleshooting
 
 Could not connect to the bridge: check that the bridge URL is reachable from the Home Assistant host and that the token matches the output of `docker exec tvt-archive tvt-archive show-token`.
 
 The camera could not be added: the bridge logs in to the camera before saving it. Check the address, that port 9008 is reachable from the bridge host, and that the account may play back recordings. Details are in `docker compose logs tvt-archive`.
 
-Playback keeps pausing: the camera is delivering slower than real time, usually over Wi-Fi. Try Low quality. If the panel's Video field says "camera keyframes every N s", lower the I-frame interval in the camera's encode settings.
+Playback keeps pausing: the camera is delivering slower than real time, usually over Wi-Fi. Try Low quality. If the panel's Encoding tile says Software and the status line mentions the keyframe interval, lower the I-frame interval in the camera's encode settings.
 
 # Removing
 
