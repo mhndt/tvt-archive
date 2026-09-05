@@ -66,7 +66,6 @@ for path in (
     "brand/icon.png",
     "README.md",
     "LICENSE",
-    "THIRD_PARTY.md",
 ):
     if not (ROOT / path).is_file():
         fail(f"required file is missing: {path}")

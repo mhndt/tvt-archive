@@ -38,7 +38,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     CACHE_DIRECTORY=/cache
 
 COPY --from=hlsjs-builder /export/ /opt/tvt-archive/static/
-COPY LICENSE THIRD_PARTY.md /usr/share/doc/tvt-archive/
+COPY LICENSE /usr/share/doc/tvt-archive/
 
 # va-driver-all plus the Intel iHD driver on amd64 serve the optional vaapi encoder.
 RUN set -eux; \

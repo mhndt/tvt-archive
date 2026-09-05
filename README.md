@@ -4,36 +4,28 @@
 
 # TVT Archive
 
-[![HACS](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration) [![Release](https://img.shields.io/github/v/release/mhndt/tvt-archive)](https://github.com/mhndt/tvt-archive/releases) [![License](https://img.shields.io/github/license/mhndt/tvt-archive)](LICENSE)
+[![HACS](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration) [![Release](https://img.shields.io/github/v/release/mhndt/tvt-archive)](https://github.com/mhndt/tvt-archive/releases) [![CI](https://github.com/mhndt/tvt-archive/actions/workflows/ci.yml/badge.svg)](https://github.com/mhndt/tvt-archive/actions/workflows/ci.yml)
 
-TVT Archive lets you browse, play, and export the recordings on a TVT camera's SD card from Home Assistant. It adds a Recordings panel to the sidebar and, for each camera, a sensor that shows whether it is recording and sensors for how much footage is on the card.
+TVT Archive lets you browse, play, and export recordings from a TVT camera's SD card in Home Assistant. It adds a Recordings panel to the sidebar and creates entities for recording status and available footage.
 
-A small bridge container on your network reads the recordings straight from the camera. Nothing leaves your LAN and no vendor account is needed.
-
-> [!IMPORTANT]
-> Tested with the TVT TD-C12. Other TVT and OEM cameras may work but are untested.
+A small bridge on your network reads recordings directly from the camera. Nothing leaves your LAN and no vendor account is needed.
 
 ![Recordings panel](docs/images/panel.png)
 
 # Installation
 
-## Prerequisites
-
-- The bridge, either as a Home Assistant app or as a container on a machine on the camera's network. See below.
-- The camera's local address and an account that is allowed to play back recordings.
-
-### Bridge as an app
+## Home Assistant app
 
 On Home Assistant OS or Supervised, add this repository under Settings > Apps and install TVT Archive:
 
 [![Add repository to the app store](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fmhndt%2Ftvt-archive)
 
-Start it. Home Assistant discovers it once the integration is installed, so there is no URL or token to copy. Set the `encoder` option to `vaapi` to encode on an Intel or AMD GPU.
+Start the app. Home Assistant discovers it once the integration is installed. Set Encoder to VAAPI in the app options to use an Intel or AMD GPU for encoding.
 
 <details>
-<summary>Bridge with Docker Compose (Home Assistant Container or Core)</summary>
+<summary>Docker Compose</summary>
 
-The bridge needs Docker with Compose v2 on an x86-64 or arm64 host.
+For Home Assistant Container or Core, run the bridge on an x86-64 or arm64 Docker host on the camera's network:
 
 ```bash
 git clone https://github.com/mhndt/tvt-archive.git
@@ -41,66 +33,70 @@ cd tvt-archive
 ./setup.sh
 ```
 
-The script writes `.env`, starts the container, and prints the bridge URL and access token used in the next step. Add `--vaapi` on an Intel or AMD host to encode on the GPU; see [Bridge settings](#bridge-settings).
+The setup script starts the bridge and prints the URL and access token used when configuring the integration. Use `./setup.sh --vaapi` to enable VAAPI on an Intel or AMD host.
 
-Print the token again:
+To print the token again:
 
 ```bash
 docker exec tvt-archive tvt-archive show-token
 ```
 
-Update the bridge:
+To update:
 
 ```bash
 git pull && docker compose pull && docker compose up -d
 ```
 
-To configure by hand instead of `setup.sh`, copy `.env.example` to `.env` and run `docker compose up -d`. For VAAPI set `COMPOSE_FILE=compose/compose.yaml:compose/vaapi.yaml`, `TVT_ARCHIVE_ENCODER=vaapi`, and the group IDs from `stat -c %g /dev/dri/renderD128 /dev/dri/card0`.
-
 </details>
 
-## Install
+## Integration
 
 [![Open TVT Archive in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=mhndt&repository=tvt-archive&category=integration)
 
-1. In HACS, add `https://github.com/mhndt/tvt-archive` as a custom repository of type Integration.
+1. Add `https://github.com/mhndt/tvt-archive` to HACS as a custom Integration repository.
 2. Install TVT Archive.
 3. Restart Home Assistant.
 
-To install manually, copy `custom_components/tvt_archive` into your `config/custom_components` directory and restart.
+For a manual install, copy `custom_components/tvt_archive` into `config/custom_components` and restart Home Assistant.
 
-## Configure
+## Configuration
 
-With the app, Settings > Devices & services shows TVT Archive as discovered. Press Configure.
+With the Home Assistant app, open Settings > Devices & services and configure the discovered TVT Archive integration.
 
-With Docker Compose, choose Add integration, search for TVT Archive, and enter:
+With Docker Compose, add the TVT Archive integration and enter the bridge URL and access token printed by `setup.sh`.
 
-| Field | Description |
-|---|---|
-| Bridge URL | `http://<bridge-host>:8099`, as printed by the setup script |
-| Access token | The token printed by the setup script |
-
-You are then asked for the first camera:
+Configure your first camera with:
 
 | Field | Description |
 |---|---|
-| Camera name | Shown in the panel and used for entity names |
-| Address | The camera's local IP address or hostname |
+| Camera name | Name shown in Home Assistant |
+| Address | Camera IP address or hostname |
 | Port | Normally 9008 |
-| Username, Password | A camera account with playback permission |
+| Username, Password | Camera account with playback permission |
 | Recording audio | Auto, Always expect audio, or Disabled |
 
-Cameras are stored by the bridge, not in Home Assistant. Add, edit, or remove them later under Settings > Devices & services > TVT Archive > Configure.
+Add, edit, or remove cameras later under Settings > Devices & services > TVT Archive > Configure.
 
 # Usage
 
+## Recordings panel
+
+Open Recordings in the sidebar, choose a camera and day, then select a recording on the timeline. Use Play from here to watch it or choose a start and end time to download it.
+
+Playback quality:
+
+- Original: the camera's H.264 video.
+- Low (480p): re-encoded by the bridge for slower connections.
+
+Downloads keep the original video and convert audio to AAC.
+
 ## Entities
 
-One device is created per camera with these entities:
+Each camera is added as a device with these entities:
 
 | Entity | Description |
 |---|---|
-| `binary_sensor.<camera>_recording` | On while the camera is currently recording |
+| `binary_sensor.<camera>_recording` | Whether the camera is currently recording |
 | `sensor.<camera>_recorded_today` | Hours recorded today |
 | `sensor.<camera>_available_history` | Hours between the oldest and latest recording |
 | `sensor.<camera>_oldest_recording` | Start of the oldest recording on the card |
@@ -110,71 +106,40 @@ Sensors update every two minutes.
 
 ![Camera entities](docs/images/entities.png)
 
-## Recordings panel
+<details>
+<summary>Bridge settings</summary>
 
-Open Recordings in the sidebar. Choose a camera and a day. Green sections of the timeline are recordings. Click one and press Play from here, or set a start and end time and press Download original.
-
-Quality:
-
-- Original: the camera's own H.264 stream, sent to the browser as is.
-- Low (480p): re-encoded by the bridge for slow connections.
-
-Playback runs at the pace the camera delivers. When the camera is slower than real time the panel says so and the picture simply advances more slowly; nothing buffers or pauses on its own. Clicking the timeline while playing seeks within the same camera session.
-
-Exports always contain the original video with audio converted to AAC.
-
-# Bridge settings
-
-Settings live in `config.json` in the `tvt-archive-config` volume, or in the app's data directory. Cameras are managed from Home Assistant; the optional `processing` keys are:
+Bridge settings are stored in `config.json` in the app data directory, or in the tvt-archive-config volume when using Docker Compose.
 
 | Key | Default | Description |
 |---|---|---|
-| `encoder` | `software` | `software` (x264) or `vaapi` (Intel or AMD through `/dev/dri`) |
-| `dri_device` | `/dev/dri/renderD128` | VAAPI render node |
-| `playback_max_seconds` | `900` | Longest playback session |
-| `download_max_seconds` | `3600` | Longest export |
-| `cache_hours` | `6` | How long exports are kept |
-| `availability_days` | `45` | How far back the calendar looks |
-| `max_parallel_jobs` | `1` | Concurrent exports |
-| `max_parallel_playback_sessions` | `2` | Concurrent playback sessions across cameras |
-| `max_native_sessions_per_camera` | `1` | Camera connections at once; the camera shares its output between them |
-| `stream_audio_delay_ms` | `0` | Extra audio delay |
+| `encoder` | software | Software or VAAPI encoding |
+| `dri_device` | `/dev/dri/renderD128` | VAAPI render device |
+| `playback_max_seconds` | 900 | Maximum playback session length |
+| `download_max_seconds` | 3600 | Maximum download length |
+| `cache_hours` | 6 | How long downloads are kept |
+| `availability_days` | 45 | How far back the calendar looks |
+| `max_parallel_jobs` | 1 | Concurrent downloads |
+| `max_parallel_playback_sessions` | 2 | Concurrent playback sessions |
+| `max_native_sessions_per_camera` | 1 | Camera connections per camera |
+| `stream_audio_delay_ms` | 0 | Extra audio delay |
 
-`TVT_ARCHIVE_ENCODER`, `TVT_ARCHIVE_DRI_DEVICE`, and `TVT_ARCHIVE_STREAM_AUDIO_DELAY_MS` in the environment override the file. `TVT_ARCHIVE_TOKEN` is used only when the config is first created.
+`TVT_ARCHIVE_ENCODER`, `TVT_ARCHIVE_DRI_DEVICE`, and `TVT_ARCHIVE_STREAM_AUDIO_DELAY_MS` override the matching settings when set in the environment.
 
-Original playback sends the camera's video to the browser untouched; the bridge encodes only for Low quality. Browsers without WebCodecs fall back to HLS, where Original is re-encoded when the camera's keyframe interval is over 2 s.
-
-# Troubleshooting
-
-Could not connect to the bridge: check that the bridge URL is reachable from the Home Assistant host and that the token matches the output of `docker exec tvt-archive tvt-archive show-token`.
-
-The camera could not be added: the bridge logs in to the camera before saving it. Check the address, that port 9008 is reachable from the bridge host, and that the account may play back recordings. Details are in `docker compose logs tvt-archive`.
-
-Playback keeps pausing: the camera is delivering slower than real time, usually over Wi-Fi. Try Low quality. If the panel's Encoding tile says Software and the status line mentions the keyframe interval, lower the I-frame interval in the camera's encode settings.
-
-# Removing
-
-Delete the integration under Settings > Devices & services. To remove the bridge and its data, including stored camera credentials and cached exports, run `docker compose down -v` in the checkout.
+</details>
 
 # Compatibility
 
-Only the TVT TD-C12 has been tested. If it works on another TVT camera, recorder, or OEM device, open a compatibility report so it can be listed.
-
-[docs/protocol.md](docs/protocol.md) contains the protocol and reverse-engineering notes, and [docs/media-pipeline.md](docs/media-pipeline.md) describes how recordings are turned into playback and exports.
+TVT Archive has been tested with the TVT TD-C12. Other TVT cameras, recorders, and OEM devices may also work. If you test another model, please open an issue so it can be added here.
 
 # Development
+
+Protocol and reverse-engineering notes are in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
 ```bash
 bash tests/run-tests.sh
 ruff check . && ruff format --check .
 ./setup.sh --build-local
-```
-
-The Home Assistant tests need the test harness:
-
-```bash
-pip install pytest-homeassistant-custom-component home-assistant-frontend
-pytest
 ```
 
 # Contributing
@@ -183,4 +148,6 @@ Issues and pull requests are welcome. Reports from other TVT models are especial
 
 # License
 
-MIT. Third-party components are listed in [THIRD_PARTY.md](THIRD_PARTY.md). This is an unofficial project; product names belong to their owners.
+MIT. See [LICENSE](LICENSE).
+
+TVT is a trademark of its respective owner. This project is independent and is not affiliated with or endorsed by TVT.
