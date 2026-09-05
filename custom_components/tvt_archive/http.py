@@ -39,6 +39,21 @@ def _hls_signature(key: bytes, entry_id: str, session_id: str, expires: int) -> 
     return hmac.new(key, payload, hashlib.sha256).hexdigest()
 
 
+def _frames_signature(key: bytes, entry_id: str, session_id: str, expires: int) -> str:
+    payload = f"frames:{entry_id}:{session_id}:{expires}".encode()
+    return hmac.new(key, payload, hashlib.sha256).hexdigest()
+
+
+def _add_frames_url(entry_id: str, data: dict[str, Any], session: dict[str, Any]) -> dict[str, Any]:
+    result = dict(session)
+    expires = int(result.get("created_at_unix", int(time.time()))) + _HLS_URL_TTL_SECONDS
+    signature = _frames_signature(data["media_key"], entry_id, result["id"], expires)
+    result["frames_url"] = (
+        f"/api/tvt_archive/frames/{entry_id}/{result['id']}/{expires}/{signature}"
+    )
+    return result
+
+
 def _player_signature(key: bytes, entry_id: str, expires: int) -> str:
     payload = f"player:{entry_id}:{expires}".encode()
     return hmac.new(key, payload, hashlib.sha256).hexdigest()
@@ -174,6 +189,87 @@ class SessionView(HomeAssistantView):
             _LOGGER.warning("TVT Archive bridge request failed: %s", error)
             raise web.HTTPBadGateway(text="TVT Archive request failed") from error
         return self.json(_add_hls_url(entry_id, data, session))
+
+
+class CreateStreamView(HomeAssistantView):
+    url = "/api/tvt_archive/{entry_id}/cameras/{camera_id}/streams"
+    name = "api:tvt_archive:create_stream"
+    requires_auth = True
+
+    async def post(self, request, entry_id, camera_id):
+        data = _entry_data(request.app["hass"], entry_id)
+        try:
+            session = await data["api"].create_stream(camera_id, await request.json())
+        except TVTArchiveApiError as error:
+            _LOGGER.warning("TVT Archive bridge request failed: %s", error)
+            raise web.HTTPBadGateway(text="TVT Archive request failed") from error
+        return self.json(_add_frames_url(entry_id, data, session), status_code=202)
+
+
+class StreamView(HomeAssistantView):
+    url = "/api/tvt_archive/{entry_id}/streams/{session_id}"
+    name = "api:tvt_archive:stream"
+    requires_auth = True
+
+    async def _respond(self, request, entry_id, call):
+        data = _entry_data(request.app["hass"], entry_id)
+        try:
+            session = await call(data["api"])
+        except TVTArchiveApiError as error:
+            _LOGGER.warning("TVT Archive bridge request failed: %s", error)
+            raise web.HTTPBadGateway(text="TVT Archive request failed") from error
+        return self.json(_add_frames_url(entry_id, data, session))
+
+    async def get(self, request, entry_id, session_id):
+        return await self._respond(request, entry_id, lambda api: api.stream(session_id))
+
+    async def post(self, request, entry_id, session_id):
+        payload = await request.json()
+        return await self._respond(
+            request, entry_id, lambda api: api.control_stream(session_id, payload)
+        )
+
+    async def delete(self, request, entry_id, session_id):
+        return await self._respond(request, entry_id, lambda api: api.stop_stream(session_id))
+
+
+class FramesView(HomeAssistantView):
+    url = "/api/tvt_archive/frames/{entry_id}/{session_id}/{expires}/{signature}"
+    name = "api:tvt_archive:frames"
+    requires_auth = False
+
+    async def get(self, request, entry_id, session_id, expires, signature):
+        data = _entry_data(request.app["hass"], entry_id)
+        try:
+            expiry = int(expires)
+        except ValueError as error:
+            raise web.HTTPForbidden(text="Invalid stream signature") from error
+        expected = _frames_signature(data["media_key"], entry_id, session_id, expiry)
+        if expiry < int(time.time()) or not hmac.compare_digest(signature, expected):
+            raise web.HTTPForbidden(text="Expired or invalid stream signature")
+        try:
+            upstream = await data["api"].open_frames(session_id)
+        except TVTArchiveApiError as error:
+            _LOGGER.warning("TVT Archive bridge request failed: %s", error)
+            raise web.HTTPBadGateway(text="TVT Archive request failed") from error
+        response = web.StreamResponse(status=200)
+        response.headers["Content-Type"] = "application/octet-stream"
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Accel-Buffering"] = "no"
+        response.enable_chunked_encoding()
+        await response.prepare(request)
+        try:
+            async for chunk in upstream.content.iter_any():
+                await response.write(chunk)
+        except (ConnectionResetError, RuntimeError, ConnectionError):
+            pass
+        finally:
+            upstream.close()
+        try:
+            await response.write_eof()
+        except (ConnectionResetError, RuntimeError):
+            pass
+        return response
 
 
 class HLSLibraryView(HomeAssistantView):
@@ -361,6 +457,9 @@ def register_views(hass: HomeAssistant) -> None:
         AvailabilityView(),
         CreateSessionView(),
         SessionView(),
+        CreateStreamView(),
+        StreamView(),
+        FramesView(),
         HLSLibraryView(),
         HLSAssetView(),
         CreateJobView(),

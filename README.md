@@ -116,8 +116,10 @@ Open Recordings in the sidebar. Choose a camera and a day. Green sections of the
 
 Quality:
 
-- Original: the camera's own H.264 stream. Copied as is when the camera's keyframe interval is 2 s or less, re-encoded otherwise.
-- Low (480p): re-encoded for slow connections.
+- Original: the camera's own H.264 stream, sent to the browser as is.
+- Low (480p): re-encoded by the bridge for slow connections.
+
+Playback runs at the pace the camera delivers. When the camera is slower than real time the panel says so and the picture simply advances more slowly; nothing buffers or pauses on its own. Clicking the timeline while playing seeks within the same camera session.
 
 Exports always contain the original video with audio converted to AAC.
 
@@ -134,12 +136,13 @@ Settings live in `config.json` in the `tvt-archive-config` volume, or in the app
 | `cache_hours` | `6` | How long exports are kept |
 | `availability_days` | `45` | How far back the calendar looks |
 | `max_parallel_jobs` | `1` | Concurrent exports |
-| `max_parallel_playback_sessions` | `2` | Concurrent playback sessions |
+| `max_parallel_playback_sessions` | `2` | Concurrent playback sessions across cameras |
+| `max_native_sessions_per_camera` | `1` | Camera connections at once; the camera shares its output between them |
 | `stream_audio_delay_ms` | `0` | Extra audio delay |
 
 `TVT_ARCHIVE_ENCODER`, `TVT_ARCHIVE_DRI_DEVICE`, and `TVT_ARCHIVE_STREAM_AUDIO_DELAY_MS` in the environment override the file. `TVT_ARCHIVE_TOKEN` is used only when the config is first created.
 
-The bridge encodes only for Low quality and for Original playback from cameras with a long keyframe interval. Setting the camera's I-frame interval to 2 s or less (25 to 50 frames at 25 fps) lets Original play without any CPU cost.
+Original playback sends the camera's video to the browser untouched; the bridge encodes only for Low quality. Browsers without WebCodecs fall back to HLS, where Original is re-encoded when the camera's keyframe interval is over 2 s.
 
 # Troubleshooting
 

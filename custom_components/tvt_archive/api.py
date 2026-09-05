@@ -98,6 +98,30 @@ class TVTArchiveApi:
     async def stop_session(self, session_id: str) -> dict[str, Any]:
         return await self.request("DELETE", f"/api/sessions/{session_id}")
 
+    async def create_stream(self, camera_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self.request("POST", f"/api/cameras/{camera_id}/streams", json_data=payload)
+
+    async def stream(self, session_id: str) -> dict[str, Any]:
+        return await self.request("GET", f"/api/streams/{session_id}")
+
+    async def control_stream(self, session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self.request("POST", f"/api/streams/{session_id}", json_data=payload)
+
+    async def stop_stream(self, session_id: str) -> dict[str, Any]:
+        return await self.request("DELETE", f"/api/streams/{session_id}")
+
+    async def open_frames(self, session_id: str) -> ClientResponse:
+        response = await self.session.get(
+            self._url(f"/api/streams/{session_id}/frames"),
+            headers=self.headers,
+            timeout=ClientTimeout(total=None, sock_read=None),
+        )
+        if response.status >= 400:
+            text = await response.text()
+            response.release()
+            raise TVTArchiveApiError(text or f"Bridge returned HTTP {response.status}")
+        return response
+
     async def create_job(self, camera_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         return await self.request("POST", f"/api/cameras/{camera_id}/jobs", json_data=payload)
 

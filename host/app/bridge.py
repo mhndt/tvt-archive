@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import collections
 import concurrent.futures
 import dataclasses
 import datetime as dt
@@ -16,6 +17,7 @@ import re
 import secrets
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -30,7 +32,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from native9008 import TVT9008Client
+from native9008 import (
+    KIND_PLAYBACK_CONTINUE,
+    KIND_PLAYBACK_START,
+    KIND_PLAYBACK_START_RESPONSE,
+    KIND_RECORDED_MEDIA,
+    MEDIA_HEADER_SIZE,
+    TVT9008Client,
+)
 
 APP_VERSION = "0.8.4"
 BASE = Path(os.environ.get("TVT_ARCHIVE_BASE", "/opt/tvt-archive"))
@@ -183,7 +192,7 @@ STREAM_AUDIO_DELAY_MS = int(
     os.environ.get("TVT_ARCHIVE_STREAM_AUDIO_DELAY_MS", PROCESSING.get("stream_audio_delay_ms", 0))
 )
 MAX_WORKERS = max(1, min(int(PROCESSING.get("max_parallel_jobs", 1)), 4))
-NATIVE_SESSION_LIMIT = max(1, min(int(PROCESSING.get("max_native_sessions_per_camera", 2)), 4))
+NATIVE_SESSION_LIMIT = max(1, min(int(PROCESSING.get("max_native_sessions_per_camera", 1)), 4))
 
 CAMERA_LOCKS: dict[str, threading.Lock] = {camera_id: threading.Lock() for camera_id in CAMERAS}
 CAMERA_SESSION_SLOTS: dict[str, threading.BoundedSemaphore] = {
@@ -413,6 +422,149 @@ class PlaybackSession:
                 if self.has_audio
                 else 'video/mp4; codecs="avc1.640029"'
             ),
+        }
+
+
+# Frame streams: the camera sends recordings in bags of 100 video frames and waits for
+# 0x090A before the next one. The bridge forwards frames as they come and asks for the
+# next bag only while the viewer is close behind, so the camera never runs ahead of
+# what is being watched. Records on the wire:
+#   "TF" kind flags pts_us length payload   (<2sBBQI, little endian)
+FRAME_MAGIC = b"TF"
+FRAME_HEADER = struct.Struct("<2sBBQI")
+REC_INFO, REC_VIDEO, REC_AUDIO, REC_MARK, REC_END = 0, 1, 2, 3, 4
+KEYFRAME_FLAG = 1
+BAG_END, END_EVENT = 2, 3
+STREAM_WINDOW_FRAMES = 150
+STREAM_IDLE_SECONDS = 20
+STREAM_RETAIN_SECONDS = 300
+FIRST_REQUEST_ID = 11
+
+
+def frame_record(kind: int, flags: int, pts_us: int, payload: bytes = b"") -> bytes:
+    return FRAME_HEADER.pack(FRAME_MAGIC, kind, flags, pts_us, len(payload)) + payload
+
+
+def should_release_bag(bag_pending: bool, delivered: int, rendered: int, reader: bool) -> bool:
+    return bag_pending and reader and delivered - rendered < STREAM_WINDOW_FRAMES
+
+
+def split_access_units(buffer: bytearray) -> list[bytes]:
+    """Cut complete access units off the front of an Annex B stream with AUD NAL units."""
+    units: list[bytes] = []
+    while True:
+        first = _find_aud(buffer, 0)
+        if first < 0:
+            return units
+        if first:
+            del buffer[:first]
+        following = _find_aud(buffer, 4)
+        if following < 0:
+            return units
+        units.append(bytes(buffer[:following]))
+        del buffer[:following]
+
+
+def _find_aud(buffer: bytearray, offset: int) -> int:
+    index = buffer.find(b"\x00\x00\x01\x09", offset)
+    if index < 0:
+        return -1
+    return index - 1 if index and buffer[index - 1] == 0 else index
+
+
+def access_unit_is_keyframe(unit: bytes) -> bool:
+    for match in re.finditer(rb"\x00\x00\x01([\x00-\xff])", unit):
+        if match.group(1)[0] & 0x1F in (5, 7):
+            return True
+    return False
+
+
+@dataclasses.dataclass
+class FrameSession:
+    id: str
+    camera_id: str
+    request: dict[str, Any]
+    status: str = "queued"
+    phase: str = "Waiting for the camera"
+    created_at: float = dataclasses.field(default_factory=time.time)
+    last_access: float = dataclasses.field(default_factory=time.time)
+    started_at: float | None = None
+    finished_at: float | None = None
+    error: str | None = None
+    video: str = "copy"
+    width: int = 0
+    height: int = 0
+    has_audio: bool = False
+    position_us: int = 0
+    delivered: int = 0
+    rendered: int = 0
+    generation: int = 0
+    bags: int = 0
+    bag_pending: bool = False
+    media_us: int = 0
+    first_us: int = 0
+    wall_start: float = 0.0
+    pump_started: float = 0.0
+    readers: int = 0
+    reader_left: float = 0.0
+    seek_to: dt.datetime | None = None
+    request_id: int = FIRST_REQUEST_ID
+    pending_request_id: int | None = None
+    stop_event: threading.Event = dataclasses.field(default_factory=threading.Event, repr=False)
+    ready: threading.Condition = dataclasses.field(default_factory=threading.Condition, repr=False)
+    queue: collections.deque = dataclasses.field(default_factory=collections.deque, repr=False)
+    client: TVT9008Client | None = dataclasses.field(default=None, repr=False)
+
+    def reader_attached(self) -> bool:
+        return self.readers > 0
+
+    def idle_seconds(self) -> float:
+        if self.readers:
+            return 0.0
+        return time.monotonic() - (self.reader_left or self.pump_started)
+
+    def push(self, kind: int, record: bytes) -> None:
+        with self.ready:
+            self.queue.append((kind, record))
+            self.ready.notify_all()
+
+    def finished(self) -> bool:
+        return self.status in ("complete", "stopped", "error")
+
+    def speed(self) -> float | None:
+        wall = time.monotonic() - self.wall_start if self.wall_start else 0.0
+        if wall < 3.0 or not self.media_us:
+            return None
+        return round(self.media_us / 1_000_000 / wall, 2)
+
+    def public(self, *, touch: bool = True) -> dict[str, Any]:
+        if touch:
+            self.last_access = time.time()
+        position = None
+        if self.position_us:
+            position = dt.datetime.fromtimestamp(self.position_us / 1_000_000).isoformat(
+                timespec="seconds"
+            )
+        return {
+            "id": self.id,
+            "camera_id": self.camera_id,
+            "status": self.status,
+            "phase": self.phase,
+            "error": self.error,
+            "request": self.request,
+            "created_at_unix": int(self.created_at),
+            "frames_ready": self.width > 0,
+            "width": self.width,
+            "height": self.height,
+            "has_audio": self.has_audio,
+            "video": self.video,
+            "position": position,
+            "generation": self.generation,
+            "delivered_frames": self.delivered,
+            "rendered_frames": self.rendered,
+            "bags": self.bags,
+            "speed": self.speed(),
+            "complete": self.status == "complete",
         }
 
 
@@ -2218,6 +2370,368 @@ def generate_hls_session(session: PlaybackSession) -> None:
         lock.release()
 
 
+FRAME_SESSIONS: dict[str, FrameSession] = {}
+
+
+def _frame_session(session_id: str, *, touch: bool = True) -> FrameSession:
+    with SESSIONS_LOCK:
+        value = FRAME_SESSIONS.get(session_id)
+        if value is None:
+            raise KeyError(f"Unknown stream: {session_id}")
+        if touch:
+            value.last_access = time.time()
+        return value
+
+
+def _drain(client: TVT9008Client, seconds: float, stop: threading.Event) -> None:
+    """The camera drops the socket when a command arrives before its post-login status frames."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline and not stop.is_set():
+        try:
+            client.read_frame()
+        except TimeoutError:
+            pass
+
+
+def _range_body(start: dt.datetime, stop: dt.datetime) -> bytes:
+    # Camera timestamps are local time; the bridge runs in the camera's timezone.
+    return TVT9008Client._playback_body(
+        int(time.mktime(start.timetuple())), int(time.mktime(stop.timetuple()))
+    )
+
+
+def _end_of_day(start: dt.datetime) -> dt.datetime:
+    return start.replace(hour=23, minute=59, second=59)
+
+
+def _release_bag(session: FrameSession) -> None:
+    with session.ready:
+        if session.client is None or session.pending_request_id is not None:
+            return
+        if not should_release_bag(
+            session.bag_pending, session.delivered, session.rendered, session.reader_attached()
+        ):
+            return
+        session.bag_pending = False
+        session.bags += 1
+        try:
+            session.client.send(KIND_PLAYBACK_CONTINUE, session.request_id)
+        except OSError:
+            pass
+
+
+def _begin_seek(session: FrameSession) -> None:
+    target, session.seek_to = session.seek_to, None
+    if target is None or session.client is None:
+        return
+    session.pending_request_id = session.request_id + 1
+    session.phase = "Seeking"
+    session.client.send(
+        KIND_PLAYBACK_START, session.pending_request_id, _range_body(target, _end_of_day(target))
+    )
+
+
+def _switch_stream(session: FrameSession, transcoder: Transcoder | None) -> None:
+    with session.ready:
+        session.request_id = session.pending_request_id or session.request_id
+        session.pending_request_id = None
+        session.queue.clear()
+        session.delivered = session.rendered = 0
+        session.bag_pending = False
+        session.generation += 1
+        session.media_us = 0
+        session.first_us = 0
+        session.wall_start = time.monotonic()
+        session.phase = "Playing"
+        session.queue.append(
+            (
+                REC_MARK,
+                frame_record(
+                    REC_MARK, 0, 0, json.dumps({"generation": session.generation}).encode()
+                ),
+            )
+        )
+        session.ready.notify_all()
+    if transcoder is not None:
+        transcoder.restart()
+
+
+class Transcoder:
+    """Re-encode the frame stream with ffmpeg, one access unit out per frame in."""
+
+    def __init__(self, session: FrameSession) -> None:
+        self.session = session
+        self.process: subprocess.Popen[bytes] | None = None
+        self.pts: collections.deque[tuple[int, int]] = collections.deque()
+        self.thread: threading.Thread | None = None
+        self.log = (LOGS / f"stream-{session.id}.log").open("ab")
+
+    def command(self) -> list[str]:
+        pre_input, output = video_args("low", ENCODER)
+        latency = ["-tune", "zerolatency"] if ENCODER == "software" else ["-async_depth", "1"]
+        return [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "warning",
+            *pre_input,
+            "-fflags",
+            "+genpts",
+            "-f",
+            "h264",
+            "-r",
+            "25",
+            "-i",
+            "pipe:0",
+            "-an",
+            *output,
+            "-g",
+            "50",
+            "-bf",
+            "0",
+            *latency,
+            "-bsf:v",
+            "h264_metadata=aud=insert",
+            "-f",
+            "h264",
+            "pipe:1",
+        ]
+
+    def start(self) -> None:
+        self.pts.clear()
+        self.process = subprocess.Popen(
+            self.command(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log
+        )
+        self.thread = threading.Thread(
+            target=self._read,
+            args=(self.process,),
+            name=f"stream-{self.session.id}-encode",
+            daemon=True,
+        )
+        self.thread.start()
+
+    def restart(self) -> None:
+        self.stop()
+        self.start()
+
+    def feed(self, payload: bytes, pts_us: int, keyframe: bool) -> None:
+        process = self.process
+        if process is None or process.stdin is None:
+            return
+        self.pts.append((pts_us, int(keyframe)))
+        try:
+            process.stdin.write(payload)
+            process.stdin.flush()
+        except (BrokenPipeError, OSError):
+            self.session.error = "The encoder stopped"
+            self.session.stop_event.set()
+
+    def _read(self, process: subprocess.Popen[bytes]) -> None:
+        assert process.stdout is not None
+        buffer = bytearray()
+        while True:
+            chunk = process.stdout.read1(256 * 1024)
+            if not chunk:
+                return
+            buffer.extend(chunk)
+            for unit in split_access_units(buffer):
+                pts_us, _ = self.pts.popleft() if self.pts else (self.session.position_us, 0)
+                flags = KEYFRAME_FLAG if access_unit_is_keyframe(unit) else 0
+                if process is self.process:
+                    self.session.push(REC_VIDEO, frame_record(REC_VIDEO, flags, pts_us, unit))
+
+    def stop(self) -> None:
+        process, self.process = self.process, None
+        if process is not None:
+            try:
+                if process.stdin is not None:
+                    process.stdin.close()
+            except OSError:
+                pass
+            _terminate_process(process)
+        if self.thread is not None:
+            self.thread.join(timeout=2)
+            self.thread = None
+
+    def close(self) -> None:
+        self.stop()
+        self.log.close()
+
+
+def _pump_frames(session: FrameSession, transcoder: Transcoder | None) -> None:
+    client = session.client
+    assert client is not None
+    while not session.stop_event.is_set():
+        if session.seek_to is not None:
+            _begin_seek(session)
+        if session.idle_seconds() > STREAM_IDLE_SECONDS:
+            session.phase = "Nobody is watching"
+            return
+        try:
+            frame = client.read_frame()
+        except TimeoutError:
+            _release_bag(session)
+            continue
+        if frame is None or frame.kind != KIND_RECORDED_MEDIA:
+            continue
+        if frame.request_id != session.request_id:
+            if frame.request_id != session.pending_request_id:
+                continue
+            _switch_stream(session, transcoder)
+        body = frame.body
+        if len(body) < MEDIA_HEADER_SIZE:
+            continue
+        marker = body[3]
+        if marker == BAG_END and body[:2] == b"\x00\x00":
+            session.bag_pending = True
+            _release_bag(session)
+            continue
+        if marker == END_EVENT and body[:2] == b"\x00\x00":
+            session.status = "complete"
+            session.phase = "End of the recording"
+            return
+        media_type, payload, pts_us, keyframe = TVT9008Client._extract_media(frame)
+        if media_type == "video":
+            if not session.width:
+                session.width, session.height = struct.unpack_from("<II", body, 8)
+                session.status = "playing"
+                session.phase = "Playing"
+                session.wall_start = time.monotonic()
+                info = {
+                    "width": session.width,
+                    "height": session.height,
+                    "start": session.request["start"],
+                    "utc_offset": time.localtime().tm_gmtoff,
+                }
+                session.push(REC_INFO, frame_record(REC_INFO, 0, pts_us, json.dumps(info).encode()))
+            if not session.first_us:
+                session.first_us = pts_us
+            session.media_us = max(session.media_us, pts_us - session.first_us)
+            session.position_us = pts_us
+            if transcoder is not None:
+                transcoder.feed(payload, pts_us, keyframe)
+            else:
+                session.push(
+                    REC_VIDEO,
+                    frame_record(REC_VIDEO, KEYFRAME_FLAG if keyframe else 0, pts_us, payload),
+                )
+        elif media_type == "audio":
+            session.has_audio = True
+            session.push(REC_AUDIO, frame_record(REC_AUDIO, 0, pts_us, payload))
+
+
+def run_frame_session(session: FrameSession) -> None:
+    item = camera(session.camera_id)
+    slot = camera_session_slot(session.camera_id)
+    while not slot.acquire(timeout=0.5):
+        if session.stop_event.is_set():
+            session.status, session.phase, session.finished_at = "stopped", "Stopped", time.time()
+            session.push(REC_END, frame_record(REC_END, 0, 0))
+            return
+    transcoder: Transcoder | None = None
+    try:
+        session.started_at = time.time()
+        session.status = "running"
+        session.phase = "Opening the camera archive"
+        start = parse_local_timestamp(str(session.request["start"]))
+        stop = start + dt.timedelta(seconds=int(session.request["duration"]))
+        client = _metadata_client(item)
+        client.connect()
+        session.client = client
+        _drain(client, 1.5, session.stop_event)
+        client.send(KIND_PLAYBACK_START, session.request_id, _range_body(start, stop))
+        client.wait_for(KIND_PLAYBACK_START_RESPONSE, session.request_id, 10.0)
+        session.video = "copy" if session.request["quality"] == "original" else ENCODER
+        if session.video != "copy":
+            transcoder = Transcoder(session)
+            transcoder.start()
+        session.phase = "Waiting for the first frame"
+        session.pump_started = time.monotonic()
+        _pump_frames(session, transcoder)
+        if session.status not in ("complete",):
+            session.status = "stopped"
+            if session.phase == "Playing":
+                session.phase = "Stopped"
+    except Exception as error:
+        LOG.exception("Stream %s failed", session.id)
+        session.status = "error"
+        session.phase = "Failed"
+        session.error = _friendly_capture_error(str(error))
+    finally:
+        if transcoder is not None:
+            transcoder.close()
+        if session.client is not None:
+            session.client.close()
+        session.finished_at = time.time()
+        session.push(
+            REC_END,
+            frame_record(
+                REC_END,
+                0,
+                session.position_us,
+                json.dumps({"error": session.error}).encode() if session.error else b"",
+            ),
+        )
+        slot.release()
+        LOG.info(
+            "Stream %s %s after %d bags, %.1f media seconds, speed %s",
+            session.id,
+            session.status,
+            session.bags,
+            session.media_us / 1_000_000,
+            session.speed(),
+        )
+
+
+def create_frame_session(camera_id: str, request: dict[str, Any]) -> FrameSession:
+    camera(camera_id)
+    start = parse_local_timestamp(str(request.get("start", "")))
+    remaining = int((_end_of_day(start) - start).total_seconds())
+    duration = int(request.get("duration", remaining))
+    if not 5 <= duration <= max(5, remaining):
+        raise ValueError("Duration must be within the day")
+    quality = str(request.get("quality", "original"))
+    if quality not in QUALITIES:
+        raise ValueError("Quality must be original or low")
+    value = FrameSession(
+        id=uuid.uuid4().hex,
+        camera_id=camera_id,
+        request={
+            "start": start.isoformat(timespec="seconds"),
+            "duration": duration,
+            "quality": quality,
+        },
+    )
+    with SESSIONS_LOCK:
+        for other in FRAME_SESSIONS.values():
+            if other.camera_id == camera_id and not other.finished():
+                other.stop_event.set()
+        FRAME_SESSIONS[value.id] = value
+    PLAYBACK_EXECUTOR.submit(run_frame_session, value)
+    return value
+
+
+def control_frame_session(session_id: str, request: dict[str, Any]) -> FrameSession:
+    value = _frame_session(session_id)
+    if "rendered" in request:
+        if int(request.get("generation", value.generation)) == value.generation:
+            value.rendered = max(value.rendered, int(request["rendered"]))
+            _release_bag(value)
+    if "seek" in request:
+        target = str(request["seek"])
+        if re.fullmatch(r"\d{2}:\d{2}:\d{2}", target):
+            target = f"{value.request['start'][:10]}T{target}"
+        value.seek_to = parse_local_timestamp(target)
+    return value
+
+
+def stop_frame_session(session_id: str) -> FrameSession:
+    value = _frame_session(session_id)
+    value.stop_event.set()
+    return value
+
+
 def create_playback_session(camera_id: str, request: dict[str, Any]) -> PlaybackSession:
     camera(camera_id)
     start = parse_local_timestamp(str(request.get("start", "")))
@@ -2268,6 +2782,9 @@ def clean_sessions() -> None:
                 remove.append((session_id, value))
         for session_id, _ in remove:
             SESSIONS.pop(session_id, None)
+        for session_id, stream in list(FRAME_SESSIONS.items()):
+            if stream.finished_at and now - stream.finished_at > STREAM_RETAIN_SECONDS:
+                FRAME_SESSIONS.pop(session_id, None)
     for _, value in remove:
         shutil.rmtree(value.directory, ignore_errors=True)
 
@@ -2435,6 +2952,38 @@ class Handler(BaseHTTPRequestHandler):
             head_only=head_only,
         )
 
+    def _serve_frames(self, session_id: str) -> None:
+        session = _frame_session(session_id)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Accel-Buffering", "no")
+        self._headers()
+        self.end_headers()
+        with session.ready:
+            session.readers += 1
+        try:
+            while True:
+                with session.ready:
+                    while not session.queue and not session.finished():
+                        session.ready.wait(1.0)
+                    if not session.queue:
+                        return
+                    kind, record = session.queue.popleft()
+                self.wfile.write(record)
+                self.wfile.flush()
+                if kind == REC_VIDEO:
+                    session.delivered += 1
+                    _release_bag(session)
+                elif kind == REC_END:
+                    return
+        except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
+            LOG.info("Stream %s viewer disconnected", session_id)
+        finally:
+            with session.ready:
+                session.readers -= 1
+                session.reader_left = time.monotonic()
+
     def _serve_hls_asset(self, session_id: str, asset: str, *, head_only: bool = False) -> None:
         value = _session(session_id)
         if not re.fullmatch(r"(?:index\.m3u8|init\.mp4|segment-\d{5}\.m4s)", asset):
@@ -2473,6 +3022,7 @@ class Handler(BaseHTTPRequestHandler):
                     "active_playback_sessions": sum(
                         x.status in ("queued", "running", "playing") for x in SESSIONS.values()
                     ),
+                    "active_streams": sum(not x.finished() for x in FRAME_SESSIONS.values()),
                 },
                 head_only=head_only,
             )
@@ -2517,6 +3067,17 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 force = query.get("refresh", ["0"])[0].lower() in ("1", "true", "yes")
                 self._json(get_status(camera_id, force=force), head_only=head_only)
+                return
+            match = re.fullmatch(r"/api/streams/([a-f0-9]{32})/frames", path)
+            if match:
+                if head_only:
+                    self._json({"ok": True}, head_only=True)
+                    return
+                self._serve_frames(match.group(1))
+                return
+            match = re.fullmatch(r"/api/streams/([a-f0-9]{32})", path)
+            if match:
+                self._json(_frame_session(match.group(1)).public(), head_only=head_only)
                 return
             match = re.fullmatch(r"/api/jobs/([a-f0-9]{32})(?:/file)?", path)
             if match:
@@ -2567,6 +3128,14 @@ class Handler(BaseHTTPRequestHandler):
                 playback = create_playback_session(match.group(1), self._read_json())
                 self._json(playback.public(), 202)
                 return
+            match = re.fullmatch(r"/api/cameras/([^/]+)/streams", path)
+            if match:
+                self._json(create_frame_session(match.group(1), self._read_json()).public(), 202)
+                return
+            match = re.fullmatch(r"/api/streams/([a-f0-9]{32})", path)
+            if match:
+                self._json(control_frame_session(match.group(1), self._read_json()).public())
+                return
             match = re.fullmatch(r"/api/cameras/([^/]+)/jobs", path)
             if match:
                 job = create_job(match.group(1), self._read_json())
@@ -2607,6 +3176,13 @@ class Handler(BaseHTTPRequestHandler):
             self._error(401, "Missing or invalid access token")
             return
         path = parsed.path.rstrip("/")
+        stream_match = re.fullmatch(r"/api/streams/([a-f0-9]{32})", path)
+        if stream_match:
+            try:
+                self._json(stop_frame_session(stream_match.group(1)).public())
+            except KeyError as error:
+                self._error(404, str(error))
+            return
         session_match = re.fullmatch(r"/api/sessions/([a-f0-9]{32})", path)
         if session_match:
             try:
@@ -2649,6 +3225,8 @@ if __name__ == "__main__":
     finally:
         for value in list(SESSIONS.values()):
             value.stop_event.set()
+        for stream in list(FRAME_SESSIONS.values()):
+            stream.stop_event.set()
         EXECUTOR.shutdown(wait=False, cancel_futures=True)
         PLAYBACK_EXECUTOR.shutdown(wait=False, cancel_futures=True)
         server.server_close()

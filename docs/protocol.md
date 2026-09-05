@@ -12,6 +12,7 @@ The goal was to play and export what the camera had already recorded to its SD c
 | Vendor Linux SDK | Is audio on the card? | Yes. The SDK's playback callback delivers H.264, mono 8 kHz G.711 A-law, timestamps, and searchable ranges. The SDK was not kept because it needs a platform-specific binary. |
 | Packet capture of NVMS | How does the vendor software get both? | One TCP connection to port 9008 carries login, calendar and range queries, video, audio, heartbeats, and playback continuation. |
 | Python canaries | Which messages are actually required? | One operation at a time was replayed until login, search, playback, fragment reassembly, and the continuation cadence were reproduced. |
+| NVMS Lite and the phone apps, decompiled | How does TVT pace playback? | The camera sends 100-frame bags on request; every TVT player shows a frame when its timestamp is due or immediately if late, and holds the last frame otherwise. Confirmed against the camera with a probe. |
 
 The result is the pure-Python client in `host/app/native9008.py`. It only reads: it never changes camera settings or deletes recordings.
 
@@ -226,22 +227,23 @@ summary.json final capture statistics
 
 The next conversion stage is described in [Media pipeline](media-pipeline.md).
 
-## Playback continuation
+## Playback flow control
 
-The camera may pause archive delivery unless the client sends continuation messages.
+The camera delivers a recording in bags of 100 video frames with their audio. After a bag it sends a media object whose header byte 3 is `2` and waits. Sending `0x0000090A` (empty body, the request ID of the playback) releases the next bag. Nothing else is required: without the request the camera stays silent, and with one request per bag-end marker it streams for as long as the recording lasts. A header byte 3 of `3` marks the end of the data.
 
-The continuation command used by the bridge is:
+The bridge asks for the next bag only while the viewer has fewer than 150 undisplayed frames, so a paused player stops the camera within one bag and a resumed one restarts it with the same message. The same mechanism throttles the camera when the browser is slow.
 
-```text
-0x0000090A
-```
+Other commands seen in TVT's own software, and what the TD-C12 did with them:
 
-Controlled tests on the TVT TD-C12 found that sending it every 25 received video frames provided continuous delivery. The implementation therefore:
+| Command | Body | Result on the TD-C12 |
+|---|---|---|
+| `0x0000090A` | none | next bag (NVMS "send data bag") |
+| `0x00000907` | none | ignored while a bag is in flight (NVMS "suspend event stream") |
+| `0x0000090D` | 4-byte frame index | ignored; the phone app's newer flow control |
+| `0x00000909` | none | replies `0x01000908` and restarts from the oldest recording |
+| `0x00000906`, `0x00000908`, `0x0000090C`, `0x0000090E` | none | ignored |
 
-1. sends `0x0000090B` once to start playback;
-2. sends `0x0000090A` after every 25 received video frames;
-3. does not send `0x00000907` during ordinary playback or export;
-4. ends playback by closing the TCP session.
+A second `0x0000090B` with a new request ID on the same connection starts a second stream after about ten seconds while the first keeps going; the first dies once its bags are no longer requested. The bridge seeks that way instead of reconnecting. Two connections can play at once but share the camera's output and were reset after a minute, so the bridge keeps one session per camera.
 
-The cadence may need device-specific adjustment if other firmware behaves differently.
+The camera's output rate is the camera's own limit. On the test unit, which is on Wi-Fi, it was about 240 KB/s for playback and live video combined, roughly 0.6x real time for its 1080p recording, whatever the request pattern.
 

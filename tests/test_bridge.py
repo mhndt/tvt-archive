@@ -161,16 +161,48 @@ class BridgeTests(unittest.TestCase):
             bridge.camera_session_slot("front_door"), bridge.metadata_lock("front_door")
         )
 
-    def test_two_native_sessions_are_allowed_but_third_waits(self) -> None:
+    def test_one_camera_session_at_a_time_by_default(self) -> None:
         slot = bridge.camera_session_slot("front_door")
-        self.assertEqual(bridge.NATIVE_SESSION_LIMIT, 2)
-        self.assertTrue(slot.acquire(blocking=False))
+        self.assertEqual(bridge.NATIVE_SESSION_LIMIT, 1)
         self.assertTrue(slot.acquire(blocking=False))
         try:
             self.assertFalse(slot.acquire(blocking=False))
         finally:
             slot.release()
-            slot.release()
+
+    def test_frame_record_round_trip(self) -> None:
+        record = bridge.frame_record(bridge.REC_VIDEO, bridge.KEYFRAME_FLAG, 1234567, b"abc")
+        magic, kind, flags, pts, length = bridge.FRAME_HEADER.unpack_from(record)
+        self.assertEqual((magic, kind, flags, pts, length), (b"TF", 1, 1, 1234567, 3))
+        self.assertEqual(record[bridge.FRAME_HEADER.size :], b"abc")
+
+    def test_next_bag_waits_for_the_viewer(self) -> None:
+        self.assertTrue(bridge.should_release_bag(True, 100, 0, True))
+        self.assertFalse(bridge.should_release_bag(True, 250, 0, True))
+        self.assertTrue(bridge.should_release_bag(True, 250, 120, True))
+        self.assertFalse(bridge.should_release_bag(True, 100, 0, False))
+        self.assertFalse(bridge.should_release_bag(False, 0, 0, True))
+
+    def test_access_units_split_on_aud(self) -> None:
+        aud = b"\x00\x00\x00\x01\x09\xf0"
+        idr = b"\x00\x00\x00\x01\x65\x88"
+        p_frame = b"\x00\x00\x01\x41\x9a"
+        stream = bytearray(aud + idr + aud + p_frame + aud + p_frame[:3])
+        units = bridge.split_access_units(stream)
+        self.assertEqual(units, [aud + idr, aud + p_frame])
+        self.assertEqual(bytes(stream), aud + p_frame[:3])
+        self.assertTrue(bridge.access_unit_is_keyframe(units[0]))
+        self.assertFalse(bridge.access_unit_is_keyframe(units[1]))
+
+    def test_stream_request_is_validated(self) -> None:
+        with self.assertRaises(ValueError):
+            bridge.create_frame_session("front_door", {"start": "not a time"})
+        with self.assertRaises(ValueError):
+            bridge.create_frame_session(
+                "front_door", {"start": "2026-09-05T02:00:00", "quality": "4k"}
+            )
+        with self.assertRaises(KeyError):
+            bridge.create_frame_session("nope", {"start": "2026-09-05T02:00:00"})
 
     @unittest.skipIf(os.name == "nt", "POSIX file modes")
     def test_completed_export_cross_device_fallback_is_atomic(self) -> None:

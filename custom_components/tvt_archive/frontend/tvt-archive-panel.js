@@ -520,6 +520,354 @@ class TVTFmp4Player {
   }
 }
 
+const FRAME_PLAYER_SUPPORTED = typeof VideoDecoder === "function" && typeof EncodedVideoChunk === "function";
+const REC_INFO = 0, REC_VIDEO = 1, REC_AUDIO = 2, REC_MARK = 3, REC_END = 4;
+const FRAME_QUEUE_MAX = 60, FRAME_QUEUE_RESUME = 40, GAP_COLLAPSE_US = 3e6;
+const ICONS = {
+  play: "M8,5.14V19.14L19,12.14L8,5.14Z",
+  pause: "M14,19H18V5H14M6,19H10V5H6V19Z",
+  sound: "M14,3.23V5.29C16.89,6.15 19,8.83 19,12C19,15.17 16.89,17.84 14,18.7V20.77C18,19.86 21,16.28 21,12C21,7.72 18,4.14 14,3.23M16.5,12C16.5,10.23 15.5,8.71 14,7.97V16C15.5,15.29 16.5,13.76 16.5,12M3,9V15H7L12,20V4L7,9H3Z",
+  muted: "M12,4L9.91,6.09L12,8.18M4.27,3L3,4.27L7.73,9H3V15H7L12,20V13.27L16.25,17.53C15.58,18.04 14.83,18.46 14,18.7V20.77C15.38,20.45 16.63,19.82 17.68,18.96L19.73,21L21,19.73L12,10.73M19,12C19,12.94 18.8,13.82 18.46,14.64L19.97,16.15C20.62,14.91 21,13.5 21,12C21,7.72 18,4.14 14,3.23V5.29C16.89,6.15 19,8.83 19,12M16.5,12C16.5,10.23 15.5,8.71 14,7.97V10.18L16.45,12.63C16.5,12.43 16.5,12.21 16.5,12Z",
+  full: "M5,5H10V7H7V10H5V5M14,5H19V10H17V7H14V5M17,14H19V19H14V17H17V14M10,17V19H5V14H7V17H10Z",
+  unfull: "M14,14H19V16H16V19H14V14M5,14H10V19H8V16H5V14M8,5H10V10H5V8H8V5M19,8V10H14V5H16V8H19Z",
+};
+const icon = (name) => `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${ICONS[name]}"/></svg>`;
+const ALAW = new Float32Array(256).map((_, i) => {
+  const a = i ^ 0x55;
+  let t = (a & 0x0f) << 4;
+  const seg = (a & 0x70) >> 4;
+  if (seg === 0) t += 8; else if (seg === 1) t += 0x108; else t = (t + 0x108) << (seg - 1);
+  return ((a & 0x80) ? t : -t) / 32768;
+});
+
+const nalUnits = (data) => {
+  const units = [];
+  let start = -1;
+  for (let i = 0; i + 2 < data.length; i++) {
+    if (data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 1) {
+      const end = i > 0 && data[i - 1] === 0 ? i - 1 : i;
+      if (start >= 0) units.push(data.subarray(start, end));
+      start = i + 3;
+      i += 2;
+    }
+  }
+  if (start >= 0 && start < data.length) units.push(data.subarray(start));
+  return units;
+};
+
+// Frames come over one long HTTP response as "TF" records. Video is decoded with WebCodecs
+// and painted on a canvas by the rule every TVT player uses: a frame is shown when the
+// wall clock has advanced as far as its timestamp, or at once if it arrived late. Nothing
+// changes speed and nothing is dropped; when the camera falls behind the picture simply
+// advances at the camera's pace and holds the last frame while waiting.
+class TVTFramePlayer {
+  constructor({onState, onError, onEnded, onProgress}) {
+    this.onState = onState; this.onError = onError; this.onEnded = onEnded; this.onProgress = onProgress;
+    this.element = document.createElement("div");
+    this.element.className = "frame-player";
+    this.element.innerHTML = `<canvas></canvas><div class="fp-wait"><span class="player-spinner"></span><span class="fp-wait-text">Opening recording</span></div>
+      <div class="fp-bar"><button data-act="toggle" aria-label="Pause">${icon("pause")}</button><span class="fp-time">--:--:--</span><span class="fp-speed"></span><span class="fp-space"></span><button data-act="mute" aria-label="Mute">${icon("sound")}</button><button data-act="full" aria-label="Full screen">${icon("full")}</button></div>`;
+    this.canvas = this.element.querySelector("canvas");
+    this.ctx = this.canvas.getContext("2d");
+    this.frames = []; this.audioQueue = []; this.arrivals = [];
+    this.decoder = null; this.sps = null; this.pps = null; this.configured = false; this.needKey = true;
+    this.paused = false; this.destroyed = false; this.ended = false; this.started = false;
+    this.lastPts = null; this.lastWall = 0; this.rendered = 0; this.generation = 0; this.speed = null;
+    this.audio = null; this.gain = null; this.muted = false; this.hasAudio = false; this.utcOffset = null;
+    this.abort = null; this.roomResolve = null; this.barTimer = null; this.timer = 0;
+    this.element.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-act]");
+      if (button) { this._action(button.dataset.act); return; }
+      this._showBar(this.element.classList.contains("show-bar") ? 0 : 2500);
+    });
+    this.element.addEventListener("pointermove", () => this._showBar(2500));
+    this.element.addEventListener("dblclick", (event) => { if (!event.target.closest("button")) this._action("full"); });
+    this._onFullscreen = () => this._syncButtons();
+    document.addEventListener("fullscreenchange", this._onFullscreen);
+  }
+
+  prime() {
+    // Called inside the Play tap so the audio context is allowed to start.
+    if (this.audio || typeof AudioContext !== "function") return;
+    try {
+      this.audio = new AudioContext();
+      this.gain = this.audio.createGain();
+      this.gain.connect(this.audio.destination);
+      this.audio.resume().catch(() => {});
+    } catch (_) { this.audio = null; }
+  }
+
+  async start(url) {
+    this.prime();
+    this.started = true;
+    this._state("opening");
+    this.abort = new AbortController();
+    this.timer = setTimeout(() => this._tick(), 0);
+    try {
+      const response = await fetch(url, {signal: this.abort.signal, cache: "no-store", credentials: "same-origin"});
+      if (!response.ok || !response.body) throw new Error(`Stream request failed (${response.status})`);
+      await this._read(response.body.getReader());
+    } catch (error) {
+      if (this.destroyed || this.abort?.signal.aborted) return;
+      this.onError?.(error?.message || "The recording stream ended unexpectedly");
+    }
+  }
+
+  async _read(reader) {
+    let buffer = new Uint8Array(0);
+    while (!this.destroyed) {
+      const {value, done} = await reader.read();
+      if (done) { if (!this.ended) this._end(null); return; }
+      const joined = new Uint8Array(buffer.length + value.length);
+      joined.set(buffer); joined.set(value, buffer.length);
+      buffer = joined;
+      let offset = 0;
+      while (buffer.length - offset >= 16) {
+        const view = new DataView(buffer.buffer, buffer.byteOffset + offset, 16);
+        if (view.getUint8(0) !== 0x54 || view.getUint8(1) !== 0x46) throw new Error("Corrupt frame stream");
+        const kind = view.getUint8(2), flags = view.getUint8(3);
+        const pts = Number(view.getBigUint64(4, true)), length = view.getUint32(12, true);
+        if (buffer.length - offset - 16 < length) break;
+        this._record(kind, flags, pts, buffer.subarray(offset + 16, offset + 16 + length));
+        offset += 16 + length;
+      }
+      buffer = buffer.subarray(offset);
+      if (this._queued() > FRAME_QUEUE_MAX) await new Promise((resolve) => { this.roomResolve = resolve; });
+    }
+  }
+
+  _queued() { return this.frames.length + (this.decoder?.decodeQueueSize || 0); }
+
+  _record(kind, flags, pts, payload) {
+    if (kind === REC_INFO) { try { this.utcOffset = JSON.parse(new TextDecoder().decode(payload)).utc_offset ?? null; } catch (_) {} return; }
+    if (kind === REC_VIDEO) { this._video(pts, Boolean(flags & 1), payload); return; }
+    if (kind === REC_AUDIO) { this.hasAudio = true; this.audioQueue.push({pts, data: payload.slice()}); this._syncButtons(); return; }
+    if (kind === REC_MARK) { this._flush(); try { this.generation = JSON.parse(new TextDecoder().decode(payload)).generation || 0; } catch (_) {} this._state("seeking"); return; }
+    if (kind === REC_END) { let error = null; try { error = JSON.parse(new TextDecoder().decode(payload)).error || null; } catch (_) {} this._end(error); }
+  }
+
+  _video(pts, keyframe, data) {
+    const now = performance.now();
+    this.arrivals.push([now, pts]);
+    while (this.arrivals.length && now - this.arrivals[0][0] > 6000) this.arrivals.shift();
+    const units = nalUnits(data);
+    const slices = [];
+    for (const unit of units) {
+      const type = unit[0] & 0x1f;
+      if (type === 7) this.sps = unit;
+      else if (type === 8) this.pps = unit;
+      else if (type !== 9) slices.push(unit);
+    }
+    if (keyframe && this.sps && this.pps) this._configure();
+    if (!this.configured || !slices.length || (this.needKey && !keyframe)) return;
+    this.needKey = false;
+    const size = slices.reduce((sum, unit) => sum + 4 + unit.length, 0);
+    const avcc = new Uint8Array(size);
+    let offset = 0;
+    for (const unit of slices) {
+      new DataView(avcc.buffer).setUint32(offset, unit.length);
+      avcc.set(unit, offset + 4);
+      offset += 4 + unit.length;
+    }
+    try {
+      this.decoder.decode(new EncodedVideoChunk({type: keyframe ? "key" : "delta", timestamp: pts, data: avcc}));
+    } catch (error) {
+      this.needKey = true;
+    }
+  }
+
+  _configure() {
+    const sps = this.sps, pps = this.pps;
+    const codec = `avc1.${[sps[1], sps[2], sps[3]].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
+    const key = `${codec}:${sps.length}:${pps.length}`;
+    if (this.configured && this.configKey === key) return;
+    const description = new Uint8Array(11 + sps.length + pps.length);
+    description.set([1, sps[1], sps[2], sps[3], 0xff, 0xe1, sps.length >> 8, sps.length & 0xff], 0);
+    description.set(sps, 8);
+    description.set([1, pps.length >> 8, pps.length & 0xff], 8 + sps.length);
+    description.set(pps, 11 + sps.length);
+    if (!this.decoder) {
+      this.decoder = new VideoDecoder({
+        output: (frame) => this._output(frame),
+        error: (error) => { if (!this.destroyed) this.onError?.(error?.message || "Video decoding failed"); },
+      });
+    }
+    try {
+      this.decoder.configure({codec, description, optimizeForLatency: true});
+      this.configured = true; this.configKey = key; this.needKey = true;
+    } catch (error) {
+      this.onError?.(`This browser cannot decode the camera's video (${codec})`);
+    }
+  }
+
+  _output(frame) {
+    if (this.destroyed) { frame.close(); return; }
+    this.frames.push(frame);
+  }
+
+  _flush() {
+    for (const frame of this.frames) frame.close();
+    this.frames = []; this.audioQueue = []; this.arrivals = [];
+    this.lastPts = null; this.rendered = 0; this.speed = null; this.needKey = true;
+    try { if (this.decoder && this.decoder.state === "configured") this.decoder.reset(); } catch (_) {}
+    if (this.decoder && this.decoder.state !== "closed" && this.sps && this.pps) { this.configured = false; this.configKey = null; this._configure(); }
+    this._room();
+  }
+
+  _room() {
+    if (this.roomResolve && this._queued() < FRAME_QUEUE_RESUME) { const resolve = this.roomResolve; this.roomResolve = null; resolve(); }
+  }
+
+  _tick() {
+    if (this.destroyed) return;
+    // A timer, not requestAnimationFrame: the clock must keep running in a background tab.
+    this.timer = setTimeout(() => this._tick(), 8);
+    const now = performance.now();
+    if (!this.paused && this.frames.length) {
+      const frame = this.frames[0];
+      const gap = this.lastPts === null ? 0 : frame.timestamp - this.lastPts;
+      const due = this.lastPts === null || gap < 0 || gap > GAP_COLLAPSE_US ? now : this.lastWall + gap / 1000;
+      if (now >= due) {
+        this.frames.shift();
+        this._paint(frame);
+        this.lastWall = now - due < 30 ? due : now;
+        this.lastPts = frame.timestamp;
+        frame.close();
+        this.rendered += 1;
+        if (this.rendered === 1) { this._state("playing"); this._showBar(2500); }
+        this.onProgress?.(this);
+      }
+    }
+    this._scheduleAudio(now);
+    this._room();
+    if (this.arrivals.length > 5) {
+      const [w0, p0] = this.arrivals[0], [w1, p1] = this.arrivals[this.arrivals.length - 1];
+      if (w1 - w0 > 4000) { this.speed = (p1 - p0) / 1000 / (w1 - w0); this._syncSpeed(); }
+    }
+  }
+
+  _paint(frame) {
+    const width = frame.displayWidth, height = frame.displayHeight;
+    if (this.canvas.width !== width || this.canvas.height !== height) { this.canvas.width = width; this.canvas.height = height; }
+    this.ctx.drawImage(frame, 0, 0, width, height);
+    const time = this.element.querySelector(".fp-time");
+    if (time) time.textContent = this.clock ?? "--:--:--";
+  }
+
+  _scheduleAudio(now) {
+    if (!this.audio || this.paused || this.lastPts === null) return;
+    while (this.audioQueue.length && this.audioQueue[0].pts <= this.lastPts + 600000) {
+      const {pts, data} = this.audioQueue.shift();
+      if (this.muted) continue;
+      const wallMs = this.lastWall + (pts - this.lastPts) / 1000;
+      let when = this.audio.currentTime + (wallMs - now) / 1000;
+      if (when < this.audio.currentTime - 0.5) continue;
+      if (when < this.audio.currentTime + 0.005) when = this.audio.currentTime + 0.005;
+      const buffer = this.audio.createBuffer(1, data.length, 8000);
+      const samples = buffer.getChannelData(0);
+      for (let i = 0; i < data.length; i++) samples[i] = ALAW[data[i]];
+      const source = this.audio.createBufferSource();
+      source.buffer = buffer; source.connect(this.gain); source.start(when);
+    }
+  }
+
+  // Timestamps are epoch microseconds; the camera's own clock is epoch plus the bridge's UTC offset.
+  get secondsOfDay() {
+    if (this.lastPts === null) return null;
+    const offset = this.utcOffset ?? -new Date().getTimezoneOffset() * 60;
+    return Math.floor((this.lastPts / 1e6 + offset) % 86400 + 86400) % 86400;
+  }
+  get clock() {
+    const s = this.secondsOfDay;
+    if (s === null) return null;
+    return [Math.floor(s / 3600), Math.floor((s % 3600) / 60), s % 60].map((n) => String(n).padStart(2, "0")).join(":");
+  }
+
+  _action(name) {
+    if (name === "toggle") this.paused ? this.resume() : this.pause();
+    else if (name === "mute") { this.muted = !this.muted; if (this.gain) this.gain.gain.value = this.muted ? 0 : 1; this._syncButtons(); }
+    else if (name === "full") this.toggleFullscreen();
+    this._showBar(2500);
+  }
+
+  pause() { if (this.paused || this.ended) return; this.paused = true; this.element.classList.add("paused"); this._syncButtons(); this._state("paused"); }
+  resume() {
+    if (!this.paused) return;
+    this.paused = false; this.element.classList.remove("paused");
+    this.lastWall = performance.now(); this.audio?.resume().catch(() => {});
+    this._syncButtons(); this._state("playing");
+  }
+
+  toggleFullscreen() {
+    if (document.fullscreenElement) { document.exitFullscreen?.(); return; }
+    if (this.element.requestFullscreen) { this.element.requestFullscreen().catch(() => this._iosFullscreen()); return; }
+    this._iosFullscreen();
+  }
+
+  _iosFullscreen() {
+    // iPhone only lets <video> go full screen; mirror the canvas into one.
+    try {
+      if (!this.mirror) {
+        this.mirror = document.createElement("video");
+        this.mirror.playsInline = true; this.mirror.muted = true; this.mirror.setAttribute("playsinline", "");
+        this.mirror.style.cssText = "position:absolute;width:1px;height:1px;opacity:0;pointer-events:none";
+        this.mirror.srcObject = this.canvas.captureStream(30);
+        this.element.append(this.mirror);
+      }
+      this.mirror.play().catch(() => {});
+      this.mirror.webkitEnterFullscreen?.();
+    } catch (_) {}
+  }
+
+  _showBar(ms) {
+    clearTimeout(this.barTimer);
+    if (!ms) { this.element.classList.remove("show-bar"); return; }
+    this.element.classList.add("show-bar");
+    this.barTimer = setTimeout(() => { if (!this.paused) this.element.classList.remove("show-bar"); }, ms);
+  }
+
+  _syncButtons() {
+    const set = (act, name, label) => { const b = this.element.querySelector(`button[data-act="${act}"]`); if (b) { b.innerHTML = icon(name); b.setAttribute("aria-label", label); } };
+    set("toggle", this.paused ? "play" : "pause", this.paused ? "Play" : "Pause");
+    set("mute", this.muted ? "muted" : "sound", this.muted ? "Unmute" : "Mute");
+    set("full", document.fullscreenElement ? "unfull" : "full", document.fullscreenElement ? "Exit full screen" : "Full screen");
+    const mute = this.element.querySelector('button[data-act="mute"]'); if (mute) mute.hidden = !this.hasAudio;
+  }
+
+  _syncSpeed() {
+    const badge = this.element.querySelector(".fp-speed");
+    if (badge) badge.textContent = this.speed !== null && this.speed < 0.9 ? `${this.speed.toFixed(1)}×` : "";
+  }
+
+  _state(name) {
+    const wait = this.element.querySelector(".fp-wait");
+    if (wait) {
+      wait.classList.toggle("visible", name === "opening" || name === "seeking");
+      const text = wait.querySelector(".fp-wait-text"); if (text) text.textContent = name === "seeking" ? "Seeking" : "Opening recording";
+    }
+    this.onState?.(name);
+  }
+
+  _end(error) {
+    this.ended = true;
+    this._state("ended");
+    this.onEnded?.(error);
+  }
+
+  destroy() {
+    this.destroyed = true;
+    clearTimeout(this.timer);
+    clearTimeout(this.barTimer);
+    document.removeEventListener("fullscreenchange", this._onFullscreen);
+    try { this.abort?.abort(); } catch (_) {}
+    for (const frame of this.frames) frame.close();
+    this.frames = [];
+    try { this.decoder?.close(); } catch (_) {}
+    try { this.audio?.close(); } catch (_) {}
+    this.element.remove();
+  }
+}
+
 class TVTArchivePanel extends HTMLElement {
   constructor() {
     super();
@@ -549,6 +897,12 @@ class TVTArchivePanel extends HTMLElement {
     this._message = "";
     this._error = "";
     this._playbackSession = null;
+    this._stream = null;
+    this._framePlayer = null;
+    this._streamPollTimer = null;
+    this._progressTimer = null;
+    this._reportedRendered = -1;
+    this._slowHint = false;
     this._recordingPlayer = null;
     this._recordingController = null;
     this._pollTimer = null;
@@ -562,6 +916,7 @@ class TVTArchivePanel extends HTMLElement {
 
   set hass(value) {
     this._hass = value;
+    this.style.colorScheme = value?.themes?.darkMode ? "dark" : "light";
     this._syncMenuButton();
     if (!this._loaded && value) {
       this._loaded = true;
@@ -572,10 +927,11 @@ class TVTArchivePanel extends HTMLElement {
   set narrow(value) {
     const changed = this._narrow !== Boolean(value);
     this._narrow = Boolean(value);
-    if (changed && !this._playbackSession?.playlist_url) this._render();
+    if (changed && !this._isPlaying()) this._render();
     else this._syncMenuButton();
   }
   set panel(value) { this._panel = value; }
+  _isPlaying() { return Boolean(this._playbackSession?.playlist_url || this._stream); }
   set route(value) { this._route = value; }
 
   connectedCallback() {
@@ -591,6 +947,7 @@ class TVTArchivePanel extends HTMLElement {
     clearTimeout(this._sessionPollTimer);
     clearTimeout(this._playbackRetryTimer);
     clearTimeout(this._statusTimer);
+    clearTimeout(this._streamPollTimer);
     this._stopPlaybackSession(false);
   }
 
@@ -679,7 +1036,7 @@ class TVTArchivePanel extends HTMLElement {
     const showLoading = !this._busy;
     if (showLoading) {
       this._message = "Loading timeline…";
-      if (!this._playbackSession?.playlist_url) this._render(); else this._updateStatusLine();
+      if (!this._isPlaying()) this._render(); else this._updateStatusLine();
     }
     try {
       this._timeline = await this._api("GET", `tvt_archive/${this._entryId}/cameras/${this._cameraId}/timeline?date=${encodeURIComponent(this._date)}${refresh ? "&refresh=1" : ""}`);
@@ -688,7 +1045,7 @@ class TVTArchivePanel extends HTMLElement {
       this._error = errorText(error);
     }
     if (showLoading) this._message = "";
-    if (!this._playbackSession?.playlist_url) this._render(); else this._updateStatusLine();
+    if (!this._isPlaying()) this._render(); else this._updateStatusLine();
   }
 
   async _loadStatus(refresh = false) {
@@ -699,7 +1056,7 @@ class TVTArchivePanel extends HTMLElement {
     } catch (error) {
       this._error = errorText(error);
     }
-    if (this._playbackSession?.playlist_url) this._renderStatusOnly(); else this._render();
+    if (this._isPlaying()) this._renderStatusOnly(); else this._render();
     clearTimeout(this._statusTimer);
     this._statusTimer = setTimeout(() => this._loadStatus(), 120000);
   }
@@ -729,7 +1086,7 @@ class TVTArchivePanel extends HTMLElement {
 
   _statusValues() {
     const status = this._status || {};
-    const mode = this._playbackSession?.video || status.encoder?.name || "";
+    const mode = this._stream?.video || this._playbackSession?.video || status.encoder?.name || "";
     return {
       recording: status.timeline_today?.recording_now ? "Running" : status.online === false ? "Offline" : "Not active",
       today: status.timeline_today?.recorded_hours == null ? "—" : historyText(status.timeline_today.recorded_hours),
@@ -820,23 +1177,27 @@ class TVTArchivePanel extends HTMLElement {
       .toolbar{display:flex;align-items:center;height:56px;gap:4px;margin:-6px 0 -4px -8px}.title{font-size:20px;font-weight:400;line-height:1}.subtle{color:var(--secondary-text-color);font-size:.9rem}
 
       .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap;max-width:100%}.controls label{flex:1 1 150px}
-      label{position:relative;display:block;min-width:0;background:var(--mdc-text-field-fill-color,var(--secondary-background-color));border-radius:4px 4px 0 0;border-bottom:1px solid var(--mdc-text-field-idle-line-color,var(--secondary-text-color));color:var(--secondary-text-color);font-size:.75rem;padding:8px 12px 0}label:focus-within{border-bottom-color:var(--primary-color);color:var(--primary-color)}label>span{display:block;line-height:1;white-space:nowrap}
-      input,select{display:block;width:100%;font:inherit;font-size:1rem;color:var(--primary-text-color);background:transparent;border:0;padding:6px 0 7px;margin:0;min-width:0;outline:0;-webkit-appearance:none;appearance:none}select{background-image:linear-gradient(45deg,transparent 50%,var(--secondary-text-color) 50%),linear-gradient(135deg,var(--secondary-text-color) 50%,transparent 50%);background-position:calc(100% - 10px) 50%,calc(100% - 5px) 50%;background-size:5px 5px;background-repeat:no-repeat;padding-right:20px}
+      label{display:grid;gap:4px;color:var(--secondary-text-color);font-size:.78rem;min-width:0}label>span{white-space:nowrap}
+      input,select{font:inherit;color:var(--primary-text-color);background:var(--card-background-color);border:1px solid var(--divider-color);border-radius:10px;padding:9px 11px;min-width:0;max-width:100%;width:100%;color-scheme:inherit}
       button{cursor:pointer;font:inherit;font-weight:500;color:var(--primary-color);background:none;border:0;border-radius:4px;padding:0 12px;height:36px;white-space:nowrap}button:hover{background:rgba(var(--rgb-primary-color,3,169,244),.08)}button:disabled{opacity:.38;cursor:default}ha-button{--mdc-theme-primary:var(--primary-color)}
       .shell{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:14px}.card{background:var(--ha-card-background,var(--card-background-color));border-radius:var(--ha-card-border-radius,12px);border:var(--ha-card-border-width,1px) solid var(--ha-card-border-color,var(--divider-color));box-shadow:var(--ha-card-box-shadow,none);overflow:hidden;min-width:0}
       .player-head{padding:11px 14px;display:flex;justify-content:space-between;align-items:center;gap:10px;border-bottom:1px solid var(--divider-color)}
       .player{background:#000;min-height:min(62vh,640px);display:grid;place-items:center;position:relative;overflow:hidden}
-      .player video{width:100%;height:min(62vh,640px);object-fit:contain;background:#000;display:block;grid-area:1/1}.player-state{display:none;grid-area:1/1;align-self:stretch;justify-self:stretch;z-index:2;align-items:center;justify-content:center;pointer-events:none;color:#fff;font-size:.92rem}.player-state.visible{display:flex}.player-state-content{display:flex;align-items:center;gap:10px;padding:10px 13px;border-radius:10px;background:rgba(0,0,0,.58);color:#fff}.player-spinner{width:18px;height:18px;border-radius:50%;border:3px solid rgba(255,255,255,.25);border-top-color:#fff;animation:tvt-spin .8s linear infinite}@keyframes tvt-spin{to{transform:rotate(360deg)}}
+      .player video,.player .frame-player{width:100%;height:min(62vh,640px);object-fit:contain;background:#000;display:block;grid-area:1/1}.player-state{display:none;grid-area:1/1;align-self:stretch;justify-self:stretch;z-index:2;align-items:center;justify-content:center;pointer-events:none;color:#fff;font-size:.92rem}.player-state.visible{display:flex}.player-state-content{display:flex;align-items:center;gap:10px;padding:10px 13px;border-radius:10px;background:rgba(0,0,0,.58);color:#fff}.player-spinner{width:18px;height:18px;border-radius:50%;border:3px solid rgba(255,255,255,.25);border-top-color:#fff;animation:tvt-spin .8s linear infinite}@keyframes tvt-spin{to{transform:rotate(360deg)}}
+      .frame-player{position:relative;width:100%;background:#000;display:grid;grid-area:1/1;overflow:hidden;cursor:default}.frame-player canvas{width:100%;height:100%;object-fit:contain;display:block;grid-area:1/1;background:#000}.frame-player:fullscreen{width:100vw;height:100vh}
+      .fp-wait{display:none;grid-area:1/1;place-self:center;align-items:center;gap:10px;padding:10px 13px;border-radius:10px;background:rgba(0,0,0,.58);color:#fff;font-size:.92rem;pointer-events:none}.fp-wait.visible{display:flex}
+      .fp-bar{position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:4px;padding:4px 6px;background:linear-gradient(transparent,rgba(0,0,0,.65));color:#fff;opacity:0;transition:opacity .2s;pointer-events:none}.frame-player.show-bar .fp-bar,.frame-player.paused .fp-bar{opacity:1;pointer-events:auto}
+      .fp-bar button{color:#fff;width:40px;height:40px;padding:0;display:grid;place-items:center;border-radius:50%}.fp-bar button:hover{background:rgba(255,255,255,.15)}.fp-bar svg{width:26px;height:26px;fill:currentColor}.fp-time{font-variant-numeric:tabular-nums;font-size:.9rem;margin-left:4px}.fp-speed{font-size:.8rem;opacity:.85;margin-left:6px}.fp-space{flex:1}
       .empty{padding:32px;text-align:center;color:#bdbdbd}.sidebar{padding:14px;display:grid;gap:10px;align-content:start}.stat{padding:10px 12px;background:var(--secondary-background-color);border-radius:10px}.stat span{color:var(--secondary-text-color);font-size:.8rem}.stat b{display:block;margin-top:3px;overflow-wrap:anywhere}
       .timeline-card{padding:12px}.timeline-title{display:flex;justify-content:space-between;gap:10px;margin-bottom:8px}.timeline{height:112px;overflow-x:auto;overflow-y:hidden;position:relative;background:var(--secondary-background-color);border-radius:10px;cursor:crosshair}.timeline-inner{height:100%;position:relative;min-width:100%}.segment{position:absolute;top:38px;height:42px;border-radius:6px;background:var(--success-color,#43a047)}.tick{position:absolute;top:0;bottom:0;width:1px;background:var(--divider-color)}.tick span{position:absolute;left:0;top:7px;transform:translateX(-50%);font-size:.7rem;color:var(--secondary-text-color);white-space:nowrap}.tick:first-child span{left:6px;transform:none}.tick:last-child span{left:auto;right:6px;transform:none}.marker{position:absolute;top:28px;bottom:12px;width:2px;background:var(--error-color,#e53935)}.marker:after{content:"";position:absolute;top:-5px;left:-4px;width:10px;height:10px;border-radius:50%;background:inherit}
       .lower{display:grid;grid-template-columns:1fr 1fr;gap:14px}.box{padding:13px;min-width:0;overflow:hidden}.selection-controls{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:end}.selection-controls>*{min-width:0;max-width:100%}.range{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;gap:8px;align-items:end}.range>*{min-width:0;max-width:100%}.download-link{display:inline-flex;align-items:center;justify-content:center;height:36px;padding:0 12px;border-radius:4px;color:var(--primary-color);text-decoration:none;font-weight:500;white-space:nowrap}.download-link:hover{background:rgba(var(--rgb-primary-color,3,169,244),.08)}.download-progress{display:none;grid-column:1/-1;align-items:center;gap:9px;font-size:.78rem;color:var(--secondary-text-color)}.download-progress.visible{display:flex}.download-track{height:5px;flex:1;overflow:hidden;border-radius:999px;background:var(--divider-color)}.download-bar{height:100%;width:0;background:var(--primary-color);transition:width .25s ease}.download-percent{min-width:34px;text-align:right;font-variant-numeric:tabular-nums}.statusline{min-height:22px;color:var(--secondary-text-color)}.error{color:var(--error-color)}
       @media(min-width:901px) and (min-height:720px){
         :host{height:100dvh;overflow:hidden}.page{height:100%;overflow:hidden;padding:12px 18px;gap:10px;grid-template-rows:auto auto minmax(0,1fr) auto auto auto}
-        .shell{min-height:0;gap:10px}.shell>.card:first-child{display:grid;grid-template-rows:auto minmax(0,1fr);min-height:0}.player{height:100%;min-height:0}.player video{height:100%;min-height:0;max-height:none}
+        .shell{min-height:0;gap:10px}.shell>.card:first-child{display:grid;grid-template-rows:auto minmax(0,1fr);min-height:0}.player{height:100%;min-height:0}.player video,.player .frame-player{height:100%;min-height:0;max-height:none}
         .sidebar{min-height:0;overflow:hidden;padding:10px;gap:7px}.stat{padding:7px 10px}.timeline-card{padding:9px 10px}.timeline-title{margin-bottom:6px}.timeline{height:92px}.segment{top:31px;height:35px}.marker{top:23px;bottom:10px}
         .lower{gap:10px}.box{padding:10px}.statusline{min-height:18px;font-size:.8rem}
       }
-      @media(max-width:900px){.shell{grid-template-columns:1fr}.sidebar{grid-template-columns:repeat(2,minmax(0,1fr))}.lower{grid-template-columns:1fr}.player,.player video{min-height:42vh;height:42vh}.page{padding:10px}}
+      @media(max-width:900px){.shell{grid-template-columns:1fr}.sidebar{grid-template-columns:repeat(2,minmax(0,1fr))}.lower{grid-template-columns:1fr}.player,.player video,.player .frame-player{min-height:42vh;height:42vh}.page{padding:10px}}
       @media(max-width:560px){
         .controls{display:grid;grid-template-columns:1fr 1fr;gap:10px}.controls label{width:100%}.controls button,.controls ha-button{grid-column:1/-1;justify-self:end}
         .player-head{display:grid;grid-template-columns:1fr auto;align-items:center}.player-head>b{grid-column:1/-1}.player-head>.subtle{grid-column:1/-1}.sidebar{grid-template-columns:1fr 1fr}.timeline-title{align-items:flex-start}.timeline-title span{max-width:68%}.timeline-inner.zoom-1 .tick.mobile-minor span{display:none}
@@ -890,15 +1251,15 @@ class TVTArchivePanel extends HTMLElement {
       await this._loadTimeline();
     });
     get("quality")?.addEventListener("change", async (event) => {
-      const wasPlaying = Boolean(this._playbackSession?.playlist_url);
-      if (wasPlaying) {
-        this._selectedSec = Math.min(86399, this._selectedSec + Math.floor(this._currentPlaybackTime()));
-      }
+      const wasPlaying = this._isPlaying();
+      if (wasPlaying) this._selectedSec = this._playedSecondsOfDay();
       this._recordingQuality = event.target.value;
       this._persistState();
-      wasPlaying ? this._playRecording() : this._render();
+      if (!wasPlaying) { this._render(); return; }
+      await this._stopPlaybackSession();
+      this._playRecording();
     });
-    get("zoom")?.addEventListener("change", (event) => { this._zoom = Number(event.target.value); this._persistState(); if (!this._playbackSession?.playlist_url) this._render(); });
+    get("zoom")?.addEventListener("change", (event) => { this._zoom = Number(event.target.value); this._persistState(); if (!this._isPlaying()) this._render(); });
     get("refresh")?.addEventListener("click", async () => {
       this._message = "Refreshing…"; this._updateStatusLine();
       await this._loadCameras();
@@ -906,7 +1267,14 @@ class TVTArchivePanel extends HTMLElement {
       this._persistState();
     });
     get("play")?.addEventListener("click", () => this._playRecording());
-    get("selected")?.addEventListener("change", async (event) => { const value=event.currentTarget.value; this._resetDownloadResult(); this._selectedSec = clockToSec(value); this._rangeStart = value.length===5 ? `${value}:00` : value; this._rangeEnd = secToClock(Math.min(86399, this._selectedSec + 300)); this._persistState(); await this._stopPlaybackSession(); this._render(); });
+    get("selected")?.addEventListener("change", async (event) => {
+      const value = event.currentTarget.value;
+      this._resetDownloadResult();
+      this._selectTime(clockToSec(value));
+      if (this._canSeek()) { this._updateSelection(); this._seekStream(this._selectedSec); return; }
+      await this._stopPlaybackSession();
+      this._render();
+    });
     get("range-start")?.addEventListener("change", (event) => { this._rangeStart = event.currentTarget.value; this._resetDownloadResult(); this._render(); });
     get("range-end")?.addEventListener("change", (event) => { this._rangeEnd = event.currentTarget.value; this._resetDownloadResult(); this._render(); });
     get("download")?.addEventListener("click", () => this._download());
@@ -917,16 +1285,49 @@ class TVTArchivePanel extends HTMLElement {
     const timeline = get("timeline");
     timeline?.addEventListener("click", async (event) => {
       const inner = timeline.querySelector(".timeline-inner"); if (!inner) return;
-      await this._stopPlaybackSession();
       this._resetDownloadResult();
       const rect = inner.getBoundingClientRect();
-      this._selectedSec = Math.max(0, Math.min(86399, ((event.clientX - rect.left) / rect.width) * 86400));
-      this._rangeStart = secToClock(this._selectedSec); this._rangeEnd = secToClock(Math.min(86399, this._selectedSec + 300)); this._mode = "recording"; this._persistState(); this._render();
+      this._selectTime(Math.max(0, Math.min(86399, ((event.clientX - rect.left) / rect.width) * 86400)));
+      this._mode = "recording";
+      if (this._canSeek()) { this._updateSelection(); this._seekStream(this._selectedSec); return; }
+      await this._stopPlaybackSession();
+      this._render();
     });
+  }
+
+  _selectTime(seconds) {
+    this._selectedSec = seconds;
+    this._rangeStart = secToClock(seconds);
+    this._rangeEnd = secToClock(Math.min(86399, seconds + 300));
+    this._persistState();
+  }
+
+  _canSeek() {
+    return Boolean(this._stream && this._framePlayer && !this._framePlayer.ended);
+  }
+
+  _playedSecondsOfDay() {
+    const streamed = this._framePlayer?.secondsOfDay;
+    if (streamed != null) return streamed;
+    return Math.min(86399, this._selectedSec + Math.floor(this._currentPlaybackTime()));
+  }
+
+  _updateSelection() {
+    const clock = secToClock(this._selectedSec);
+    const set = (selector, value) => { const node = this.shadowRoot.querySelector(selector); if (node) node[selector.startsWith("#") ? "value" : "textContent"] = value; };
+    set("#selected", clock); set("#range-start", this._rangeStart); set("#range-end", this._rangeEnd);
+    set(".timeline-title b", clock); set(".player-head .subtle", `${this._date} ${clock}`);
+    this._moveMarker(this._selectedSec);
+  }
+
+  _moveMarker(seconds) {
+    const marker = this.shadowRoot.querySelector(".marker");
+    if (marker) marker.style.left = `${(seconds / 86400) * 100}%`;
   }
 
   async _renderPlayer() {
     const host = this.shadowRoot.getElementById("player"); if (!host) return;
+    if (this._framePlayer) { host.replaceChildren(this._framePlayer.element); return; }
     if (!this._playbackSession?.playlist_url) {
       if (this._recordingController && this._recordingPlayer?.isConnected) return;
       host.innerHTML = `<div class="empty">Select a recorded time and press <b>Play from here</b>.</div>`;
@@ -999,6 +1400,16 @@ class TVTArchivePanel extends HTMLElement {
 
   async _stopPlaybackSession(render = false) {
     clearTimeout(this._sessionPollTimer);
+    clearTimeout(this._streamPollTimer);
+    clearInterval(this._progressTimer);
+    const stream = this._stream;
+    this._stream = null;
+    this._slowHint = false;
+    this._framePlayer?.destroy();
+    this._framePlayer = null;
+    if (stream?.id && this._entryId) {
+      this._api("DELETE", `tvt_archive/${this._entryId}/streams/${stream.id}`).catch(() => {});
+    }
     const current = this._playbackSession;
     this._playbackSession = null;
     this._recordingController?.destroy();
@@ -1012,6 +1423,7 @@ class TVTArchivePanel extends HTMLElement {
   async _playRecording(automaticRetry = false) {
     clearTimeout(this._playbackRetryTimer);
     if (!automaticRetry) { this._playbackRetryCount = 0; this._playbackRetryPending = false; }
+    if (FRAME_PLAYER_SUPPORTED) { this._playStream(); return; }
     this._stopPlaybackSession();
     this._mode = "recording";
     this._persistState();
@@ -1031,6 +1443,91 @@ class TVTArchivePanel extends HTMLElement {
     } catch (error) {
       this._handlePlaybackFailure(errorText(error));
     }
+  }
+
+  async _playStream() {
+    if (this._canSeek()) { this._seekStream(this._selectedSec); return; }
+    this._stopPlaybackSession();
+    this._mode = "recording";
+    this._persistState();
+    this._error = "";
+    this._message = "Opening recording";
+    this._render();
+    const player = new TVTFramePlayer({
+      onState: (state) => { if (state === "playing") { this._playbackRetryCount = 0; this._playbackRetryPending = false; } },
+      onError: (message) => this._handlePlaybackFailure(message),
+      onEnded: (error) => this._streamEnded(error),
+      onProgress: (current) => this._streamProgress(current),
+    });
+    this._framePlayer = player;
+    this._reportedRendered = -1;
+    this.shadowRoot.getElementById("player")?.replaceChildren(player.element);
+    player.prime();
+    try {
+      const session = await this._api("POST", `tvt_archive/${this._entryId}/cameras/${this._cameraId}/streams`, {
+        start: isoFor(this._date, secToClock(this._selectedSec)), quality: this._effectiveRecordingQuality(),
+      });
+      if (this._framePlayer !== player) return;
+      this._stream = session;
+      player.start(session.frames_url);
+      this._progressTimer = setInterval(() => this._reportProgress(), 1000);
+      this._pollStream(session.id);
+    } catch (error) {
+      this._handlePlaybackFailure(errorText(error));
+    }
+  }
+
+  async _seekStream(seconds) {
+    const stream = this._stream;
+    if (!stream) return;
+    this._error = ""; this._message = ""; this._updateStatusLine();
+    try {
+      await this._api("POST", `tvt_archive/${this._entryId}/streams/${stream.id}`, {seek: secToClock(Math.floor(seconds))});
+    } catch (error) {
+      this._handlePlaybackFailure(errorText(error));
+    }
+  }
+
+  async _pollStream(id) {
+    try {
+      const fresh = await this._api("GET", `tvt_archive/${this._entryId}/streams/${id}`);
+      if (this._stream?.id !== id) return;
+      this._stream = {...fresh, frames_url: this._stream.frames_url};
+      if (fresh.status === "error") throw new Error(fresh.error || "Playback failed");
+      this._renderStatusOnly();
+      if (fresh.frames_ready || fresh.complete) { this._message = ""; this._updateStatusLine(); return; }
+      this._message = fresh.phase || "";
+      this._updateStatusLine();
+      clearTimeout(this._streamPollTimer);
+      this._streamPollTimer = setTimeout(() => this._pollStream(id), 1000);
+    } catch (error) {
+      this._handlePlaybackFailure(errorText(error));
+    }
+  }
+
+  _reportProgress() {
+    const player = this._framePlayer, stream = this._stream;
+    if (!player || !stream || player.rendered === this._reportedRendered) return;
+    this._reportedRendered = player.rendered;
+    this._api("POST", `tvt_archive/${this._entryId}/streams/${stream.id}`, {rendered: player.rendered, generation: player.generation}).catch(() => {});
+  }
+
+  _streamProgress(player) {
+    const seconds = player.secondsOfDay;
+    if (seconds != null && player.rendered % 5 === 0) this._moveMarker(seconds);
+    const slow = player.speed !== null && player.speed < 0.85;
+    if (slow !== this._slowHint) {
+      this._slowHint = slow;
+      this._message = slow ? `Slow camera link · playing at ${player.speed.toFixed(1)}×` : "";
+      this._updateStatusLine();
+    }
+  }
+
+  _streamEnded(error) {
+    clearInterval(this._progressTimer);
+    if (error) { this._handlePlaybackFailure(error); return; }
+    this._message = "End of the recording";
+    this._updateStatusLine();
   }
 
   async _pollPlaybackSession(sessionId) {
@@ -1073,18 +1570,18 @@ class TVTArchivePanel extends HTMLElement {
   }
 
   _recoverablePlaybackError(message) {
-    return /(no route to host|network is unreachable|temporarily unreachable|connection refused|timed out|timeout|network ?error|fragloaderror|levelloaderror|manifestloaderror|camera archive capture failed)/i.test(String(message || ""));
+    return /(no route to host|network is unreachable|temporarily unreachable|connection refused|timed out|timeout|network ?error|fragloaderror|levelloaderror|manifestloaderror|camera archive capture failed|stream ended unexpectedly|stream request failed|failed to fetch|load failed)/i.test(String(message || ""));
   }
 
   async _handlePlaybackFailure(message) {
     const text = String(message || "The recording could not be opened.");
     if (this._playbackRetryPending) return;
     if (this._mode === "recording" && this._recoverablePlaybackError(text) && this._playbackRetryCount < 3) {
+      const resume = this._framePlayer?.secondsOfDay;
       const played = Math.max(0, this._currentPlaybackTime() - 0.25);
-      if (played > 0) {
-        this._selectedSec = Math.min(86399, this._selectedSec + played);
-        this._rangeStart = secToClock(this._selectedSec);
-      }
+      if (resume != null) this._selectedSec = resume;
+      else if (played > 0) this._selectedSec = Math.min(86399, this._selectedSec + played);
+      this._rangeStart = secToClock(this._selectedSec);
       this._playbackRetryCount += 1;
       this._playbackRetryPending = true;
       this._message = `Camera connection interrupted · retrying ${this._playbackRetryCount}/3`;
@@ -1100,6 +1597,10 @@ class TVTArchivePanel extends HTMLElement {
     this._playbackSession = null;
     this._recordingController?.destroy();
     this._recordingController = null;
+    clearInterval(this._progressTimer);
+    this._stream = null;
+    this._framePlayer?.destroy();
+    this._framePlayer = null;
     this._render();
   }
 
@@ -1118,7 +1619,7 @@ class TVTArchivePanel extends HTMLElement {
       this._error = "";
       this._message = this._downloadPhase;
       this._persistState();
-      if (this._playbackSession?.playlist_url) this._updateDownloadUi(); else this._render();
+      if (this._isPlaying()) this._updateDownloadUi(); else this._render();
       const job = await this._api("POST", `tvt_archive/${this._entryId}/cameras/${this._cameraId}/jobs`, {start: isoFor(this._date, start), duration, gain_db: 0, quality: "original", kind: "download"});
       this._downloadJobId = job.id;
       this._persistState();
@@ -1133,7 +1634,7 @@ class TVTArchivePanel extends HTMLElement {
       this._message = "";
       this._error = errorText(error);
       this._persistState();
-      if (this._playbackSession?.playlist_url) this._updateDownloadUi(); else this._render();
+      if (this._isPlaying()) this._updateDownloadUi(); else this._render();
     }
   }
 
@@ -1152,7 +1653,7 @@ class TVTArchivePanel extends HTMLElement {
         this._downloadFilename = job.filename || "recording.mp4";
         this._message = "Download ready";
         this._persistState();
-        if (this._playbackSession?.playlist_url) this._updateDownloadUi(); else this._render();
+        if (this._isPlaying()) this._updateDownloadUi(); else this._render();
         clearTimeout(this._statusTimer);
         this._statusTimer = setTimeout(() => this._loadStatus(), 1000);
         return;
@@ -1172,7 +1673,7 @@ class TVTArchivePanel extends HTMLElement {
       this._message = "";
       this._error = errorText(error);
       this._persistState();
-      if (this._playbackSession?.playlist_url) this._updateDownloadUi(); else this._render();
+      if (this._isPlaying()) this._updateDownloadUi(); else this._render();
       clearTimeout(this._statusTimer);
       this._statusTimer = setTimeout(() => this._loadStatus(), 1000);
     }
