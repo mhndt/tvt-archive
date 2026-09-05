@@ -137,12 +137,16 @@ class ApplicationObjectReader:
     def _read_some(self, size: int) -> bytes:
         return self.stream.recv(size) if self.is_socket else self.stream.read(size)
 
-    def read_exact(self, size: int) -> bytes:
+    def _fill(self, size: int) -> None:
+        """Buffer at least size bytes without consuming them, so a timeout can be retried."""
         while len(self.buffer) < size:
             chunk = self._read_some(max(1, size - len(self.buffer)))
             if not chunk:
                 raise EOFError(f"Stream ended with {len(self.buffer)}/{size} bytes buffered")
             self.buffer.extend(chunk)
+
+    def read_exact(self, size: int) -> bytes:
+        self._fill(size)
         output = bytes(self.buffer[:size])
         del self.buffer[:size]
         return output
@@ -159,21 +163,27 @@ class ApplicationObjectReader:
                 self._discard_fragment(object_id)
 
     def read_object(self) -> tuple[bytes, bool, int | None] | None:
+        # Nothing is consumed until a whole object is buffered: a read timeout in the
+        # middle of a large frame must leave the reader where it was.
         while True:
             self._expire_fragments()
-            header = self.read_exact(8)
-            if header[:4] != OUTER_MAGIC:
-                raise TVT9008Error(f"Unexpected outer magic {header[:4]!r}")
-            declared = struct.unpack_from("<I", header, 4)[0]
+            self._fill(8)
+            if self.buffer[:4] != OUTER_MAGIC:
+                raise TVT9008Error(f"Unexpected outer magic {bytes(self.buffer[:4])!r}")
+            declared = struct.unpack_from("<I", self.buffer, 4)[0]
             if declared == 0:
+                del self.buffer[:8]
                 return None
             if declared != 0xFFFFFFFF:
                 if declared < 16 or declared > MAX_NORMAL_FRAME:
                     raise TVT9008Error(f"Invalid normal object length {declared}")
+                self._fill(8 + declared)
+                del self.buffer[:8]
                 return self.read_exact(declared), False, None
 
+            self._fill(32)
             object_id, chunk_count, total_length, chunk_index, chunk_length, reserved = (
-                struct.unpack("<IIIIII", self.read_exact(24))
+                struct.unpack_from("<IIIIII", self.buffer, 8)
             )
             if reserved != 0:
                 raise TVT9008Error(f"Fragment {object_id} has nonzero reserved field")
@@ -186,6 +196,8 @@ class ApplicationObjectReader:
             if not (1 <= chunk_length <= MAX_FRAGMENTED_OBJECT):
                 raise TVT9008Error(f"Fragment {object_id} has invalid chunk length")
 
+            self._fill(32 + chunk_length)
+            del self.buffer[:32]
             chunk = self.read_exact(chunk_length)
             now = time.monotonic()
             assembly = self.fragments.get(object_id)

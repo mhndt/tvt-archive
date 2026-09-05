@@ -55,6 +55,27 @@ class NativePlaybackTests(unittest.TestCase):
             + chunk
         )
 
+    def test_read_object_resumes_after_timeout_mid_object(self) -> None:
+        frame = native9008._outer(struct.pack("<IIII", 1, 2, 3, 40) + b"x" * 40)
+
+        class Flaky:
+            def __init__(self, data: bytes) -> None:
+                self.data, self.pos, self.failed = data, 0, False
+
+            def read(self, size: int) -> bytes:
+                if not self.failed and self.pos > 12:
+                    self.failed = True
+                    raise TimeoutError("timed out")
+                chunk = self.data[self.pos : self.pos + min(size, 10)]
+                self.pos += len(chunk)
+                return chunk
+
+        reader = native9008.ApplicationObjectReader(Flaky(frame + frame))
+        with self.assertRaises(TimeoutError):
+            reader.read_object()
+        self.assertEqual(reader.read_object(), (frame[8:], False, None))
+        self.assertEqual(reader.read_object(), (frame[8:], False, None))
+
     def test_fragment_padding_remains_compatible(self) -> None:
         reader = native9008.ApplicationObjectReader(
             io.BytesIO(self._fragment(1, 1, 5, 1, b"helloPAD"))

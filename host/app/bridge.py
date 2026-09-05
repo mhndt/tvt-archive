@@ -1180,7 +1180,8 @@ def search_window(
         return json.loads(cache_path.read_text(encoding="utf-8"))
 
     lock = metadata_lock(camera_id)
-    if not lock.acquire(blocking=False):
+    # Another request may be refreshing the same window; wait for it and reuse its cache.
+    if not lock.acquire(timeout=20):
         if cache_path and cache_path.exists():
             cached = json.loads(cache_path.read_text(encoding="utf-8"))
             cached["stale"] = True

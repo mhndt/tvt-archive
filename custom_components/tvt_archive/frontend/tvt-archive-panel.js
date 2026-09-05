@@ -575,12 +575,16 @@ class TVTFramePlayer {
     this.lastPts = null; this.lastWall = 0; this.rendered = 0; this.generation = 0; this.speed = null;
     this.audio = null; this.gain = null; this.muted = false; this.hasAudio = false; this.utcOffset = null;
     this.abort = null; this.roomResolve = null; this.barTimer = null; this.timer = 0;
+    // Controls only while a mouse is over the player; a tap toggles them on touch screens.
     this.element.addEventListener("click", (event) => {
       const button = event.target.closest("button[data-act]");
       if (button) { this._action(button.dataset.act); return; }
-      this._showBar(this.element.classList.contains("show-bar") ? 0 : 2500);
+      if (!this.hoverable) this._showBar(this.element.classList.contains("show-bar") ? 0 : 2500);
     });
-    this.element.addEventListener("pointermove", () => this._showBar(2500));
+    this.hoverable = window.matchMedia("(hover: hover)").matches;
+    this.element.addEventListener("pointerenter", (event) => { if (event.pointerType !== "touch") this._showBar(2500); });
+    this.element.addEventListener("pointermove", (event) => { if (event.pointerType !== "touch") this._showBar(2500); });
+    this.element.addEventListener("pointerleave", () => this._showBar(0));
     this.volume = 1;
     this.element.querySelector(".fp-volume").addEventListener("input", (event) => {
       this.volume = Number(event.target.value);
@@ -749,7 +753,7 @@ class TVTFramePlayer {
         this.lastPts = frame.timestamp;
         frame.close();
         this.rendered += 1;
-        if (this.rendered === 1) { this._state("playing"); this._showBar(2500); }
+        if (this.rendered === 1) this._state("playing");
         this.onProgress?.(this);
       }
     }
@@ -841,7 +845,7 @@ class TVTFramePlayer {
     clearTimeout(this.barTimer);
     if (!ms) { this.element.classList.remove("show-bar"); return; }
     this.element.classList.add("show-bar");
-    this.barTimer = setTimeout(() => { if (!this.paused) this.element.classList.remove("show-bar"); }, ms);
+    this.barTimer = setTimeout(() => this.element.classList.remove("show-bar"), ms);
   }
 
   _syncButtons() {
@@ -939,7 +943,6 @@ class TVTArchivePanel extends HTMLElement {
 
   set hass(value) {
     this._hass = value;
-    this.style.colorScheme = value?.themes?.darkMode ? "dark" : "light";
     this._syncMenuButton();
     if (!this._loaded && value) {
       this._loaded = true;
@@ -1201,8 +1204,8 @@ class TVTArchivePanel extends HTMLElement {
 
       .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap;max-width:100%}.controls label{flex:1 1 150px}
       label{display:grid;gap:4px;color:var(--secondary-text-color);font-size:.78rem;min-width:0}label>span{white-space:nowrap}
-      input,select{font:inherit;color:var(--primary-text-color);background:var(--card-background-color);border:1px solid var(--divider-color);border-radius:10px;padding:9px 11px;min-width:0;max-width:100%;width:100%;color-scheme:inherit}
-      button,.download-link{cursor:pointer;font:inherit;font-weight:500;font-size:14px;color:var(--primary-color);background:none;border:0;border-radius:var(--ha-button-border-radius,var(--ha-border-radius-pill,4px));padding:0 var(--ha-space-4,12px);height:var(--ha-button-height,var(--button-height,36px));white-space:nowrap;display:inline-flex;align-items:center;justify-content:center;text-decoration:none;transition:background-color .15s}button:hover,.download-link:hover{background:rgba(var(--rgb-primary-color,3,169,244),.08)}button:active,.download-link:active{background:rgba(var(--rgb-primary-color,3,169,244),.18)}button.accent{background:var(--primary-color);color:var(--text-primary-color,#fff)}button.accent:hover{background:color-mix(in srgb,var(--primary-color) 90%,#fff)}button.accent:active{background:color-mix(in srgb,var(--primary-color) 80%,#000)}button:disabled{opacity:.38;cursor:default;background:none}button.accent:disabled{background:var(--disabled-color,rgba(128,128,128,.3));color:var(--disabled-text-color,#9b9b9b)}
+      input,select{font:inherit;color:var(--primary-text-color);background:var(--card-background-color);border:1px solid var(--divider-color);border-radius:10px;padding:9px 11px;min-width:0;max-width:100%;width:100%}
+      button,.download-link{cursor:pointer;font:inherit;font-weight:500;font-size:14px;color:var(--primary-color);background:none;border:0;border-radius:var(--ha-button-border-radius,var(--ha-border-radius-pill,4px));padding:0 var(--ha-space-4,12px);height:var(--ha-button-height,var(--button-height,36px));white-space:nowrap;display:inline-flex;align-items:center;justify-content:center;text-decoration:none;transition:background-color .15s}button:hover,.download-link:hover{background:rgba(var(--rgb-primary-color,3,169,244),.08)}button:active,.download-link:active{background:rgba(var(--rgb-primary-color,3,169,244),.18)}button.filled{background:var(--ha-color-fill-primary-normal-resting,rgba(var(--rgb-primary-color,3,169,244),.16));color:var(--ha-color-on-primary-normal,var(--primary-color))}button.filled:hover{background:var(--ha-color-fill-primary-normal-hover,rgba(var(--rgb-primary-color,3,169,244),.28))}button.filled:active{background:var(--ha-color-fill-primary-normal-active,rgba(var(--rgb-primary-color,3,169,244),.16))}button.outlined{border:1px solid var(--ha-color-border-primary-loud,var(--primary-color));color:var(--ha-color-on-primary-normal,var(--primary-color))}button.outlined:hover{background:var(--ha-color-fill-primary-quiet-hover,rgba(var(--rgb-primary-color,3,169,244),.08))}button.outlined:active{background:var(--ha-color-fill-primary-quiet-active,rgba(var(--rgb-primary-color,3,169,244),.14))}button:disabled{cursor:default;color:var(--ha-color-on-disabled-normal,var(--disabled-text-color,#9b9b9b));background:none;border-color:var(--ha-color-on-disabled-quiet,var(--disabled-color,rgba(128,128,128,.3)))}button.filled:disabled{background:var(--ha-color-fill-disabled-normal-resting,var(--disabled-color,rgba(128,128,128,.2)))}
       .shell{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:14px}.card{background:var(--ha-card-background,var(--card-background-color));border-radius:var(--ha-card-border-radius,12px);border:var(--ha-card-border-width,1px) solid var(--ha-card-border-color,var(--divider-color));box-shadow:var(--ha-card-box-shadow,none);overflow:hidden;min-width:0}
       .player-head{padding:11px 14px;display:flex;justify-content:space-between;align-items:center;gap:10px;border-bottom:1px solid var(--divider-color)}
       .player{background:#000;min-height:min(62vh,640px);display:grid;place-items:center;position:relative;overflow:hidden}
@@ -1240,8 +1243,8 @@ class TVTArchivePanel extends HTMLElement {
         </div>
       </div>
       <div class="card timeline-card"><div class="timeline-title"><span>Click a recorded section to select a time</span><b>${selected}</b></div><div id="timeline" class="timeline">${this._timelineHtml()}</div></div>
-      <div class="lower"><div class="card box"><div class="selection-controls"><label><span>Selected time</span><input id="selected" type="time" step="1" value="${selected}"></label>${btn("play", "Play from here", "", "accent")}</div></div>
-        <div class="card box"><div class="range"><label><span>Download start</span><input id="range-start" type="time" step="1" value="${$esc(this._rangeStart)}"></label><label><span>Download end</span><input id="range-end" type="time" step="1" value="${$esc(this._rangeEnd)}"></label>${this._downloadUrl ? `<a id="save-download" class="download-link" href="${$esc(this._downloadUrl)}" download="${$esc(this._downloadFilename || "recording.mp4")}">Save file</a>` : btn("download", this._busy ? this._downloadActionLabel() : "Download original", this._busy ? "disabled" : "", "accent")}<div id="download-progress" class="download-progress ${this._busy || this._downloadPercent === 100 ? "visible" : ""}"><div class="download-track" role="progressbar" aria-label="Export progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.max(0, Math.min(100, Math.round(this._downloadPercent || 0)))}"><div id="download-progress-bar" class="download-bar" style="width:${Math.max(0, Math.min(100, Math.round(this._downloadPercent || 0)))}%"></div></div><span id="download-percent" class="download-percent">${Math.max(0, Math.min(100, Math.round(this._downloadPercent || 0)))}%</span></div></div></div></div>
+      <div class="lower"><div class="card box"><div class="selection-controls"><label><span>Selected time</span><input id="selected" type="time" step="1" value="${selected}"></label>${btn("play", "Play from here", "", "filled")}</div></div>
+        <div class="card box"><div class="range"><label><span>Download start</span><input id="range-start" type="time" step="1" value="${$esc(this._rangeStart)}"></label><label><span>Download end</span><input id="range-end" type="time" step="1" value="${$esc(this._rangeEnd)}"></label>${this._downloadUrl ? `<a id="save-download" class="download-link" href="${$esc(this._downloadUrl)}" download="${$esc(this._downloadFilename || "recording.mp4")}">Save file</a>` : btn("download", this._busy ? this._downloadActionLabel() : "Download original", this._busy ? "disabled" : "", "outlined")}<div id="download-progress" class="download-progress ${this._busy || this._downloadPercent === 100 ? "visible" : ""}"><div class="download-track" role="progressbar" aria-label="Export progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.max(0, Math.min(100, Math.round(this._downloadPercent || 0)))}"><div id="download-progress-bar" class="download-bar" style="width:${Math.max(0, Math.min(100, Math.round(this._downloadPercent || 0)))}%"></div></div><span id="download-percent" class="download-percent">${Math.max(0, Math.min(100, Math.round(this._downloadPercent || 0)))}%</span></div></div></div></div>
       <div id="statusline" class="statusline ${this._error ? "error" : ""}">${$esc(this._error || this._message || "")}</div>
     </div>`;
     this._bind();
