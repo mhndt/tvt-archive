@@ -1,6 +1,6 @@
 services:
   tvt-archive:
-    image: ${TVT_ARCHIVE_IMAGE:-ghcr.io/mhndt/tvt-archive:0.8.4}
+    image: ${TVT_ARCHIVE_IMAGE:-ghcr.io/mhndt/tvt-archive:0.9.0}
     container_name: tvt-archive
     restart: unless-stopped
     user: "10001:10001"

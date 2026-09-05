@@ -1,9 +1,9 @@
 # Development build. Normal installs pull the published image.
 services:
   tvt-archive:
-    image: ${TVT_ARCHIVE_LOCAL_IMAGE:-tvt-archive:0.8.4-local}
+    image: ${TVT_ARCHIVE_LOCAL_IMAGE:-tvt-archive:0.9.0-local}
     build:
       context: ..
       dockerfile: Dockerfile
       args:
-        APP_VERSION: "0.8.4"
+        APP_VERSION: "0.9.0"
