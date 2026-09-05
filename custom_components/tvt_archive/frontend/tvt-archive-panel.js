@@ -522,7 +522,7 @@ class TVTFmp4Player {
 
 const FRAME_PLAYER_SUPPORTED = typeof VideoDecoder === "function" && typeof EncodedVideoChunk === "function";
 const REC_INFO = 0, REC_VIDEO = 1, REC_AUDIO = 2, REC_MARK = 3, REC_END = 4;
-const FRAME_QUEUE_MAX = 60, FRAME_QUEUE_RESUME = 40, GAP_COLLAPSE_US = 3e6;
+const DECODED_MAX = 8, PENDING_MAX = 600, PENDING_RESUME = 400, GAP_COLLAPSE_US = 3e6;
 const ICONS = {
   play: "M8,5.14V19.14L19,12.14L8,5.14Z",
   pause: "M14,19H18V5H14M6,19H10V5H6V19Z",
@@ -566,10 +566,10 @@ class TVTFramePlayer {
     this.element = document.createElement("div");
     this.element.className = "frame-player";
     this.element.innerHTML = `<canvas></canvas><div class="fp-wait"><span class="player-spinner"></span><span class="fp-wait-text">Opening recording</span></div>
-      <div class="fp-bar"><button data-act="toggle" aria-label="Pause">${icon("pause")}</button><span class="fp-time">--:--:--</span><span class="fp-speed"></span><span class="fp-space"></span><button data-act="mute" aria-label="Mute">${icon("sound")}</button><button data-act="full" aria-label="Full screen">${icon("full")}</button></div>`;
+      <div class="fp-bar"><button data-act="toggle" aria-label="Pause">${icon("pause")}</button><span class="fp-speed"></span><span class="fp-space"></span><button data-act="mute" aria-label="Mute">${icon("sound")}</button><input class="fp-volume" type="range" min="0" max="1" step="0.05" value="1" aria-label="Volume"><button data-act="full" aria-label="Full screen">${icon("full")}</button></div>`;
     this.canvas = this.element.querySelector("canvas");
     this.ctx = this.canvas.getContext("2d");
-    this.frames = []; this.audioQueue = []; this.arrivals = [];
+    this.frames = []; this.pending = []; this.audioQueue = []; this.arrivals = []; this.stepOnce = false;
     this.decoder = null; this.sps = null; this.pps = null; this.configured = false; this.needKey = true;
     this.paused = false; this.destroyed = false; this.ended = false; this.started = false;
     this.lastPts = null; this.lastWall = 0; this.rendered = 0; this.generation = 0; this.speed = null;
@@ -581,6 +581,13 @@ class TVTFramePlayer {
       this._showBar(this.element.classList.contains("show-bar") ? 0 : 2500);
     });
     this.element.addEventListener("pointermove", () => this._showBar(2500));
+    this.volume = 1;
+    this.element.querySelector(".fp-volume").addEventListener("input", (event) => {
+      this.volume = Number(event.target.value);
+      this.muted = this.volume === 0;
+      if (this.gain) this.gain.gain.value = this.volume;
+      this._syncButtons();
+    });
     this.element.addEventListener("dblclick", (event) => { if (!event.target.closest("button")) this._action("full"); });
     this._onFullscreen = () => this._syncButtons();
     document.addEventListener("fullscreenchange", this._onFullscreen);
@@ -617,7 +624,7 @@ class TVTFramePlayer {
     let buffer = new Uint8Array(0);
     while (!this.destroyed) {
       const {value, done} = await reader.read();
-      if (done) { if (!this.ended) this._end(null); return; }
+      if (done) { if (!this.ended) this._end({status: "closed"}); return; }
       const joined = new Uint8Array(buffer.length + value.length);
       joined.set(buffer); joined.set(value, buffer.length);
       buffer = joined;
@@ -632,18 +639,18 @@ class TVTFramePlayer {
         offset += 16 + length;
       }
       buffer = buffer.subarray(offset);
-      if (this._queued() > FRAME_QUEUE_MAX) await new Promise((resolve) => { this.roomResolve = resolve; });
+      if (this.pending.length > PENDING_MAX) await new Promise((resolve) => { this.roomResolve = resolve; });
     }
   }
 
-  _queued() { return this.frames.length + (this.decoder?.decodeQueueSize || 0); }
+  _decodedCount() { return this.frames.length + (this.decoder?.decodeQueueSize || 0); }
 
   _record(kind, flags, pts, payload) {
     if (kind === REC_INFO) { try { this.utcOffset = JSON.parse(new TextDecoder().decode(payload)).utc_offset ?? null; } catch (_) {} return; }
     if (kind === REC_VIDEO) { this._video(pts, Boolean(flags & 1), payload); return; }
     if (kind === REC_AUDIO) { this.hasAudio = true; this.audioQueue.push({pts, data: payload.slice()}); this._syncButtons(); return; }
     if (kind === REC_MARK) { this._flush(); try { this.generation = JSON.parse(new TextDecoder().decode(payload)).generation || 0; } catch (_) {} this._state("seeking"); return; }
-    if (kind === REC_END) { let error = null; try { error = JSON.parse(new TextDecoder().decode(payload)).error || null; } catch (_) {} this._end(error); }
+    if (kind === REC_END) { let info = {}; try { info = JSON.parse(new TextDecoder().decode(payload)); } catch (_) {} this._end(info); }
   }
 
   _video(pts, keyframe, data) {
@@ -669,11 +676,16 @@ class TVTFramePlayer {
       avcc.set(unit, offset + 4);
       offset += 4 + unit.length;
     }
-    try {
-      this.decoder.decode(new EncodedVideoChunk({type: keyframe ? "key" : "delta", timestamp: pts, data: avcc}));
-    } catch (error) {
-      this.needKey = true;
+    this.pending.push(new EncodedVideoChunk({type: keyframe ? "key" : "delta", timestamp: pts, data: avcc}));
+    this._feedDecoder();
+  }
+
+  _feedDecoder() {
+    while (this.pending.length && this._decodedCount() < DECODED_MAX && this.decoder?.state === "configured") {
+      const chunk = this.pending.shift();
+      try { this.decoder.decode(chunk); } catch (_) { this.needKey = true; }
     }
+    this._room();
   }
 
   _configure() {
@@ -707,7 +719,8 @@ class TVTFramePlayer {
 
   _flush() {
     for (const frame of this.frames) frame.close();
-    this.frames = []; this.audioQueue = []; this.arrivals = [];
+    this.frames = []; this.pending = []; this.audioQueue = []; this.arrivals = [];
+    this.stepOnce = this.paused;
     this.lastPts = null; this.rendered = 0; this.speed = null; this.needKey = true;
     try { if (this.decoder && this.decoder.state === "configured") this.decoder.reset(); } catch (_) {}
     if (this.decoder && this.decoder.state !== "closed" && this.sps && this.pps) { this.configured = false; this.configKey = null; this._configure(); }
@@ -715,7 +728,7 @@ class TVTFramePlayer {
   }
 
   _room() {
-    if (this.roomResolve && this._queued() < FRAME_QUEUE_RESUME) { const resolve = this.roomResolve; this.roomResolve = null; resolve(); }
+    if (this.roomResolve && this.pending.length < PENDING_RESUME) { const resolve = this.roomResolve; this.roomResolve = null; resolve(); }
   }
 
   _tick() {
@@ -723,11 +736,13 @@ class TVTFramePlayer {
     // A timer, not requestAnimationFrame: the clock must keep running in a background tab.
     this.timer = setTimeout(() => this._tick(), 8);
     const now = performance.now();
-    if (!this.paused && this.frames.length) {
+    this._feedDecoder();
+    if ((!this.paused || this.stepOnce) && this.frames.length) {
       const frame = this.frames[0];
       const gap = this.lastPts === null ? 0 : frame.timestamp - this.lastPts;
       const due = this.lastPts === null || gap < 0 || gap > GAP_COLLAPSE_US ? now : this.lastWall + gap / 1000;
       if (now >= due) {
+        this.stepOnce = false;
         this.frames.shift();
         this._paint(frame);
         this.lastWall = now - due < 30 ? due : now;
@@ -739,7 +754,6 @@ class TVTFramePlayer {
       }
     }
     this._scheduleAudio(now);
-    this._room();
     if (this.arrivals.length > 5) {
       const [w0, p0] = this.arrivals[0], [w1, p1] = this.arrivals[this.arrivals.length - 1];
       if (w1 - w0 > 4000) { this.speed = (p1 - p0) / 1000 / (w1 - w0); this._syncSpeed(); }
@@ -750,8 +764,6 @@ class TVTFramePlayer {
     const width = frame.displayWidth, height = frame.displayHeight;
     if (this.canvas.width !== width || this.canvas.height !== height) { this.canvas.width = width; this.canvas.height = height; }
     this.ctx.drawImage(frame, 0, 0, width, height);
-    const time = this.element.querySelector(".fp-time");
-    if (time) time.textContent = this.clock ?? "--:--:--";
   }
 
   _scheduleAudio(now) {
@@ -785,7 +797,13 @@ class TVTFramePlayer {
 
   _action(name) {
     if (name === "toggle") this.paused ? this.resume() : this.pause();
-    else if (name === "mute") { this.muted = !this.muted; if (this.gain) this.gain.gain.value = this.muted ? 0 : 1; this._syncButtons(); }
+    else if (name === "mute") {
+      this.muted = !this.muted;
+      if (this.muted === false && this.volume === 0) this.volume = 1;
+      if (this.gain) this.gain.gain.value = this.muted ? 0 : this.volume;
+      const slider = this.element.querySelector(".fp-volume"); if (slider) slider.value = this.muted ? 0 : this.volume;
+      this._syncButtons();
+    }
     else if (name === "full") this.toggleFullscreen();
     this._showBar(2500);
   }
@@ -832,6 +850,7 @@ class TVTFramePlayer {
     set("mute", this.muted ? "muted" : "sound", this.muted ? "Unmute" : "Mute");
     set("full", document.fullscreenElement ? "unfull" : "full", document.fullscreenElement ? "Exit full screen" : "Full screen");
     const mute = this.element.querySelector('button[data-act="mute"]'); if (mute) mute.hidden = !this.hasAudio;
+    const slider = this.element.querySelector(".fp-volume"); if (slider) slider.hidden = !this.hasAudio;
   }
 
   _syncSpeed() {
@@ -848,10 +867,11 @@ class TVTFramePlayer {
     this.onState?.(name);
   }
 
-  _end(error) {
+  _end(info) {
     this.ended = true;
+    this.pending = [];
     this._state("ended");
-    this.onEnded?.(error);
+    this.onEnded?.(info || {});
   }
 
   destroy() {
@@ -912,6 +932,9 @@ class TVTArchivePanel extends HTMLElement {
     this._playbackRetryPending = false;
     this._statusTimer = null;
     this._narrow = false;
+    if (!customElements.get("ha-button")) {
+      customElements.whenDefined("ha-button").then(() => { if (this.isConnected && !this._isPlaying()) this._render(); });
+    }
   }
 
   set hass(value) {
@@ -1166,9 +1189,9 @@ class TVTArchivePanel extends HTMLElement {
       ["low", "Low (480p)"],
     ].map(([value, label]) => `<option value="${value}" ${value === this._recordingQuality ? "selected" : ""}>${label}</option>`).join("");
     const qualityLabel = "Recording quality";
-    const btn = (id, label, extra = "") => customElements.get("ha-button")
-      ? `<ha-button id="${id}" ${extra}>${label}</ha-button>`
-      : `<button id="${id}" ${extra}>${label}</button>`;
+    const btn = (id, label, extra = "", appearance = "plain") => customElements.get("ha-button")
+      ? `<ha-button id="${id}" appearance="${appearance}" ${extra}>${label}</ha-button>`
+      : `<button id="${id}" class="${appearance}" ${extra}>${label}</button>`;
     const menu = customElements.get("ha-menu-button") ? `<ha-menu-button id="menu"></ha-menu-button>` : "";
 
     this.shadowRoot.innerHTML = `<style>
@@ -1179,7 +1202,7 @@ class TVTArchivePanel extends HTMLElement {
       .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap;max-width:100%}.controls label{flex:1 1 150px}
       label{display:grid;gap:4px;color:var(--secondary-text-color);font-size:.78rem;min-width:0}label>span{white-space:nowrap}
       input,select{font:inherit;color:var(--primary-text-color);background:var(--card-background-color);border:1px solid var(--divider-color);border-radius:10px;padding:9px 11px;min-width:0;max-width:100%;width:100%;color-scheme:inherit}
-      button{cursor:pointer;font:inherit;font-weight:500;color:var(--primary-color);background:none;border:0;border-radius:4px;padding:0 12px;height:36px;white-space:nowrap}button:hover{background:rgba(var(--rgb-primary-color,3,169,244),.08)}button:disabled{opacity:.38;cursor:default}ha-button{--mdc-theme-primary:var(--primary-color)}
+      button,.download-link{cursor:pointer;font:inherit;font-weight:500;font-size:14px;color:var(--primary-color);background:none;border:0;border-radius:var(--ha-button-border-radius,var(--ha-border-radius-pill,4px));padding:0 var(--ha-space-4,12px);height:var(--ha-button-height,var(--button-height,36px));white-space:nowrap;display:inline-flex;align-items:center;justify-content:center;text-decoration:none;transition:background-color .15s}button:hover,.download-link:hover{background:rgba(var(--rgb-primary-color,3,169,244),.08)}button:active,.download-link:active{background:rgba(var(--rgb-primary-color,3,169,244),.18)}button.accent{background:var(--primary-color);color:var(--text-primary-color,#fff)}button.accent:hover{background:color-mix(in srgb,var(--primary-color) 90%,#fff)}button.accent:active{background:color-mix(in srgb,var(--primary-color) 80%,#000)}button:disabled{opacity:.38;cursor:default;background:none}button.accent:disabled{background:var(--disabled-color,rgba(128,128,128,.3));color:var(--disabled-text-color,#9b9b9b)}
       .shell{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:14px}.card{background:var(--ha-card-background,var(--card-background-color));border-radius:var(--ha-card-border-radius,12px);border:var(--ha-card-border-width,1px) solid var(--ha-card-border-color,var(--divider-color));box-shadow:var(--ha-card-box-shadow,none);overflow:hidden;min-width:0}
       .player-head{padding:11px 14px;display:flex;justify-content:space-between;align-items:center;gap:10px;border-bottom:1px solid var(--divider-color)}
       .player{background:#000;min-height:min(62vh,640px);display:grid;place-items:center;position:relative;overflow:hidden}
@@ -1187,10 +1210,10 @@ class TVTArchivePanel extends HTMLElement {
       .frame-player{position:relative;width:100%;background:#000;display:grid;grid-area:1/1;overflow:hidden;cursor:default}.frame-player canvas{width:100%;height:100%;object-fit:contain;display:block;grid-area:1/1;background:#000}.frame-player:fullscreen{width:100vw;height:100vh}
       .fp-wait{display:none;grid-area:1/1;place-self:center;align-items:center;gap:10px;padding:10px 13px;border-radius:10px;background:rgba(0,0,0,.58);color:#fff;font-size:.92rem;pointer-events:none}.fp-wait.visible{display:flex}
       .fp-bar{position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:4px;padding:4px 6px;background:linear-gradient(transparent,rgba(0,0,0,.65));color:#fff;opacity:0;transition:opacity .2s;pointer-events:none}.frame-player.show-bar .fp-bar,.frame-player.paused .fp-bar{opacity:1;pointer-events:auto}
-      .fp-bar button{color:#fff;width:40px;height:40px;padding:0;display:grid;place-items:center;border-radius:50%}.fp-bar button:hover{background:rgba(255,255,255,.15)}.fp-bar svg{width:26px;height:26px;fill:currentColor}.fp-time{font-variant-numeric:tabular-nums;font-size:.9rem;margin-left:4px}.fp-speed{font-size:.8rem;opacity:.85;margin-left:6px}.fp-space{flex:1}
+      .fp-bar button{color:#fff;width:40px;height:40px;padding:0;display:grid;place-items:center;border-radius:50%}.fp-bar button:hover{background:rgba(255,255,255,.15)}.fp-bar button:active{background:rgba(255,255,255,.3)}.fp-bar svg{width:26px;height:26px;fill:currentColor}.fp-speed{font-size:.8rem;opacity:.85;margin-left:6px}.fp-space{flex:1}.fp-volume{display:none;width:80px;height:auto;margin:0 4px;padding:0;border:0;background:none;border-radius:0;accent-color:#fff}@media(hover:hover) and (pointer:fine){.fp-volume:not([hidden]){display:block}}
       .empty{padding:32px;text-align:center;color:#bdbdbd}.sidebar{padding:14px;display:grid;gap:10px;align-content:start}.stat{padding:10px 12px;background:var(--secondary-background-color);border-radius:10px}.stat span{color:var(--secondary-text-color);font-size:.8rem}.stat b{display:block;margin-top:3px;overflow-wrap:anywhere}
       .timeline-card{padding:12px}.timeline-title{display:flex;justify-content:space-between;gap:10px;margin-bottom:8px}.timeline{height:112px;overflow-x:auto;overflow-y:hidden;position:relative;background:var(--secondary-background-color);border-radius:10px;cursor:crosshair}.timeline-inner{height:100%;position:relative;min-width:100%}.segment{position:absolute;top:38px;height:42px;border-radius:6px;background:var(--success-color,#43a047)}.tick{position:absolute;top:0;bottom:0;width:1px;background:var(--divider-color)}.tick span{position:absolute;left:0;top:7px;transform:translateX(-50%);font-size:.7rem;color:var(--secondary-text-color);white-space:nowrap}.tick:first-child span{left:6px;transform:none}.tick:last-child span{left:auto;right:6px;transform:none}.marker{position:absolute;top:28px;bottom:12px;width:2px;background:var(--error-color,#e53935)}.marker:after{content:"";position:absolute;top:-5px;left:-4px;width:10px;height:10px;border-radius:50%;background:inherit}
-      .lower{display:grid;grid-template-columns:1fr 1fr;gap:14px}.box{padding:13px;min-width:0;overflow:hidden}.selection-controls{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:end}.selection-controls>*{min-width:0;max-width:100%}.range{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;gap:8px;align-items:end}.range>*{min-width:0;max-width:100%}.download-link{display:inline-flex;align-items:center;justify-content:center;height:36px;padding:0 12px;border-radius:4px;color:var(--primary-color);text-decoration:none;font-weight:500;white-space:nowrap}.download-link:hover{background:rgba(var(--rgb-primary-color,3,169,244),.08)}.download-progress{display:none;grid-column:1/-1;align-items:center;gap:9px;font-size:.78rem;color:var(--secondary-text-color)}.download-progress.visible{display:flex}.download-track{height:5px;flex:1;overflow:hidden;border-radius:999px;background:var(--divider-color)}.download-bar{height:100%;width:0;background:var(--primary-color);transition:width .25s ease}.download-percent{min-width:34px;text-align:right;font-variant-numeric:tabular-nums}.statusline{min-height:22px;color:var(--secondary-text-color)}.error{color:var(--error-color)}
+      .lower{display:grid;grid-template-columns:1fr 1fr;gap:14px}.box{padding:13px;min-width:0;overflow:hidden}.selection-controls{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:end}.selection-controls>*{min-width:0;max-width:100%}.range{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;gap:8px;align-items:end}.range>*{min-width:0;max-width:100%}.download-progress{display:none;grid-column:1/-1;align-items:center;gap:9px;font-size:.78rem;color:var(--secondary-text-color)}.download-progress.visible{display:flex}.download-track{height:5px;flex:1;overflow:hidden;border-radius:999px;background:var(--divider-color)}.download-bar{height:100%;width:0;background:var(--primary-color);transition:width .25s ease}.download-percent{min-width:34px;text-align:right;font-variant-numeric:tabular-nums}.statusline{min-height:22px;color:var(--secondary-text-color)}.error{color:var(--error-color)}
       @media(min-width:901px) and (min-height:720px){
         :host{height:100dvh;overflow:hidden}.page{height:100%;overflow:hidden;padding:12px 18px;gap:10px;grid-template-rows:auto auto minmax(0,1fr) auto auto auto}
         .shell{min-height:0;gap:10px}.shell>.card:first-child{display:grid;grid-template-rows:auto minmax(0,1fr);min-height:0}.player{height:100%;min-height:0}.player video,.player .frame-player{height:100%;min-height:0;max-height:none}
@@ -1217,8 +1240,8 @@ class TVTArchivePanel extends HTMLElement {
         </div>
       </div>
       <div class="card timeline-card"><div class="timeline-title"><span>Click a recorded section to select a time</span><b>${selected}</b></div><div id="timeline" class="timeline">${this._timelineHtml()}</div></div>
-      <div class="lower"><div class="card box"><div class="selection-controls"><label><span>Selected time</span><input id="selected" type="time" step="1" value="${selected}"></label>${btn("play", "Play from here")}</div></div>
-        <div class="card box"><div class="range"><label><span>Download start</span><input id="range-start" type="time" step="1" value="${$esc(this._rangeStart)}"></label><label><span>Download end</span><input id="range-end" type="time" step="1" value="${$esc(this._rangeEnd)}"></label>${this._downloadUrl ? `<a id="save-download" class="download-link" href="${$esc(this._downloadUrl)}" download="${$esc(this._downloadFilename || "recording.mp4")}">Save file</a>` : btn("download", this._busy ? this._downloadActionLabel() : "Download original", this._busy ? "disabled" : "")}<div id="download-progress" class="download-progress ${this._busy || this._downloadPercent === 100 ? "visible" : ""}"><div class="download-track" role="progressbar" aria-label="Export progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.max(0, Math.min(100, Math.round(this._downloadPercent || 0)))}"><div id="download-progress-bar" class="download-bar" style="width:${Math.max(0, Math.min(100, Math.round(this._downloadPercent || 0)))}%"></div></div><span id="download-percent" class="download-percent">${Math.max(0, Math.min(100, Math.round(this._downloadPercent || 0)))}%</span></div></div></div></div>
+      <div class="lower"><div class="card box"><div class="selection-controls"><label><span>Selected time</span><input id="selected" type="time" step="1" value="${selected}"></label>${btn("play", "Play from here", "", "accent")}</div></div>
+        <div class="card box"><div class="range"><label><span>Download start</span><input id="range-start" type="time" step="1" value="${$esc(this._rangeStart)}"></label><label><span>Download end</span><input id="range-end" type="time" step="1" value="${$esc(this._rangeEnd)}"></label>${this._downloadUrl ? `<a id="save-download" class="download-link" href="${$esc(this._downloadUrl)}" download="${$esc(this._downloadFilename || "recording.mp4")}">Save file</a>` : btn("download", this._busy ? this._downloadActionLabel() : "Download original", this._busy ? "disabled" : "", "accent")}<div id="download-progress" class="download-progress ${this._busy || this._downloadPercent === 100 ? "visible" : ""}"><div class="download-track" role="progressbar" aria-label="Export progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.max(0, Math.min(100, Math.round(this._downloadPercent || 0)))}"><div id="download-progress-bar" class="download-bar" style="width:${Math.max(0, Math.min(100, Math.round(this._downloadPercent || 0)))}%"></div></div><span id="download-percent" class="download-percent">${Math.max(0, Math.min(100, Math.round(this._downloadPercent || 0)))}%</span></div></div></div></div>
       <div id="statusline" class="statusline ${this._error ? "error" : ""}">${$esc(this._error || this._message || "")}</div>
     </div>`;
     this._bind();
@@ -1470,7 +1493,7 @@ class TVTArchivePanel extends HTMLElement {
       if (this._framePlayer !== player) return;
       this._stream = session;
       player.start(session.frames_url);
-      this._progressTimer = setInterval(() => this._reportProgress(), 1000);
+      this._progressTimer = setInterval(() => this._reportProgress(), 2000);
       this._pollStream(session.id);
     } catch (error) {
       this._handlePlaybackFailure(errorText(error));
@@ -1514,19 +1537,25 @@ class TVTArchivePanel extends HTMLElement {
 
   _streamProgress(player) {
     const seconds = player.secondsOfDay;
-    if (seconds != null && player.rendered % 5 === 0) this._moveMarker(seconds);
+    if (seconds != null && player.rendered % 5 === 0) {
+      this._moveMarker(seconds);
+      const head = this.shadowRoot.querySelector(".player-head .subtle");
+      if (head) head.textContent = `${this._date} ${player.clock}`;
+    }
     const slow = player.speed !== null && player.speed < 0.85;
     if (slow !== this._slowHint) {
       this._slowHint = slow;
-      this._message = slow ? `Slow camera link · playing at ${player.speed.toFixed(1)}×` : "";
+      this._message = slow ? "Slow camera link" : "";
       this._updateStatusLine();
     }
   }
 
-  _streamEnded(error) {
+  _streamEnded(info) {
     clearInterval(this._progressTimer);
-    if (error) { this._handlePlaybackFailure(error); return; }
-    this._message = "End of the recording";
+    if (info.error) { this._handlePlaybackFailure(info.error); return; }
+    if (info.status === "complete") this._message = "End of the recording";
+    else if (info.status === "closed") this._message = "The recording stream closed";
+    else this._message = info.phase || "Playback stopped";
     this._updateStatusLine();
   }
 

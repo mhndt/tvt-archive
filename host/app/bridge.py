@@ -437,6 +437,7 @@ KEYFRAME_FLAG = 1
 BAG_END, END_EVENT = 2, 3
 STREAM_WINDOW_FRAMES = 150
 STREAM_IDLE_SECONDS = 20
+STREAM_PAUSE_LIMIT_SECONDS = 900
 STREAM_RETAIN_SECONDS = 300
 FIRST_REQUEST_ID = 11
 
@@ -507,6 +508,7 @@ class FrameSession:
     pump_started: float = 0.0
     readers: int = 0
     reader_left: float = 0.0
+    last_progress: float = 0.0
     seek_to: dt.datetime | None = None
     request_id: int = FIRST_REQUEST_ID
     pending_request_id: int | None = None
@@ -2441,6 +2443,7 @@ def _switch_stream(session: FrameSession, transcoder: Transcoder | None) -> None
         session.generation += 1
         session.media_us = 0
         session.first_us = 0
+        session.last_progress = time.monotonic()
         session.wall_start = time.monotonic()
         session.phase = "Playing"
         session.queue.append(
@@ -2557,6 +2560,11 @@ class Transcoder:
     def close(self) -> None:
         self.stop()
         self.log.close()
+        try:
+            if Path(self.log.name).stat().st_size == 0:
+                Path(self.log.name).unlink()
+        except OSError:
+            pass
 
 
 def _pump_frames(session: FrameSession, transcoder: Transcoder | None) -> None:
@@ -2567,6 +2575,12 @@ def _pump_frames(session: FrameSession, transcoder: Transcoder | None) -> None:
             _begin_seek(session)
         if session.idle_seconds() > STREAM_IDLE_SECONDS:
             session.phase = "Nobody is watching"
+            return
+        if (
+            session.last_progress
+            and time.monotonic() - session.last_progress > STREAM_PAUSE_LIMIT_SECONDS
+        ):
+            session.phase = "Paused too long"
             return
         try:
             frame = client.read_frame()
@@ -2670,7 +2684,9 @@ def run_frame_session(session: FrameSession) -> None:
                 REC_END,
                 0,
                 session.position_us,
-                json.dumps({"error": session.error}).encode() if session.error else b"",
+                json.dumps(
+                    {"status": session.status, "phase": session.phase, "error": session.error}
+                ).encode(),
             ),
         )
         slot.release()
@@ -2689,7 +2705,7 @@ def create_frame_session(camera_id: str, request: dict[str, Any]) -> FrameSessio
     start = parse_local_timestamp(str(request.get("start", "")))
     remaining = int((_end_of_day(start) - start).total_seconds())
     duration = int(request.get("duration", remaining))
-    if not 5 <= duration <= max(5, remaining):
+    if not 1 <= duration <= max(1, remaining):
         raise ValueError("Duration must be within the day")
     quality = str(request.get("quality", "original"))
     if quality not in QUALITIES:
@@ -2716,7 +2732,10 @@ def control_frame_session(session_id: str, request: dict[str, Any]) -> FrameSess
     value = _frame_session(session_id)
     if "rendered" in request:
         if int(request.get("generation", value.generation)) == value.generation:
-            value.rendered = max(value.rendered, int(request["rendered"]))
+            rendered = int(request["rendered"])
+            if rendered > value.rendered:
+                value.rendered = rendered
+                value.last_progress = time.monotonic()
             _release_bag(value)
     if "seek" in request:
         target = str(request["seek"])
