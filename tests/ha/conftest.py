@@ -15,7 +15,7 @@ def auto_enable_custom_integrations(enable_custom_integrations: None) -> None:
 @pytest.fixture
 def api() -> Generator[AsyncMock]:
     client = AsyncMock()
-    client.health.return_value = {"ok": True, "version": "0.9.1"}
+    client.health.return_value = {"ok": True, "version": "0.9.2"}
     client.cameras.return_value = {"cameras": []}
     client.add_camera.return_value = {"camera": CAMERA, "test": {"online": True}}
     client.update_camera.return_value = {"camera": CAMERA, "test": {"online": True}}

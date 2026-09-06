@@ -488,7 +488,7 @@ class TVTFramePlayer {
         this.lastPts = frame.timestamp;
         frame.close();
         this.rendered += 1;
-        if (this.rendered === 1) this._state("playing");
+        if (this.rendered === 1) this._state(this.paused ? "paused" : "playing");
         this.onProgress?.(this);
       }
     }
@@ -665,6 +665,8 @@ class TVTArchivePanel extends HTMLElement {
     this._playbackSession = null;
     this._stream = null;
     this._framePlayer = null;
+    this._seekGeneration = null;
+    this._queuedSeekSec = null;
     this._streamPollTimer = null;
     this._progressTimer = null;
     this._reportedRendered = -1;
@@ -1167,29 +1169,33 @@ class TVTArchivePanel extends HTMLElement {
     clearTimeout(this._sessionPollTimer);
     clearTimeout(this._streamPollTimer);
     clearInterval(this._progressTimer);
+    const stops = [];
     const stream = this._stream;
     this._stream = null;
+    this._seekGeneration = null;
+    this._queuedSeekSec = null;
     this._slowHint = false;
     this._framePlayer?.destroy();
     this._framePlayer = null;
     if (stream?.id && this._entryId) {
-      this._api("DELETE", `tvt_archive/${this._entryId}/streams/${stream.id}`).catch(() => {});
+      stops.push(this._api("DELETE", `tvt_archive/${this._entryId}/streams/${stream.id}`));
     }
     const current = this._playbackSession;
     this._playbackSession = null;
     this._recordingController?.destroy();
     this._recordingController = null;
     if (current?.id && this._entryId) {
-      this._api("DELETE", `tvt_archive/${this._entryId}/sessions/${current.id}`).catch(() => {});
+      stops.push(this._api("DELETE", `tvt_archive/${this._entryId}/sessions/${current.id}`));
     }
+    if (stops.length) await Promise.allSettled(stops);
     if (render) this._render();
   }
 
   async _playRecording(automaticRetry = false) {
     clearTimeout(this._playbackRetryTimer);
     if (!automaticRetry) { this._playbackRetryCount = 0; this._playbackRetryPending = false; }
-    if (FRAME_PLAYER_SUPPORTED) { this._playStream(); return; }
-    this._stopPlaybackSession();
+    if (FRAME_PLAYER_SUPPORTED) { await this._playStream(); return; }
+    await this._stopPlaybackSession();
     this._mode = "recording";
     this._persistState();
     this._error = "";
@@ -1211,8 +1217,8 @@ class TVTArchivePanel extends HTMLElement {
   }
 
   async _playStream() {
-    if (this._canSeek()) { this._seekStream(this._selectedSec); return; }
-    this._stopPlaybackSession();
+    if (this._canSeek()) { await this._seekStream(this._selectedSec); return; }
+    await this._stopPlaybackSession();
     this._mode = "recording";
     this._persistState();
     this._error = "";
@@ -1243,12 +1249,22 @@ class TVTArchivePanel extends HTMLElement {
   }
 
   async _seekStream(seconds) {
-    const stream = this._stream;
-    if (!stream) return;
+    const stream = this._stream, player = this._framePlayer;
+    if (!stream || !player) return;
     this._error = ""; this._message = ""; this._updateStatusLine();
+    this._moveMarker(seconds);
+    const head = this.shadowRoot.querySelector(".player-head .subtle");
+    if (head) head.textContent = `${this._date} ${secToClock(seconds)}`;
+    if (this._seekGeneration !== null) {
+      this._queuedSeekSec = seconds;
+      return;
+    }
+    this._seekGeneration = player.generation;
     try {
       await this._api("POST", `tvt_archive/${this._entryId}/streams/${stream.id}`, {seek: secToClock(Math.floor(seconds))});
     } catch (error) {
+      this._seekGeneration = null;
+      this._queuedSeekSec = null;
       this._handlePlaybackFailure(errorText(error));
     }
   }
@@ -1278,6 +1294,16 @@ class TVTArchivePanel extends HTMLElement {
   }
 
   _streamProgress(player) {
+    if (this._seekGeneration !== null) {
+      if (player.generation === this._seekGeneration) return;
+      this._seekGeneration = null;
+      if (this._queuedSeekSec !== null) {
+        const seconds = this._queuedSeekSec;
+        this._queuedSeekSec = null;
+        this._seekStream(seconds);
+        return;
+      }
+    }
     const seconds = player.secondsOfDay;
     if (seconds != null && player.rendered % 5 === 0) {
       this._moveMarker(seconds);
@@ -1381,6 +1407,11 @@ class TVTArchivePanel extends HTMLElement {
       const duration = clockToSec(end) - clockToSec(start);
       if (duration <= 0) throw new Error("Download end must be after its start");
       if (duration > 3600) throw new Error("Downloads are limited to one hour per request");
+      if (this._isPlaying()) {
+        this._message = "Stopping playback";
+        this._updateStatusLine();
+        await this._stopPlaybackSession();
+      }
       this._busy = true;
       this._downloadJobId = null;
       this._downloadUrl = null;
