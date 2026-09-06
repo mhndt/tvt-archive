@@ -305,9 +305,13 @@ class TVTFramePlayer {
     this.audio = null; this.gain = null; this.muted = false; this.hasAudio = false; this.offsets = [];
     this.abort = null; this.roomResolve = null; this.barTimer = null; this.timer = 0;
     // Controls only while a mouse is over the player; a tap toggles them on touch screens.
-    this.element.addEventListener("click", (event) => {
-      const button = event.target.closest("button[data-act]");
-      if (button) { this._action(button.dataset.act); return; }
+    for (const button of this.element.querySelectorAll("button[data-act]")) {
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        this._action(button.dataset.act);
+      });
+    }
+    this.element.addEventListener("click", () => {
       if (!this.hoverable) this._showBar(this.element.classList.contains("show-bar") ? 0 : 2500);
     });
     this.hoverable = window.matchMedia("(hover: hover)").matches;
@@ -542,6 +546,7 @@ class TVTFramePlayer {
       this.muted = !this.muted;
       if (this.muted === false && this.volume === 0) this.volume = 1;
       if (this.gain) this.gain.gain.value = this.muted ? 0 : this.volume;
+      if (!this.muted) this.audio?.resume().catch(() => {});
       this._syncButtons();
     }
     else if (name === "full") this.toggleFullscreen();
@@ -951,7 +956,7 @@ class TVTArchivePanel extends HTMLElement {
 
       .controls{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;max-width:100%}.controls label{flex:1 1 150px}
       label{display:grid;gap:4px;color:var(--secondary-text-color);font-size:.78rem;min-width:0}label>span{white-space:nowrap}
-      input,select{font:inherit;color:var(--primary-text-color);background:var(--card-background-color);border:1px solid var(--divider-color);border-radius:10px;padding:0 11px;height:var(--ha-button-height,40px);min-width:0;max-width:100%;width:100%}input[type="time"],input[type="date"]{display:block;-webkit-appearance:auto;appearance:auto}
+      input,select{font:inherit;color:var(--primary-text-color);background:var(--card-background-color);border:1px solid var(--divider-color);border-radius:10px;padding:0 11px;height:var(--ha-button-height,40px);min-width:0;max-width:100%;width:100%}input[type="time"],input[type="date"]{display:block;min-inline-size:0;inline-size:100%;text-align:center;line-height:var(--ha-button-height,40px)}input[type="time"]::-webkit-date-and-time-value,input[type="date"]::-webkit-date-and-time-value{text-align:center}input[type="time"]::-webkit-datetime-edit,input[type="date"]::-webkit-datetime-edit{padding:0}
       button,.download-link{cursor:pointer;font:inherit;font-weight:500;font-size:14px;color:var(--primary-color);background:none;border:0;border-radius:var(--ha-button-border-radius,var(--ha-border-radius-pill,4px));padding:0 var(--ha-space-4,12px);height:var(--ha-button-height,var(--button-height,40px));white-space:nowrap;display:inline-flex;align-items:center;justify-content:center;text-decoration:none;transition:background-color .15s}button:hover,.download-link:hover{background:rgba(var(--rgb-primary-color,3,169,244),.08)}button:active,.download-link:active{background:rgba(var(--rgb-primary-color,3,169,244),.18)}button.filled{background:var(--ha-color-fill-primary-normal-resting,rgba(var(--rgb-primary-color,3,169,244),.16));color:var(--ha-color-on-primary-normal,var(--primary-color))}button.filled:hover{background:var(--ha-color-fill-primary-normal-hover,rgba(var(--rgb-primary-color,3,169,244),.28))}button.filled:active{background:var(--ha-color-fill-primary-normal-active,rgba(var(--rgb-primary-color,3,169,244),.16))}button:disabled{cursor:default;color:var(--ha-color-on-disabled-normal,var(--disabled-text-color,#9b9b9b));background:none;border-color:var(--ha-color-on-disabled-quiet,var(--disabled-color,rgba(128,128,128,.3)))}button.filled:disabled{background:var(--ha-color-fill-disabled-normal-resting,var(--disabled-color,rgba(128,128,128,.2)))}
       .shell{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:14px}.card{background:var(--ha-card-background,var(--card-background-color));border-radius:var(--ha-card-border-radius,12px);border:var(--ha-card-border-width,1px) solid var(--ha-card-border-color,var(--divider-color));box-shadow:var(--ha-card-box-shadow,none);overflow:hidden;min-width:0}
       .player-head{padding:11px 14px;display:flex;justify-content:space-between;align-items:center;gap:10px;border-bottom:1px solid var(--divider-color)}
@@ -972,10 +977,11 @@ class TVTArchivePanel extends HTMLElement {
       }
       @media(max-width:900px){.shell{grid-template-columns:1fr}.sidebar{grid-template-columns:repeat(2,minmax(0,1fr))}.lower{grid-template-columns:1fr}.player,.player video,.player .frame-player{min-height:42vh;height:42vh}.page{padding:10px}}
       @media(max-width:560px){
-        .controls{display:grid;grid-template-columns:1fr 1fr;gap:10px}.controls label{width:100%}.controls button,.controls ha-button{grid-column:1/-1;justify-self:end}
-        .player-head{display:grid;grid-template-columns:1fr auto;align-items:center}.player-head>b{grid-column:1/-1}.player-head>.subtle{grid-column:1/-1}.sidebar{grid-template-columns:1fr 1fr}.timeline-title{align-items:flex-start}.timeline-title span{max-width:68%}.timeline-inner.zoom-1 .tick.mobile-minor span{display:none}
-        .selection-controls{grid-template-columns:1fr}.selection-controls label{grid-column:auto;width:100%;overflow:hidden}.selection-controls input{width:100%;max-width:100%}.selection-controls button,.selection-controls ha-button{width:100%}
-        .range{grid-template-columns:1fr 1fr}.range button,.range ha-button,.range .download-link{grid-column:1/-1;width:100%}.box{padding:11px}.page{overflow-x:hidden}
+        .controls{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px}.controls label{width:100%;min-width:0;overflow:hidden}.controls button,.controls ha-button{grid-column:1/-1;justify-self:end}
+        .controls input,.controls select{min-width:0;max-width:100%}
+        .player-head{display:grid;grid-template-columns:1fr auto;align-items:center}.player-head>b{grid-column:1/-1}.player-head>.subtle{grid-column:1/-1}.sidebar{grid-template-columns:1fr 1fr}.timeline-title{align-items:center}.timeline-title span{flex:1;max-width:none;white-space:nowrap;font-size:.8rem}.timeline-title b{flex:0 0 auto}.timeline-inner.zoom-1 .tick.mobile-minor span{display:none}
+        .selection-controls{grid-template-columns:minmax(0,1fr)}.selection-controls label{grid-column:auto;width:100%;min-width:0;overflow:hidden}.selection-controls input{min-width:0;max-width:100%;width:100%}.selection-controls button,.selection-controls ha-button{width:100%}
+        .range{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.range label{min-width:0;overflow:hidden}.range input{min-width:0;max-width:100%;width:100%}.range button,.range ha-button,.range .download-link{grid-column:1/-1;width:100%}.box{padding:11px}.page{overflow-x:hidden}
       }
       @media(max-width:370px){.sidebar{grid-template-columns:1fr}.selection-controls{grid-template-columns:1fr}.selection-controls label{grid-column:auto}.range{grid-template-columns:1fr}.range button,.range ha-button,.range .download-link{grid-column:auto}.download-progress{grid-column:1}}
     </style><div class="page">
