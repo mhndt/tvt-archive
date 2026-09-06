@@ -1,5 +1,5 @@
 name: TVT Archive
-version: "0.9.3"
+version: "0.9.4"
 slug: tvt_archive
 description: Play and export the recordings on TVT camera SD cards
 url: https://github.com/mhndt/tvt-archive
