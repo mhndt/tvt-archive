@@ -14,7 +14,7 @@ On Home Assistant OS or Supervised, add this repository under Settings > Apps an
 
 [![Add repository to the app store](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fmhndt%2Ftvt-archive)
 
-Start the app. Home Assistant discovers it once the integration is installed. Set Encoder to VAAPI in the app options to use an Intel or AMD GPU for encoding.
+Start the app, then install the integration through HACS. Once installed, the integration should automatically appear under Settings > Devices & services.
 
 <details>
 <summary>Docker Compose</summary>
@@ -126,7 +126,7 @@ Tested with the TVT TD-C12. Other TVT cameras, recorders, and OEM devices may al
 
 # Development
 
-Protocol and reverse-engineering notes are in [docs/PROTOCOL.md](docs/PROTOCOL.md).
+Protocol and reverse-engineering notes are in [PROTOCOL.md](PROTOCOL.md).
 
 ```bash
 bash tests/run-tests.sh

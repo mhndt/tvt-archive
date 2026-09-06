@@ -1,0 +1,36 @@
+#include <tunables/global>
+
+profile tvt_archive flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+
+  capability chown,
+  capability dac_override,
+  capability fowner,
+  capability setgid,
+  capability setuid,
+
+  network inet,
+  network inet6,
+  signal,
+
+  /usr/local/bin/tvt-archive rix,
+  /bin/{sh,dash} rix,
+  /usr/bin/{sh,dash} rix,
+  /usr/bin/python3* rix,
+  /usr/bin/{ffmpeg,ffprobe} rix,
+
+  /opt/tvt-archive/** r,
+  /usr/lib/python3*/** r,
+  /usr/share/** r,
+
+  /data/ rw,
+  /data/** rwk,
+  /tmp/ rw,
+  /tmp/** rwk,
+
+  /dev/dri/ r,
+  /dev/dri/** rw,
+  /proc/** r,
+  /sys/** r,
+}
