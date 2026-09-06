@@ -93,6 +93,7 @@ logging.basicConfig(
 LOG = logging.getLogger("tvt-archive")
 
 CAMERA_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+CACHE_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,128}$")
 
 
 def validated_camera_id(value: Any) -> str:
@@ -102,8 +103,22 @@ def validated_camera_id(value: Any) -> str:
     return camera_id
 
 
+def validated_cache_name(value: str) -> str:
+    if not CACHE_NAME_RE.fullmatch(value):
+        raise ValueError("Cache name must contain only letters, numbers, underscores, or hyphens")
+    return value
+
+
+def path_under(root: Path, *parts: str) -> Path:
+    base = os.path.realpath(root)
+    candidate = os.path.realpath(os.path.join(base, *parts))
+    if os.path.commonpath((base, candidate)) != base or candidate == base:
+        raise ValueError("Path must stay inside its data directory")
+    return Path(candidate)
+
+
 def camera_index_directory(camera_id: str) -> Path:
-    return INDEX / validated_camera_id(camera_id)
+    return path_under(INDEX, validated_camera_id(camera_id))
 
 
 def json_dump_atomic(path: Path, value: Any, *, mode: int | None = None) -> None:
@@ -589,7 +604,7 @@ def recording_audio_mode(camera_id: str) -> str:
 
 
 def _camera_capabilities_path(camera_id: str) -> Path:
-    return camera_index_directory(camera_id) / "capabilities.json"
+    return path_under(camera_index_directory(camera_id), "capabilities.json")
 
 
 def _read_camera_capabilities(camera_id: str) -> dict[str, Any]:
@@ -1181,7 +1196,9 @@ def search_window(
     item = camera(camera_id)
     camera_index = camera_index_directory(camera_id)
     camera_index.mkdir(parents=True, exist_ok=True)
-    cache_path = camera_index / f"{cache_name}.json" if cache_name else None
+    cache_path = (
+        path_under(camera_index, f"{validated_cache_name(cache_name)}.json") if cache_name else None
+    )
     if cache_path and cache_path.exists() and time.time() - cache_path.stat().st_mtime < ttl:
         return json.loads(cache_path.read_text(encoding="utf-8"))
 

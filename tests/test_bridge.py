@@ -132,6 +132,30 @@ class BridgeTests(unittest.TestCase):
             "Front-Door-East_2026-07-30_06-49-14_to_2026-07-30_06-49-30.mp4",
         )
 
+    def test_archive_paths_reject_path_components(self) -> None:
+        self.assertEqual(
+            bridge.camera_index_directory("front_door").resolve(),
+            (bridge.INDEX / "front_door").resolve(),
+        )
+        with self.assertRaises(ValueError):
+            bridge.camera_index_directory("../outside")
+        for value in ("../escape", "nested/name", r"nested\name", ".", ""):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    bridge.validated_cache_name(value)
+
+    @unittest.skipIf(os.name == "nt", "POSIX symlink semantics")
+    def test_archive_paths_reject_symlink_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as outside:
+            link = bridge.INDEX / "escape-link"
+            link.unlink(missing_ok=True)
+            link.symlink_to(outside, target_is_directory=True)
+            try:
+                with self.assertRaises(ValueError):
+                    bridge.path_under(bridge.INDEX, "escape-link", "file.json")
+            finally:
+                link.unlink(missing_ok=True)
+
     def test_low_quality_uses_software_x264_by_default(self) -> None:
         pre, out = bridge.video_args("low", "software")
         self.assertEqual(pre, [])
