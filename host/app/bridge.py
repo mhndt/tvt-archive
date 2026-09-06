@@ -287,6 +287,10 @@ DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 TIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}$")
 
 
+class JobCancelled(Exception):
+    pass
+
+
 @dataclasses.dataclass
 class Job:
     id: str
@@ -308,6 +312,7 @@ class Job:
     captured_seconds: float = 0.0
     processed_seconds: float = 0.0
     remaining_seconds: float = 0.0
+    cancel_event: threading.Event = dataclasses.field(default_factory=threading.Event, repr=False)
 
     def public(self) -> dict[str, Any]:
         now = time.time()
@@ -814,10 +819,14 @@ def _run_logged_process(
     log_path: Path,
     env: dict[str, str] | None = None,
     monitor: Callable[[], None] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise JobCancelled
     LOG.info("Running %s", " ".join(command[:2]) + (" …" if len(command) > 2 else ""))
     deadline = time.monotonic() + timeout
     timed_out = False
+    cancelled = False
     with log_path.open("wb") as log_handle:
         process = subprocess.Popen(
             command,
@@ -827,6 +836,15 @@ def _run_logged_process(
         )
         try:
             while process.poll() is None:
+                if cancel_event is not None and cancel_event.is_set():
+                    cancelled = True
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=5)
+                    break
                 if monitor is not None:
                     try:
                         monitor()
@@ -851,6 +869,8 @@ def _run_logged_process(
                     process.kill()
                     process.wait(timeout=5)
     output = _redact_log(log_path, env)
+    if cancelled:
+        raise JobCancelled
     if timed_out:
         tail = "\n".join(output.splitlines()[-30:])
         raise TimeoutError(f"Command exceeded {timeout} seconds\n{tail}")
@@ -912,6 +932,7 @@ def run_capture_with_progress(
         log_path=log_path,
         env=env,
         monitor=monitor,
+        cancel_event=job.cancel_event,
     )
     monitor()
     update_job(job, progress=0.92, captured_seconds=float(duration), remaining_seconds=0.0)
@@ -965,6 +986,7 @@ def run_ffmpeg_with_progress(
         timeout=timeout,
         log_path=log_path,
         monitor=monitor,
+        cancel_event=job.cancel_event,
     )
     monitor()
     update_job(job, progress=0.99, processed_seconds=float(duration), remaining_seconds=0.0)
@@ -973,7 +995,7 @@ def run_ffmpeg_with_progress(
 def camera_has_active_jobs(camera_id: str) -> bool:
     with JOBS_LOCK:
         jobs = any(
-            job.camera_id == camera_id and job.status in ("queued", "running")
+            job.camera_id == camera_id and job.status in ("queued", "running", "cancelling")
             for job in JOBS.values()
         )
     with SESSIONS_LOCK:
@@ -1459,6 +1481,7 @@ def generate_job(job: Job) -> None:
     output_path = CACHE / f"{job.cache_key}.mp4"
     job_log = LOGS / f"{job.id}.log"
     work_directory = Path(tempfile.mkdtemp(prefix=f"job-{job.id[:8]}-", dir=WORK))
+    promoted = False
     update_job(
         job,
         status="queued",
@@ -1470,6 +1493,8 @@ def generate_job(job: Job) -> None:
         remaining_seconds=float(duration),
     )
     try:
+        if job.cancel_event.is_set():
+            raise JobCancelled
         if output_path.exists() and output_path.stat().st_size > 1024:
             update_job(
                 job,
@@ -1492,7 +1517,15 @@ def generate_job(job: Job) -> None:
             str(duration),
             str(work_directory),
         ]
-        with camera_session_slot(job.camera_id):
+        slot = camera_session_slot(job.camera_id)
+        acquired = False
+        try:
+            while not acquired:
+                if job.cancel_event.is_set():
+                    raise JobCancelled
+                acquired = slot.acquire(timeout=0.25)
+            if job.cancel_event.is_set():
+                raise JobCancelled
             update_job(
                 job,
                 status="running",
@@ -1508,6 +1541,11 @@ def generate_job(job: Job) -> None:
                 env=capture_environment(item),
                 log_path=capture_log,
             )
+        finally:
+            if acquired:
+                slot.release()
+        if job.cancel_event.is_set():
+            raise JobCancelled
         summary_path = work_directory / "summary.json"
         video_path = work_directory / "video.h264"
         audio_path = work_directory / "audio.alaw"
@@ -1629,6 +1667,8 @@ def generate_job(job: Job) -> None:
             log_path=ffmpeg_log,
         )
         update_job(job, phase="Validating file", progress=0.995)
+        if job.cancel_event.is_set():
+            raise JobCancelled
         probe = run_command(
             [
                 "ffprobe",
@@ -1642,6 +1682,8 @@ def generate_job(job: Job) -> None:
             ],
             timeout=30,
         )
+        if job.cancel_event.is_set():
+            raise JobCancelled
         stream_types = {
             stream.get("codec_type") for stream in json.loads(probe.stdout).get("streams", [])
         }
@@ -1651,6 +1693,9 @@ def generate_job(job: Job) -> None:
                 f"Generated MP4 is missing required streams: {sorted(required_streams - stream_types)}"
             )
         promote_completed_file(work_directory / "final.mp4", output_path, mode=0o600)
+        promoted = True
+        if job.cancel_event.is_set():
+            raise JobCancelled
         job_log.write_text(
             "\n=== Archive capture ===\n"
             + capture_log.read_text(errors="replace")
@@ -1671,6 +1716,18 @@ def generate_job(job: Job) -> None:
             remaining_seconds=0.0,
         )
         shutil.rmtree(work_directory, ignore_errors=True)
+    except JobCancelled:
+        if promoted:
+            output_path.unlink(missing_ok=True)
+        shutil.rmtree(work_directory, ignore_errors=True)
+        update_job(
+            job,
+            status="cancelled",
+            phase="Cancelled",
+            finished_at=time.time(),
+            error=None,
+            remaining_seconds=0.0,
+        )
     except Exception as error:
         LOG.error("Job %s failed: %s", job.id, error)
         try:
@@ -1713,7 +1770,7 @@ def create_job(camera_id: str, request: dict[str, Any]) -> Job:
         if (
             existing_id
             and existing_id in JOBS
-            and JOBS[existing_id].status in ("queued", "running", "ready")
+            and JOBS[existing_id].status in ("queued", "running", "cancelling", "ready")
         ):
             return JOBS[existing_id]
         job = Job(id=uuid.uuid4().hex, camera_id=camera_id, cache_key=cache_key, request=normalized)
@@ -1728,6 +1785,18 @@ def create_job(camera_id: str, request: dict[str, Any]) -> Job:
     if job.status == "queued":
         EXECUTOR.submit(generate_job, job)
     return job
+
+
+def stop_job(job_id: str) -> Job:
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if job is None:
+            raise KeyError("Unknown job")
+        if job.status in ("queued", "running", "cancelling"):
+            job.cancel_event.set()
+            job.status = "cancelling"
+            job.phase = "Cancelling"
+        return job
 
 
 def _tail_text(path: Path, limit: int = 12000) -> str:
@@ -3076,7 +3145,9 @@ class Handler(BaseHTTPRequestHandler):
                     "camera_count": len(CAMERAS),
                     "encoder": encoder_info(),
                     "native_session_limit_per_camera": NATIVE_SESSION_LIMIT,
-                    "active_jobs": sum(j.status in ("queued", "running") for j in JOBS.values()),
+                    "active_jobs": sum(
+                        j.status in ("queued", "running", "cancelling") for j in JOBS.values()
+                    ),
                     "active_playback_sessions": sum(
                         x.status in ("queued", "running", "playing") for x in SESSIONS.values()
                     ),
@@ -3248,6 +3319,13 @@ class Handler(BaseHTTPRequestHandler):
             except KeyError as error:
                 self._error(404, str(error))
             return
+        job_match = re.fullmatch(r"/api/jobs/([a-f0-9]{32})", path)
+        if job_match:
+            try:
+                self._json(stop_job(job_match.group(1)).public())
+            except KeyError as error:
+                self._error(404, str(error))
+            return
         match = re.fullmatch(r"/api/cameras/([^/]+)", path)
         if not match:
             self._error(404, "Not found")
@@ -3282,6 +3360,8 @@ if __name__ == "__main__":
     try:
         server.serve_forever(poll_interval=0.5)
     finally:
+        for job in list(JOBS.values()):
+            job.cancel_event.set()
         for value in list(SESSIONS.values()):
             value.stop_event.set()
         for stream in list(FRAME_SESSIONS.values()):

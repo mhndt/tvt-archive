@@ -396,6 +396,15 @@ class JobView(HomeAssistantView):
             raise web.HTTPBadGateway(text="TVT Archive request failed") from error
         return self.json(_add_media_urls(entry_id, data, job))
 
+    async def delete(self, request, entry_id, job_id):
+        data = _entry_data(request.app["hass"], entry_id)
+        try:
+            job = await data["api"].cancel_job(job_id)
+        except TVTArchiveApiError as error:
+            _LOGGER.warning("TVT Archive bridge request failed: %s", error)
+            raise web.HTTPBadGateway(text="TVT Archive request failed") from error
+        return self.json(_add_media_urls(entry_id, data, job))
+
 
 class MediaView(HomeAssistantView):
     url = "/api/tvt_archive/media/{entry_id}/{job_id}.mp4"

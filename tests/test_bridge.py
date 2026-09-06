@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -110,6 +111,28 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(public["captured_seconds"], 26.2)
         job.status = "ready"
         self.assertEqual(job.public()["progress_percent"], 100)
+
+    def test_stop_job_marks_active_export_cancelling(self) -> None:
+        job = bridge.Job("c" * 32, "front_door", "cache", {"duration": 60})
+        job.status = "running"
+        with patch.dict(bridge.JOBS, {job.id: job}):
+            result = bridge.stop_job(job.id)
+        self.assertIs(result, job)
+        self.assertTrue(job.cancel_event.is_set())
+        self.assertEqual(job.status, "cancelling")
+        self.assertEqual(job.phase, "Cancelling")
+
+    def test_logged_process_honors_cancel_before_start(self) -> None:
+        cancel = threading.Event()
+        cancel.set()
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(bridge.JobCancelled):
+                bridge._run_logged_process(
+                    [sys.executable, "-c", "raise SystemExit(99)"],
+                    timeout=5,
+                    log_path=Path(directory) / "cancel.log",
+                    cancel_event=cancel,
+                )
 
     def test_capture_span_prefers_explicit_value(self) -> None:
         self.assertEqual(bridge._captured_span_seconds({"captured_seconds": 12.5}), 12.5)

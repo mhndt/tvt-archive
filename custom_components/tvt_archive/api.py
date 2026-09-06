@@ -128,6 +128,9 @@ class TVTArchiveApi:
     async def job(self, job_id: str) -> dict[str, Any]:
         return await self.request("GET", f"/api/jobs/{job_id}")
 
+    async def cancel_job(self, job_id: str) -> dict[str, Any]:
+        return await self.request("DELETE", f"/api/jobs/{job_id}")
+
     async def open_player_script(self) -> ClientResponse:
         response = await self.session.get(
             self._url("/api/player/hls.js"),

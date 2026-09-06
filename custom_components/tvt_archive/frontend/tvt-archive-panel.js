@@ -655,6 +655,7 @@ class TVTArchivePanel extends HTMLElement {
     this._timeline = null;
     this._status = null;
     this._busy = false;
+    this._cancelling = false;
     this._downloadJobId = null;
     this._downloadUrl = null;
     this._downloadFilename = null;
@@ -891,22 +892,23 @@ class TVTArchivePanel extends HTMLElement {
   }
 
   _downloadActionLabel() {
-    const phase = String(this._downloadPhase || "").toLowerCase();
-    if (phase.includes("receiv")) return "Receiving";
-    if (phase.includes("browser file") || phase.includes("process") || phase.includes("validat")) return "Processing";
-    return "Preparing";
+    if (!this._busy) return "Download original";
+    if (this._cancelling) return "Cancelling…";
+    return this._downloadJobId ? "Cancel" : "Preparing";
   }
 
   _updateDownloadUi() {
     const percent = Math.max(0, Math.min(100, Math.round(Number(this._downloadPercent || 0))));
     const button = this.shadowRoot.getElementById("download");
+    const play = this.shadowRoot.getElementById("play");
     const progress = this.shadowRoot.getElementById("download-progress");
     const bar = this.shadowRoot.getElementById("download-progress-bar");
     const label = this.shadowRoot.getElementById("download-percent");
     if (button) {
-      button.disabled = this._busy;
-      button.textContent = this._busy ? this._downloadActionLabel() : "Download original";
+      button.disabled = this._cancelling || (this._busy && !this._downloadJobId);
+      button.textContent = this._downloadActionLabel();
     }
+    if (play) play.disabled = this._busy;
     if (progress) progress.classList.toggle("visible", this._busy || percent === 100);
     if (bar) {
       bar.style.width = `${percent}%`;
@@ -918,6 +920,7 @@ class TVTArchivePanel extends HTMLElement {
 
   _resetDownloadResult() {
     if (this._busy) return;
+    this._cancelling = false;
     this._downloadJobId = null;
     this._downloadUrl = null;
     this._downloadFilename = null;
@@ -960,7 +963,7 @@ class TVTArchivePanel extends HTMLElement {
       .fp-bar button{color:#fff;width:40px;height:40px;padding:0;display:grid;place-items:center;border-radius:50%}.fp-bar button:hover{background:rgba(255,255,255,.15)}.fp-bar button:active{background:rgba(255,255,255,.3)}.fp-bar svg{width:26px;height:26px;fill:currentColor}.fp-speed{font-size:.8rem;opacity:.85;margin-left:6px}.fp-space{flex:1}.fp-volume{--fp-volume-level:100%;display:none;width:78px;height:20px;margin:0 2px;padding:0;border:0;border-radius:0;-webkit-appearance:none;appearance:none;background:linear-gradient(to right,var(--primary-color) 0 var(--fp-volume-level),rgba(255,255,255,.35) var(--fp-volume-level) 100%);background-size:100% 3px;background-position:center;background-repeat:no-repeat}.fp-volume::-webkit-slider-runnable-track{height:3px;background:transparent}.fp-volume::-webkit-slider-thumb{width:12px;height:12px;margin-top:-4.5px;border:0;border-radius:50%;-webkit-appearance:none;appearance:none;background:#fff}.fp-volume::-moz-range-track{height:3px;border:0;background:transparent}.fp-volume::-moz-range-progress{height:3px;background:transparent}.fp-volume::-moz-range-thumb{width:12px;height:12px;border:0;border-radius:50%;background:#fff}.fp-volume:focus-visible{outline:2px solid var(--primary-color);outline-offset:2px}@media(hover:hover) and (pointer:fine){.fp-volume:not([hidden]){display:block}}
       .empty{padding:32px;text-align:center;color:#bdbdbd}.sidebar{padding:14px;display:grid;gap:10px;align-content:start}.stat{padding:10px 12px;background:var(--secondary-background-color);border-radius:10px}.stat span{color:var(--secondary-text-color);font-size:.8rem}.stat b{display:block;margin-top:3px;overflow-wrap:anywhere}
       .timeline-card{padding:12px}.timeline-title{display:flex;justify-content:space-between;gap:10px;margin-bottom:8px}.timeline{height:112px;overflow-x:auto;overflow-y:hidden;position:relative;background:var(--secondary-background-color);border-radius:10px;cursor:crosshair}.timeline-inner{height:100%;position:relative;min-width:720px}.segment{position:absolute;top:38px;height:42px;border-radius:6px;background:var(--success-color,#43a047);background:color-mix(in srgb,var(--success-color,#43a047) 78%,var(--secondary-background-color) 22%)}.tick{position:absolute;top:0;bottom:0;width:1px;background:var(--divider-color)}.tick span{position:absolute;left:0;top:7px;transform:translateX(-50%);font-size:.7rem;color:var(--secondary-text-color);white-space:nowrap}.tick:first-child span{left:6px;transform:none}.tick-end{left:auto!important;right:0}.tick-end span{left:auto;right:8px;transform:none}.marker{position:absolute;top:36px;bottom:12px;width:2px;background:var(--error-color,#e53935)}.marker:after{content:"";position:absolute;top:-9px;left:-4px;width:10px;height:10px;border-radius:50%;background:inherit}
-      .lower{display:grid;grid-template-columns:1fr 1fr;gap:14px}.box{padding:13px;min-width:0;overflow:hidden}.selection-controls{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:end}.selection-controls>*{min-width:0;max-width:100%}.range{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;gap:8px;align-items:end}.range>*{min-width:0;max-width:100%}.selection-controls label,.range label{gap:8px}.download-progress{display:none;grid-column:1/-1;align-items:center;gap:9px;font-size:.78rem;color:var(--secondary-text-color)}.download-progress.visible{display:flex}.download-track{height:5px;flex:1;overflow:hidden;border-radius:999px;background:var(--divider-color)}.download-bar{height:100%;width:0;background:var(--primary-color);transition:width .25s ease}.download-percent{min-width:34px;text-align:right;font-variant-numeric:tabular-nums}.statusline{min-height:22px;color:var(--secondary-text-color)}.error{color:var(--error-color)}
+      .lower{display:grid;grid-template-columns:1fr 1fr;gap:14px}.box{padding:13px;min-width:0;overflow:hidden}.selection-controls{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:end}.selection-controls>*{min-width:0;max-width:100%}.range{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;gap:8px;align-items:end}.range>*{min-width:0;max-width:100%}.selection-controls label,.range label{gap:8px}.download-progress{display:none;grid-column:1/-1;align-items:center;gap:0;font-size:.78rem;color:var(--secondary-text-color)}.download-progress.visible{display:flex}.download-track{height:5px;flex:1;overflow:hidden;border-radius:999px;background:var(--divider-color)}.download-bar{height:100%;width:0;background:var(--primary-color);transition:width .25s ease}.download-percent{flex:0 0 43px;text-align:center;font-variant-numeric:tabular-nums}.statusline{min-height:22px;color:var(--secondary-text-color)}.error{color:var(--error-color)}
       @media(min-width:901px) and (min-height:720px){
         :host{height:100dvh;overflow:hidden}.page{height:100%;overflow:hidden;padding:12px 18px;gap:10px;grid-template-rows:auto auto minmax(0,1fr) auto auto auto}
         .shell{min-height:0;gap:10px}.shell>.card:first-child{display:grid;grid-template-rows:auto minmax(0,1fr);min-height:0}.player{height:100%;min-height:0}.player video,.player .frame-player{height:100%;min-height:0;max-height:none}
@@ -987,8 +990,8 @@ class TVTArchivePanel extends HTMLElement {
         </div>
       </div>
       <div class="card timeline-card"><div class="timeline-title"><span>Click a recorded section to select a time</span><b>${selected}</b></div><div id="timeline" class="timeline">${this._timelineHtml()}</div></div>
-      <div class="lower"><div class="card box"><div class="selection-controls"><label><span>Selected time</span><input id="selected" type="time" step="1" value="${selected}"></label>${btn("play", "Play from here", "", "filled")}</div></div>
-        <div class="card box"><div class="range"><label><span>Download start</span><input id="range-start" type="time" step="1" value="${$esc(this._rangeStart)}"></label><label><span>Download end</span><input id="range-end" type="time" step="1" value="${$esc(this._rangeEnd)}"></label>${this._downloadUrl ? `<a id="save-download" class="download-link" href="${$esc(this._downloadUrl)}" download="${$esc(this._downloadFilename || "recording.mp4")}">Save file</a>` : btn("download", this._busy ? this._downloadActionLabel() : "Download original", this._busy ? "disabled" : "")}<div id="download-progress" class="download-progress ${this._busy || this._downloadPercent === 100 ? "visible" : ""}"><div class="download-track" role="progressbar" aria-label="Export progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.max(0, Math.min(100, Math.round(this._downloadPercent || 0)))}"><div id="download-progress-bar" class="download-bar" style="width:${Math.max(0, Math.min(100, Math.round(this._downloadPercent || 0)))}%"></div></div><span id="download-percent" class="download-percent">${Math.max(0, Math.min(100, Math.round(this._downloadPercent || 0)))}%</span></div></div></div></div>
+      <div class="lower"><div class="card box"><div class="selection-controls"><label><span>Selected time</span><input id="selected" type="time" step="1" value="${selected}"></label>${btn("play", "Play from here", this._busy ? "disabled" : "", "filled")}</div></div>
+        <div class="card box"><div class="range"><label><span>Download start</span><input id="range-start" type="time" step="1" value="${$esc(this._rangeStart)}"></label><label><span>Download end</span><input id="range-end" type="time" step="1" value="${$esc(this._rangeEnd)}"></label>${this._downloadUrl ? `<a id="save-download" class="download-link" href="${$esc(this._downloadUrl)}" download="${$esc(this._downloadFilename || "recording.mp4")}">Save file</a>` : btn("download", this._downloadActionLabel(), this._cancelling || (this._busy && !this._downloadJobId) ? "disabled" : "")}<div id="download-progress" class="download-progress ${this._busy || this._downloadPercent === 100 ? "visible" : ""}"><div class="download-track" role="progressbar" aria-label="Export progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.max(0, Math.min(100, Math.round(this._downloadPercent || 0)))}"><div id="download-progress-bar" class="download-bar" style="width:${Math.max(0, Math.min(100, Math.round(this._downloadPercent || 0)))}%"></div></div><span id="download-percent" class="download-percent">${Math.max(0, Math.min(100, Math.round(this._downloadPercent || 0)))}%</span></div></div></div></div>
       <div id="statusline" class="statusline ${this._error ? "error" : ""}">${$esc(this._error || this._message || "")}</div>
     </div>`;
     this._bind();
@@ -1047,7 +1050,10 @@ class TVTArchivePanel extends HTMLElement {
     });
     get("range-start")?.addEventListener("change", (event) => { this._rangeStart = event.currentTarget.value; this._resetDownloadResult(); this._render(); });
     get("range-end")?.addEventListener("change", (event) => { this._rangeEnd = event.currentTarget.value; this._resetDownloadResult(); this._render(); });
-    get("download")?.addEventListener("click", () => this._download());
+    get("download")?.addEventListener("click", () => {
+      if (this._busy) this._cancelDownload();
+      else this._download();
+    });
     get("save-download")?.addEventListener("click", () => {
       this._message = "Download started";
       this._updateStatusLine();
@@ -1192,6 +1198,7 @@ class TVTArchivePanel extends HTMLElement {
   }
 
   async _playRecording(automaticRetry = false) {
+    if (this._busy) return;
     clearTimeout(this._playbackRetryTimer);
     if (!automaticRetry) { this._playbackRetryCount = 0; this._playbackRetryPending = false; }
     if (FRAME_PLAYER_SUPPORTED) { await this._playStream(); return; }
@@ -1401,6 +1408,48 @@ class TVTArchivePanel extends HTMLElement {
     this._render();
   }
 
+  _finishCancelledDownload() {
+    clearTimeout(this._pollTimer);
+    this._busy = false;
+    this._cancelling = false;
+    this._downloadJobId = null;
+    this._downloadPercent = 0;
+    this._downloadPhase = "";
+    this._downloadUrl = null;
+    this._downloadFilename = null;
+    this._message = "";
+    this._error = "";
+    this._persistState();
+    this._render();
+    clearTimeout(this._statusTimer);
+    this._statusTimer = setTimeout(() => this._loadStatus(), 1000);
+  }
+
+  async _cancelDownload() {
+    const jobId = this._downloadJobId;
+    if (!this._busy || !jobId || this._cancelling) return;
+    this._cancelling = true;
+    this._downloadPhase = "Cancelling";
+    this._message = this._downloadPhase;
+    this._error = "";
+    this._updateDownloadUi();
+    try {
+      const job = await this._api("DELETE", `tvt_archive/${this._entryId}/jobs/${jobId}`);
+      if (this._downloadJobId !== jobId) return;
+      if (job.status === "cancelled") {
+        this._finishCancelledDownload();
+        return;
+      }
+      clearTimeout(this._pollTimer);
+      this._pollTimer = setTimeout(() => this._pollDownload(jobId), 250);
+    } catch (error) {
+      this._cancelling = false;
+      this._error = errorText(error);
+      this._message = this._downloadPhase || "";
+      this._updateDownloadUi();
+    }
+  }
+
   async _download() {
     try {
       const start = this._rangeStart, end = this._rangeEnd;
@@ -1413,6 +1462,7 @@ class TVTArchivePanel extends HTMLElement {
         await this._stopPlaybackSession();
       }
       this._busy = true;
+      this._cancelling = false;
       this._downloadJobId = null;
       this._downloadUrl = null;
       this._downloadFilename = null;
@@ -1421,13 +1471,15 @@ class TVTArchivePanel extends HTMLElement {
       this._error = "";
       this._message = this._downloadPhase;
       this._persistState();
-      if (this._isPlaying()) this._updateDownloadUi(); else this._render();
+      this._render();
       const job = await this._api("POST", `tvt_archive/${this._entryId}/cameras/${this._cameraId}/jobs`, {start: isoFor(this._date, start), duration, gain_db: 0, quality: "original", kind: "download"});
       this._downloadJobId = job.id;
       this._persistState();
+      this._updateDownloadUi();
       await this._pollDownload(job.id);
     } catch (error) {
       this._busy = false;
+      this._cancelling = false;
       this._downloadJobId = null;
       this._downloadPercent = 0;
       this._downloadPhase = "";
@@ -1436,7 +1488,7 @@ class TVTArchivePanel extends HTMLElement {
       this._message = "";
       this._error = errorText(error);
       this._persistState();
-      if (this._isPlaying()) this._updateDownloadUi(); else this._render();
+      this._render();
     }
   }
 
@@ -1444,18 +1496,24 @@ class TVTArchivePanel extends HTMLElement {
     try {
       const job = await this._api("GET", `tvt_archive/${this._entryId}/jobs/${jobId}`);
       if (this._downloadJobId !== jobId) return;
+      if (job.status === "cancelled") {
+        this._finishCancelledDownload();
+        return;
+      }
+      if (job.status === "cancelling") this._cancelling = true;
       this._downloadPercent = Math.max(0, Math.min(100, Math.round(Number(job.progress_percent ?? Number(job.progress || 0) * 100))));
-      this._downloadPhase = job.phase || job.status || "Preparing";
+      this._downloadPhase = this._cancelling ? "Cancelling" : (job.phase || job.status || "Preparing");
       this._message = this._downloadPhase;
       if (job.status === "error") throw new Error(job.error || "Download preparation failed");
       if (job.ready) {
         this._busy = false;
+        this._cancelling = false;
         this._downloadPercent = 100;
         this._downloadUrl = job.download_url;
         this._downloadFilename = job.filename || "recording.mp4";
         this._message = "Download ready";
         this._persistState();
-        if (this._isPlaying()) this._updateDownloadUi(); else this._render();
+        this._render();
         clearTimeout(this._statusTimer);
         this._statusTimer = setTimeout(() => this._loadStatus(), 1000);
         return;
@@ -1464,9 +1522,10 @@ class TVTArchivePanel extends HTMLElement {
       this._persistState();
       this._updateDownloadUi();
       clearTimeout(this._pollTimer);
-      this._pollTimer = setTimeout(() => this._pollDownload(jobId), 1000);
+      this._pollTimer = setTimeout(() => this._pollDownload(jobId), this._cancelling ? 250 : 1000);
     } catch (error) {
       this._busy = false;
+      this._cancelling = false;
       this._downloadJobId = null;
       this._downloadPercent = 0;
       this._downloadPhase = "";
@@ -1475,7 +1534,7 @@ class TVTArchivePanel extends HTMLElement {
       this._message = "";
       this._error = errorText(error);
       this._persistState();
-      if (this._isPlaying()) this._updateDownloadUi(); else this._render();
+      this._render();
       clearTimeout(this._statusTimer);
       this._statusTimer = setTimeout(() => this._loadStatus(), 1000);
     }
