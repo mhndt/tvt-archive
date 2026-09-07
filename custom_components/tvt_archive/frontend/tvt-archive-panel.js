@@ -317,7 +317,10 @@ class TVTFramePlayer {
     this.hoverable = window.matchMedia("(hover: hover)").matches;
     this.element.addEventListener("pointerenter", (event) => { if (event.pointerType !== "touch") this._showBar(2500); });
     this.element.addEventListener("pointermove", (event) => { if (event.pointerType !== "touch") this._showBar(2500); });
-    this.element.addEventListener("pointerleave", () => this._showBar(0));
+    // Touch pointers leave on finger-up, before Safari dispatches the click. Hiding
+    // the bar here removes the button from hit testing in the middle of a tap.
+    this.element.addEventListener("pointerleave", (event) => { if (event.pointerType !== "touch") this._showBar(0); });
+    this.element.querySelector(".fp-bar").addEventListener("pointerdown", () => this._showBar(2500));
     this.volume = 1;
     this.element.querySelector(".fp-volume").addEventListener("input", (event) => {
       this.volume = Number(event.target.value);
@@ -328,6 +331,7 @@ class TVTFramePlayer {
     this.element.addEventListener("dblclick", (event) => { if (!event.target.closest("button")) this._action("full"); });
     this._onFullscreen = () => this._syncButtons();
     document.addEventListener("fullscreenchange", this._onFullscreen);
+    this._syncButtons();
   }
 
   prime() {
@@ -391,7 +395,11 @@ class TVTFramePlayer {
       return;
     }
     if (kind === REC_VIDEO) { this._video(pts, Boolean(flags & 1), payload); return; }
-    if (kind === REC_AUDIO) { this.hasAudio = true; this.audioQueue.push({pts, data: payload.slice()}); this._syncButtons(); return; }
+    if (kind === REC_AUDIO) {
+      this.audioQueue.push({pts, data: payload.slice()});
+      if (!this.hasAudio) { this.hasAudio = true; this._syncButtons(); }
+      return;
+    }
     if (kind === REC_MARK) { this._flush(); try { this.generation = JSON.parse(new TextDecoder().decode(payload)).generation || 0; } catch (_) {} this._state("seeking"); return; }
     if (kind === REC_END) { let info = {}; try { info = JSON.parse(new TextDecoder().decode(payload)); } catch (_) {} this._end(info); }
   }
@@ -563,23 +571,14 @@ class TVTFramePlayer {
 
   toggleFullscreen() {
     if (document.fullscreenElement) { document.exitFullscreen?.(); return; }
-    if (this.element.requestFullscreen) { this.element.requestFullscreen().catch(() => this._iosFullscreen()); return; }
-    this._iosFullscreen();
+    if (!this._canFullscreen()) return;
+    this.element.requestFullscreen().catch(() => {});
   }
 
-  _iosFullscreen() {
-    // iPhone only lets <video> go full screen; mirror the canvas into one.
-    try {
-      if (!this.mirror) {
-        this.mirror = document.createElement("video");
-        this.mirror.playsInline = true; this.mirror.muted = true; this.mirror.setAttribute("playsinline", "");
-        this.mirror.style.cssText = "position:absolute;width:1px;height:1px;opacity:0;pointer-events:none";
-        this.mirror.srcObject = this.canvas.captureStream(30);
-        this.element.append(this.mirror);
-      }
-      this.mirror.play().catch(() => {});
-      this.mirror.webkitEnterFullscreen?.();
-    } catch (_) {}
+  _canFullscreen() {
+    // Fullscreen must present this canvas and its controls. iPhone's video-only
+    // webkitEnterFullscreen API cannot reliably present a canvas capture stream.
+    return Boolean(document.fullscreenEnabled && this.element.requestFullscreen);
   }
 
   _showBar(ms) {
@@ -590,10 +589,13 @@ class TVTFramePlayer {
   }
 
   _syncButtons() {
-    const set = (act, name, label) => { const b = this.element.querySelector(`button[data-act="${act}"]`); if (b) { b.innerHTML = icon(name); b.setAttribute("aria-label", label); } };
+    // Keep the SVG hit target alive between pointerdown and click, including when
+    // audio packets or fullscreen events arrive during the gesture.
+    const set = (act, name, label) => { const b = this.element.querySelector(`button[data-act="${act}"]`); if (b && b.getAttribute("aria-label") !== label) { b.innerHTML = icon(name); b.setAttribute("aria-label", label); } };
     set("toggle", this.paused ? "play" : "pause", this.paused ? "Play" : "Pause");
     set("mute", this.muted ? "muted" : "sound", this.muted ? "Unmute" : "Mute");
     set("full", document.fullscreenElement ? "unfull" : "full", document.fullscreenElement ? "Exit full screen" : "Full screen");
+    this.element.querySelector('button[data-act="full"]').hidden = !this._canFullscreen();
     const mute = this.element.querySelector('button[data-act="mute"]'); if (mute) mute.hidden = !this.hasAudio;
     const slider = this.element.querySelector(".fp-volume");
     if (slider) {
@@ -956,7 +958,11 @@ class TVTArchivePanel extends HTMLElement {
 
       .controls{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;max-width:100%}.controls label{flex:1 1 150px}
       label{display:grid;gap:4px;color:var(--secondary-text-color);font-size:.78rem;min-width:0}label>span{white-space:nowrap}
-      input,select{font:inherit;color:var(--primary-text-color);background:var(--card-background-color);border:1px solid var(--divider-color);border-radius:10px;padding:0 11px;height:var(--ha-button-height,40px);min-width:0;max-width:100%;width:100%}input[type="time"],input[type="date"]{display:block;min-inline-size:0;inline-size:100%;text-align:center;line-height:var(--ha-button-height,40px)}input[type="time"]::-webkit-date-and-time-value,input[type="date"]::-webkit-date-and-time-value{text-align:center}input[type="time"]::-webkit-datetime-edit,input[type="date"]::-webkit-datetime-edit{padding:0}
+      input,select{font:inherit;color:var(--primary-text-color);background:var(--card-background-color);border:1px solid var(--divider-color);border-radius:10px;padding:0 11px;height:var(--ha-button-height,40px);min-width:0;max-width:100%;width:100%}
+      /* iOS's native date/time theme forces an intrinsic min-width and content-box
+         sizing for percentage widths. Opt out here, inside the panel shadow root;
+         the native picker and the centered value styling below remain intact. */
+      input[type="time"],input[type="date"]{-webkit-appearance:none;appearance:none;display:block;position:relative;min-inline-size:0;inline-size:100%;text-align:center;line-height:var(--ha-button-height,40px)}input[type="time"]::-webkit-date-and-time-value,input[type="date"]::-webkit-date-and-time-value{margin-inline:0;text-align:center}input[type="time"]::-webkit-datetime-edit,input[type="date"]::-webkit-datetime-edit{padding:0}input[type="time"]::-webkit-calendar-picker-indicator,input[type="date"]::-webkit-calendar-picker-indicator{position:absolute;top:0;bottom:0;right:0;margin:auto 0}
       button,.download-link{cursor:pointer;font:inherit;font-weight:500;font-size:14px;color:var(--primary-color);background:none;border:0;border-radius:var(--ha-button-border-radius,var(--ha-border-radius-pill,4px));padding:0 var(--ha-space-4,12px);height:var(--ha-button-height,var(--button-height,40px));white-space:nowrap;display:inline-flex;align-items:center;justify-content:center;text-decoration:none;transition:background-color .15s}button:hover,.download-link:hover{background:rgba(var(--rgb-primary-color,3,169,244),.08)}button:active,.download-link:active{background:rgba(var(--rgb-primary-color,3,169,244),.18)}button.filled{background:var(--ha-color-fill-primary-normal-resting,rgba(var(--rgb-primary-color,3,169,244),.16));color:var(--ha-color-on-primary-normal,var(--primary-color))}button.filled:hover{background:var(--ha-color-fill-primary-normal-hover,rgba(var(--rgb-primary-color,3,169,244),.28))}button.filled:active{background:var(--ha-color-fill-primary-normal-active,rgba(var(--rgb-primary-color,3,169,244),.16))}button:disabled{cursor:default;color:var(--ha-color-on-disabled-normal,var(--disabled-text-color,#9b9b9b));background:none;border-color:var(--ha-color-on-disabled-quiet,var(--disabled-color,rgba(128,128,128,.3)))}button.filled:disabled{background:var(--ha-color-fill-disabled-normal-resting,var(--disabled-color,rgba(128,128,128,.2)))}
       .shell{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:14px}.card{background:var(--ha-card-background,var(--card-background-color));border-radius:var(--ha-card-border-radius,12px);border:var(--ha-card-border-width,1px) solid var(--ha-card-border-color,var(--divider-color));box-shadow:var(--ha-card-box-shadow,none);overflow:hidden;min-width:0}
       .player-head{padding:11px 14px;display:flex;justify-content:space-between;align-items:center;gap:10px;border-bottom:1px solid var(--divider-color)}
@@ -965,8 +971,8 @@ class TVTArchivePanel extends HTMLElement {
       .frame-player{position:relative;width:100%;background:#000;display:grid;grid-area:1/1;overflow:hidden;cursor:default}.frame-player canvas{width:100%;height:100%;object-fit:contain;display:block;grid-area:1/1;background:#000}.frame-player:fullscreen{width:100vw;height:100vh}
       .fp-wait{display:none;grid-area:1/1;place-self:center;align-items:center;gap:10px;padding:10px 13px;border-radius:10px;background:rgba(0,0,0,.58);color:#fff;font-size:.92rem;pointer-events:none}.fp-wait.visible{display:flex}
       .fp-bar{position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:4px;padding:4px 6px;background:linear-gradient(transparent,rgba(0,0,0,.65));color:#fff;opacity:0;transition:opacity .2s;pointer-events:none}.frame-player.show-bar .fp-bar,.frame-player.paused .fp-bar{opacity:1;pointer-events:auto}
-      .fp-bar button{color:#fff;width:40px;height:40px;padding:0;display:grid;place-items:center;border-radius:50%}.fp-bar button:hover{background:rgba(255,255,255,.15)}.fp-bar button:active{background:rgba(255,255,255,.3)}.fp-bar svg{width:26px;height:26px;fill:currentColor}.fp-speed{font-size:.8rem;opacity:.85;margin-left:6px}.fp-space{flex:1}.fp-volume{--fp-volume-level:100%;display:none;width:78px;height:20px;margin:0 2px;padding:0;border:0;border-radius:0;-webkit-appearance:none;appearance:none;background:linear-gradient(to right,var(--primary-color) 0 var(--fp-volume-level),rgba(255,255,255,.35) var(--fp-volume-level) 100%);background-size:100% 3px;background-position:center;background-repeat:no-repeat}.fp-volume::-webkit-slider-runnable-track{height:3px;background:transparent}.fp-volume::-webkit-slider-thumb{width:12px;height:12px;margin-top:-4.5px;border:0;border-radius:50%;-webkit-appearance:none;appearance:none;background:#fff}.fp-volume::-moz-range-track{height:3px;border:0;background:transparent}.fp-volume::-moz-range-progress{height:3px;background:transparent}.fp-volume::-moz-range-thumb{width:12px;height:12px;border:0;border-radius:50%;background:#fff}.fp-volume:focus-visible{outline:2px solid var(--primary-color);outline-offset:2px}@media(hover:hover) and (pointer:fine){.fp-volume:not([hidden]){display:block}}
-      .empty{padding:32px;text-align:center;color:#bdbdbd}.sidebar{padding:14px;display:grid;gap:10px;align-content:start}.stat{padding:10px 12px;background:var(--secondary-background-color);border-radius:10px}.stat span{color:var(--secondary-text-color);font-size:.8rem}.stat b{display:block;margin-top:3px;overflow-wrap:anywhere}
+      .fp-bar button[hidden]{display:none}.fp-bar button{touch-action:manipulation;color:#fff;width:40px;height:40px;padding:0;display:grid;place-items:center;border-radius:50%}.fp-bar button:hover{background:rgba(255,255,255,.15)}.fp-bar button:active{background:rgba(255,255,255,.3)}.fp-bar svg{width:26px;height:26px;fill:currentColor}.fp-speed{font-size:.8rem;opacity:.85;margin-left:6px}.fp-space{flex:1}.fp-volume{--fp-volume-level:100%;display:none;width:78px;height:20px;margin:0 2px;padding:0;border:0;border-radius:0;-webkit-appearance:none;appearance:none;background:linear-gradient(to right,var(--primary-color) 0 var(--fp-volume-level),rgba(255,255,255,.35) var(--fp-volume-level) 100%);background-size:100% 3px;background-position:center;background-repeat:no-repeat}.fp-volume::-webkit-slider-runnable-track{height:3px;background:transparent}.fp-volume::-webkit-slider-thumb{width:12px;height:12px;margin-top:-4.5px;border:0;border-radius:50%;-webkit-appearance:none;appearance:none;background:#fff}.fp-volume::-moz-range-track{height:3px;border:0;background:transparent}.fp-volume::-moz-range-progress{height:3px;background:transparent}.fp-volume::-moz-range-thumb{width:12px;height:12px;border:0;border-radius:50%;background:#fff}.fp-volume:focus-visible{outline:2px solid var(--primary-color);outline-offset:2px}@media(hover:hover) and (pointer:fine){.fp-volume:not([hidden]){display:block}}
+      .empty{padding:32px;text-align:center;color:#bdbdbd}.timeline .empty{height:100%;padding:0;display:grid;place-items:center;color:var(--secondary-text-color)}.sidebar{padding:14px;display:grid;gap:10px;align-content:start}.stat{padding:10px 12px;background:var(--secondary-background-color);border-radius:10px}.stat span{color:var(--secondary-text-color);font-size:.8rem}.stat b{display:block;margin-top:3px;overflow-wrap:anywhere}
       .timeline-card{padding:12px}.timeline-title{display:flex;justify-content:space-between;gap:10px;margin-bottom:8px}.timeline{height:112px;overflow-x:auto;overflow-y:hidden;position:relative;background:var(--secondary-background-color);border-radius:10px;cursor:crosshair}.timeline-inner{height:100%;position:relative;min-width:720px}.segment{position:absolute;top:38px;height:42px;border-radius:6px;background:var(--success-color,#43a047);background:color-mix(in srgb,var(--success-color,#43a047) 78%,var(--secondary-background-color) 22%)}.tick{position:absolute;top:0;bottom:0;width:1px;background:var(--divider-color)}.tick span{position:absolute;left:0;top:7px;transform:translateX(-50%);font-size:.7rem;color:var(--secondary-text-color);white-space:nowrap}.tick:first-child span{left:6px;transform:none}.tick-end{left:auto!important;right:0}.tick-end span{left:auto;right:8px;transform:none}.marker{position:absolute;top:36px;bottom:12px;width:2px;background:var(--error-color,#e53935)}.marker:after{content:"";position:absolute;top:-9px;left:-4px;width:10px;height:10px;border-radius:50%;background:inherit}
       .lower{display:grid;grid-template-columns:1fr 1fr;gap:14px}.box{padding:13px;min-width:0;overflow:hidden}.selection-controls{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:end}.selection-controls>*{min-width:0;max-width:100%}.range{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;gap:8px;align-items:end}.range>*{min-width:0;max-width:100%}.selection-controls label,.range label{gap:8px}.download-progress{display:none;grid-column:1/-1;align-items:center;gap:0;font-size:.78rem;color:var(--secondary-text-color)}.download-progress.visible{display:flex}.download-track{height:5px;flex:1;overflow:hidden;border-radius:999px;background:var(--divider-color)}.download-bar{height:100%;width:0;background:var(--primary-color);transition:width .25s ease}.download-percent{flex:0 0 43px;text-align:center;font-variant-numeric:tabular-nums}.statusline{min-height:22px;color:var(--secondary-text-color)}.error{color:var(--error-color)}
       @media(min-width:901px) and (min-height:720px){
