@@ -183,7 +183,6 @@ class NativePlaybackTests(unittest.TestCase):
             try:
                 return next(produced)
             except StopIteration:
-                # silent until the continuation arrives, then the next bag
                 if any(kind == native9008.KIND_PLAYBACK_CONTINUE for kind, _, _ in sent) and rest:
                     return rest.pop(0)
                 time.sleep(0.05)

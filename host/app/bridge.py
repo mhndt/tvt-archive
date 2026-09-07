@@ -61,7 +61,6 @@ OPTIONS_PATH = Path("/data/options.json")
 
 
 def drop_privileges(uid: int = 10001, gid: int = 10001) -> None:
-    """When started as root (Home Assistant add-on), own the data and become uid 10001."""
     if not hasattr(os, "geteuid") or os.geteuid() != 0:
         return
     for directory in (CONFIG_DIRECTORY, STATE, CACHE):
@@ -393,7 +392,7 @@ class PlaybackSession:
         return total
 
     def playlist_ready(self) -> bool:
-        # Stay ready once announced; a transient stat race must not tear down the player.
+        # Keep readiness after transient stat races.
         if self.playlist_announced:
             return True
         try:
@@ -443,11 +442,7 @@ class PlaybackSession:
         }
 
 
-# Frame streams: the camera sends recordings in bags of 100 video frames and waits for
-# 0x090A before the next one. The bridge forwards frames as they come and asks for the
-# next bag only while the viewer is close behind, so the camera never runs ahead of
-# what is being watched. Records on the wire:
-#   "TF" kind flags pts_us length payload   (<2sBBQI, little endian)
+# Pace 100-frame camera bags against viewer progress. TF records use <2sBBQI.
 FRAME_MAGIC = b"TF"
 FRAME_HEADER = struct.Struct("<2sBBQI")
 REC_INFO, REC_VIDEO, REC_AUDIO, REC_MARK, REC_END = 0, 1, 2, 3, 4
@@ -1225,7 +1220,7 @@ def search_window(
         return json.loads(cache_path.read_text(encoding="utf-8"))
 
     lock = metadata_lock(camera_id)
-    # Another request may be refreshing the same window; wait for it and reuse its cache.
+    # Reuse cache after a concurrent refresh.
     if not lock.acquire(timeout=20):
         if cache_path and cache_path.exists():
             cached = json.loads(cache_path.read_text(encoding="utf-8"))
@@ -1357,7 +1352,7 @@ def playback_video_mode(camera_id: str) -> str:
 
 
 def video_args(quality: str, mode: str, gop: int | None = None) -> tuple[list[str], list[str]]:
-    """Pre-input and output arguments. gop is the HLS keyframe interval in frames."""
+    """Build ffmpeg video args; gop is in frames."""
     if mode == "copy":
         return [], ["-c:v", "copy"]
     if mode == "vaapi":
@@ -2420,7 +2415,7 @@ def generate_hls_session(session: PlaybackSession) -> None:
                 and capture_rc is None
                 and session.capture_process is not None
             ):
-                # ffmpeg may see EOF before the capture helper exits; let its status win.
+                # Let capture status win a brief ffmpeg EOF race.
                 try:
                     capture_rc = session.capture_process.wait(timeout=1.0)
                 except subprocess.TimeoutExpired:
@@ -2480,7 +2475,7 @@ def _frame_session(session_id: str, *, touch: bool = True) -> FrameSession:
 
 
 def _drain(client: TVT9008Client, seconds: float, stop: threading.Event) -> None:
-    """The camera drops the socket when a command arrives before its post-login status frames."""
+    """Drain post-login frames before sending commands."""
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline and not stop.is_set():
         try:
@@ -2490,14 +2485,14 @@ def _drain(client: TVT9008Client, seconds: float, stop: threading.Event) -> None
 
 
 def _range_body(start: dt.datetime, stop: dt.datetime) -> bytes:
-    # Camera timestamps are local time; the bridge runs in the camera's timezone.
+    # mktime assumes the bridge and camera share a timezone.
     return TVT9008Client._playback_body(
         int(time.mktime(start.timetuple())), int(time.mktime(stop.timetuple()))
     )
 
 
 def utc_offset_at(pts_us: int) -> int:
-    """The bridge runs in the camera's timezone; DST may differ at the recording's time."""
+    """Use the recording-time UTC offset for DST."""
     offset = dt.datetime.fromtimestamp(pts_us / 1_000_000).astimezone().utcoffset()
     return int(offset.total_seconds()) if offset is not None else 0
 

@@ -40,7 +40,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
 COPY --from=hlsjs-builder /export/ /opt/tvt-archive/static/
 COPY LICENSE /usr/share/doc/tvt-archive/
 
-# va-driver-all plus the Intel iHD driver on amd64 serve the optional vaapi encoder.
 RUN set -eux; \
     sed -ri 's/^Components: .*/Components: main contrib non-free non-free-firmware/' \
       /etc/apt/sources.list.d/debian.sources; \

@@ -109,5 +109,5 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not unloaded:
         return False
     hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
-    # Static paths and the panel stay registered across reloads.
+    # Frontend stays registered across reloads.
     return True

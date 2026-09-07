@@ -263,7 +263,6 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(bridge.utc_offset_at(stamp), int(expected.total_seconds()))
 
     def test_importing_the_bridge_does_not_drop_privileges(self) -> None:
-        # A child that looks like root and blows up on any privilege or ownership call.
         probe = (
             "import os, sys\n"
             "def boom(*_): raise SystemExit('privileges touched at import')\n"

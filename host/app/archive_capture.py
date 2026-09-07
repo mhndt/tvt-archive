@@ -49,7 +49,7 @@ def capture(start: datetime, duration: int, directory: Path) -> int:
             return 0
         except (OSError, EOFError, TimeoutError, TVT9008Error) as error:
             last_error = error
-            # Retry only before media starts; ffmpeg is already reading the files after that.
+            # Don't retry after media starts.
             video = directory / "video.h264"
             if video.exists() and video.stat().st_size > 0:
                 raise

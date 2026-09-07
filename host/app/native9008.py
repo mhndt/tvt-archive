@@ -139,7 +139,7 @@ class ApplicationObjectReader:
         return self.stream.recv(size) if self.is_socket else self.stream.read(size)
 
     def _fill(self, size: int) -> None:
-        """Buffer at least size bytes without consuming them, so a timeout can be retried."""
+        """Buffer without consuming so reads can resume after timeout."""
         while len(self.buffer) < size:
             chunk = self._read_some(max(1, size - len(self.buffer)))
             if not chunk:
@@ -164,8 +164,6 @@ class ApplicationObjectReader:
                 self._discard_fragment(object_id)
 
     def read_object(self) -> tuple[bytes, bool, int | None] | None:
-        # Nothing is consumed until a whole object is buffered: a read timeout in the
-        # middle of a large frame must leave the reader where it was.
         while True:
             self._expire_fragments()
             self._fill(8)
@@ -547,18 +545,15 @@ class TVT9008Client:
         timing_path = output_directory / "timing.json"
         summary_path = output_directory / "summary.json"
         stop = start + timedelta(seconds=duration)
-        # Camera timestamps are local time; the container runs in the camera's timezone.
+        # mktime assumes the bridge and camera share a timezone.
         start_epoch = int(time.mktime(start.timetuple()))
         stop_epoch = int(time.mktime(stop.timetuple()))
         summary = CaptureSummary()
         self.send(KIND_PLAYBACK_START, request_id, self._playback_body(start_epoch, stop_epoch))
         self.wait_for(KIND_PLAYBACK_START_RESPONSE, request_id, self.timeout)
         target_end_us = stop_epoch * 1_000_000
-        # Delivery can be far slower than realtime; the stall watchdog catches a stuck connection.
         deadline = time.monotonic() + duration * NATIVE_CAPTURE_DEADLINE_FACTOR + 60
-        # The camera sends 100-frame bags and marks the end of each; one 0x090A per marker
-        # keeps it going. Firmware that never marks a bag gets the request when it falls
-        # silent after delivering video.
+        # Continue 100-frame bags; nudge when markers are missing.
         bag_markers = 0
         last_nudge = 0.0
         last_video_wall: float | None = None
@@ -677,7 +672,7 @@ class TVT9008Client:
         if self.reader is not None:
             summary.fragmented_objects = self.reader.fragmented_objects
             summary.fragment_chunks = self.reader.fragment_chunks
-        # No stop command is known; closing the socket ends playback.
+        # No stop command; closing the socket ends playback.
         write_timing()
         _atomic_json(summary_path, summary.as_dict())
         return summary
