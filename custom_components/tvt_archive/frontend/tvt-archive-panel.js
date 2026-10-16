@@ -327,12 +327,12 @@ class TVTFramePlayer {
       if (event.pointerType !== "touch" || event.target.closest("button,.fp-bar")) return;
       const rect = this.element.getBoundingClientRect(), zone = (event.clientX - rect.left) / rect.width, now = performance.now();
       const side = zone < 0.35 ? -1 : zone > 0.65 ? 1 : 0;
-      if (side && side === this.lastTapSide && now - this.lastTap < 350) {
-        this.lastTap = 0;
+      if (side && side === this.lastTapSide && now - this.lastTap < (this.tapStreak ? 700 : 350)) {
+        this.lastTap = now; this.tapStreak = true;
         this.onSeekBy?.(side * SEEK_STEP_SECONDS);
         return;
       }
-      this.lastTap = now; this.lastTapSide = side;
+      this.lastTap = now; this.lastTapSide = side; this.tapStreak = false;
     });
     this.element.addEventListener("dblclick", (event) => {
       if (event.target.closest("button") || (this.lastPointer === "touch" && this.lastTapSide)) return;
@@ -1083,10 +1083,9 @@ class TVTArchivePanel extends HTMLElement {
       .fp-osd{grid-area:1/1;place-self:start center;margin-top:14px;padding:6px 12px;border-radius:999px;background:rgba(0,0,0,.62);color:#fff;font-size:.88rem;font-variant-numeric:tabular-nums;pointer-events:none;opacity:0;transition:opacity .15s}.fp-osd.visible{opacity:1}
       .fp-center{grid-area:1/1;place-self:stretch;display:flex;align-items:center;justify-content:center;gap:44px;background:rgba(0,0,0,.4);opacity:0;pointer-events:none;transition:opacity .2s}.frame-player:not(.touch) .fp-center{display:none}.frame-player.touch.show-bar .fp-center,.frame-player.touch.paused .fp-center{opacity:1;pointer-events:auto}.fp-center button{touch-action:manipulation;color:#fff;width:52px;height:52px;padding:0;display:grid;place-items:center;background:none;filter:drop-shadow(0 1px 3px rgba(0,0,0,.5))}.fp-center button:is(:hover,:active){background:none}.fp-center .fp-big{width:68px;height:68px}.fp-center svg{width:32px;height:32px;fill:currentColor}.fp-center .fp-big svg{width:42px;height:42px}.frame-player.touch .fp-bar button:is([data-act="back"],[data-act="toggle"],[data-act="forward"]){display:none}
       .fp-bar{position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:4px;padding:4px 6px;background:linear-gradient(transparent,rgba(0,0,0,.65));color:#fff;opacity:0;transition:opacity .2s;pointer-events:none}.frame-player.show-bar .fp-bar,.frame-player.paused .fp-bar{opacity:1;pointer-events:auto}
-      .fp-bar button[hidden]{display:none}.fp-bar button{touch-action:manipulation;color:#fff;width:40px;height:40px;padding:0;display:grid;place-items:center;border-radius:50%}.fp-bar button:hover{background:rgba(255,255,255,.15)}.fp-bar button:active{background:rgba(255,255,255,.3)}.fp-bar svg{width:26px;height:26px;fill:currentColor}.fp-speed{font-size:.8rem;opacity:.85;margin-left:6px}.fp-space{flex:1}.fp-volume{--fp-volume-level:100%;display:none;width:78px;height:20px;margin:0 2px;padding:0;border:0;border-radius:0;-webkit-appearance:none;appearance:none;background:linear-gradient(to right,var(--primary-color) 0 var(--fp-volume-level),rgba(255,255,255,.35) var(--fp-volume-level) 100%);background-size:100% 3px;background-position:center;background-repeat:no-repeat}.fp-volume::-webkit-slider-runnable-track{height:3px;background:transparent}.fp-volume::-webkit-slider-thumb{width:12px;height:12px;margin-top:-4.5px;border:0;border-radius:50%;-webkit-appearance:none;appearance:none;background:#fff}.fp-volume::-moz-range-track{height:3px;border:0;background:transparent}.fp-volume::-moz-range-progress{height:3px;background:transparent}.fp-volume::-moz-range-thumb{width:12px;height:12px;border:0;border-radius:50%;background:#fff}.fp-volume:focus-visible{outline:2px solid var(--primary-color);outline-offset:2px}@media(hover:hover) and (pointer:fine){.fp-volume:not([hidden]){display:block}}
+      .fp-bar button[hidden]{display:none}.fp-bar button{touch-action:manipulation;color:#fff;width:40px;height:40px;padding:0;display:grid;place-items:center;border-radius:50%}.fp-bar button{opacity:.85}.fp-bar button:is(:hover,:active){background:none;opacity:1}.fp-bar svg{width:26px;height:26px;fill:currentColor}.fp-speed{font-size:.8rem;opacity:.85;margin-left:6px}.fp-space{flex:1}.fp-volume{--fp-volume-level:100%;display:none;width:78px;height:20px;margin:0 2px;padding:0;border:0;border-radius:0;-webkit-appearance:none;appearance:none;background:linear-gradient(to right,var(--primary-color) 0 var(--fp-volume-level),rgba(255,255,255,.35) var(--fp-volume-level) 100%);background-size:100% 3px;background-position:center;background-repeat:no-repeat}.fp-volume::-webkit-slider-runnable-track{height:3px;background:transparent}.fp-volume::-webkit-slider-thumb{width:12px;height:12px;margin-top:-4.5px;border:0;border-radius:50%;-webkit-appearance:none;appearance:none;background:#fff}.fp-volume::-moz-range-track{height:3px;border:0;background:transparent}.fp-volume::-moz-range-progress{height:3px;background:transparent}.fp-volume::-moz-range-thumb{width:12px;height:12px;border:0;border-radius:50%;background:#fff}.fp-volume:focus-visible{outline:2px solid var(--primary-color);outline-offset:2px}@media(hover:hover) and (pointer:fine){.fp-volume:not([hidden]){display:block}}
       .empty{padding:32px;text-align:center;color:#bdbdbd}.timeline .empty{height:100%;padding:0;display:grid;place-items:center;color:var(--secondary-text-color)}.sidebar{padding:14px;display:grid;gap:10px;align-content:start}.stat{padding:10px 12px;background:var(--secondary-background-color);border-radius:10px}.stat span{color:var(--secondary-text-color);font-size:.8rem}.stat b{display:block;margin-top:3px;overflow-wrap:anywhere}
       .timeline-card{padding:12px}.timeline-title{display:flex;justify-content:space-between;gap:10px;margin-bottom:8px}.timeline{height:112px;overflow-x:auto;overflow-y:hidden;position:relative;user-select:none;-webkit-user-select:none;background:var(--secondary-background-color);border-radius:10px;cursor:crosshair}.timeline-inner{height:100%;position:relative;min-width:720px}.segment{position:absolute;top:38px;height:42px;border-radius:6px;background:var(--success-color,#43a047);background:color-mix(in srgb,var(--success-color,#43a047) 78%,var(--secondary-background-color) 22%)}.event{position:absolute;top:38px;height:42px;min-width:2px;border-radius:2px;background:var(--state-binary_sensor-motion-on-color,var(--amber-color,#ffc107))}.tick{position:absolute;top:0;bottom:0;width:0;border-left:1px solid var(--divider-color)}.tick span{position:absolute;left:0;top:7px;transform:translateX(-50%);font-size:.7rem;color:var(--secondary-text-color);white-space:nowrap}.tick:first-child span{left:6px;transform:none}.tick-end{left:auto!important;right:0}.tick-end span{left:auto;right:8px;transform:none}.marker{position:absolute;top:36px;bottom:12px;width:2px;background:var(--error-color,#e53935)}.marker:after{content:"";position:absolute;top:-9px;left:-4px;width:10px;height:10px;border-radius:50%;background:inherit}.marker{touch-action:none}.marker:before{content:"";position:absolute;left:-18px;right:-18px;top:-34px;bottom:-12px}.scrub{position:absolute;top:3px;z-index:2;display:none;transform:translateX(-50%);padding:2px 8px;border-radius:999px;background:var(--primary-text-color);color:var(--primary-background-color);font-size:.74rem;font-variant-numeric:tabular-nums;white-space:nowrap;pointer-events:none}.scrub.visible{display:block}.scrub.gap{opacity:.5}@media(pointer:coarse){.marker:after{top:-12px;left:-7px;width:16px;height:16px}}
-      .player-head .jump{display:inline-block;inline-size:auto;width:auto;min-width:8.5ch;height:auto;padding:0;border:0;border-bottom:1px dashed var(--secondary-text-color);border-radius:0;background:none;color:inherit;font:inherit;line-height:1.3;text-align:left;cursor:pointer}.player-head .jump::-webkit-calendar-picker-indicator{display:none}
       .lower{display:grid;grid-template-columns:1fr 1fr;gap:14px}.box{padding:13px;min-width:0;overflow:hidden}.selection-controls{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:end}.selection-controls>*{min-width:0;max-width:100%}.range{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;gap:8px;align-items:end}.range>*{min-width:0;max-width:100%}.selection-controls label,.range label{gap:8px}.download-progress{display:none;grid-column:1/-1;align-items:center;gap:0;font-size:.78rem;color:var(--secondary-text-color)}.download-progress.visible{display:flex}.download-track{height:5px;flex:1;overflow:hidden;border-radius:999px;background:var(--divider-color)}.download-bar{height:100%;width:0;background:var(--primary-color);transition:width .25s ease}.download-percent{flex:0 0 43px;text-align:center;font-variant-numeric:tabular-nums}.statusline{min-height:22px;color:var(--secondary-text-color)}.error{color:var(--error-color)}
       @media(min-width:901px) and (min-height:720px){
         :host{height:100dvh;overflow:hidden}.page{height:100%;overflow:hidden;padding:12px 18px;gap:10px;grid-template-rows:auto auto minmax(0,1fr) auto auto auto}
@@ -1098,7 +1097,7 @@ class TVTArchivePanel extends HTMLElement {
       @media(max-width:560px){
         .controls{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px}.controls label{width:100%;min-width:0;overflow:hidden}.controls button,.controls ha-button{grid-column:1/-1;justify-self:end}
         .controls input,.controls select{min-width:0;max-width:100%}
-        .player-head{display:grid;grid-template-columns:1fr auto;align-items:center}.player-head>b{grid-column:1/-1}.player-head>.subtle{grid-column:1/-1}.sidebar{grid-template-columns:1fr 1fr}.timeline-title{align-items:center}.timeline-title span{flex:1;max-width:none;white-space:nowrap;font-size:.8rem}.timeline-title b{flex:0 0 auto}.timeline-inner.zoom-1 .tick.mobile-minor span{display:none}
+        .player-head{display:grid;grid-template-columns:1fr auto;align-items:center}.player-head>b{grid-column:1/-1}.player-head>.subtle{grid-column:1/-1}.sidebar{grid-template-columns:1fr 1fr}.timeline-title{align-items:center}.timeline-title span{flex:1;max-width:none;white-space:nowrap;font-size:.8rem}.timeline-inner.zoom-1 .tick.mobile-minor span{display:none}
         .selection-controls{grid-template-columns:minmax(0,1fr)}.selection-controls label{grid-column:auto;width:100%;min-width:0;overflow:hidden}.selection-controls input{min-width:0;max-width:100%;width:100%}.selection-controls button,.selection-controls ha-button{width:100%}
         .range{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.range label{min-width:0;overflow:hidden}.range input{min-width:0;max-width:100%;width:100%}.range button,.range ha-button,.range .download-link{grid-column:1/-1;width:100%}.box{padding:11px}.page{overflow-x:hidden}
       }
@@ -1106,7 +1105,7 @@ class TVTArchivePanel extends HTMLElement {
     </style><div class="page">
       <div class="toolbar">${menu}<div class="title">Recordings</div></div>
       <div class="controls"><label><span>Camera</span><select id="camera">${cameras}</select></label><label><span>Date</span><input id="date" type="date" value="${$esc(this._date)}"></label><label><span>${qualityLabel}</span><select id="quality">${qualities}</select></label><label><span>Timeline</span><select id="zoom"><option value="1">24 hours</option><option value="2">12-hour</option><option value="4">6-hour</option></select></label>${btn("refresh", "Refresh")}</div>
-      <div class="shell"><div class="card"><div class="player-head"><b>${$esc(this._camera?.name || "Camera")}</b><span class="subtle">${$esc(this._date)} <input id="jump" class="jump" type="time" step="1" value="${selected}" aria-label="Jump to time" title="Jump to time"></span></div><div id="player" class="player"></div></div>
+      <div class="shell"><div class="card"><div class="player-head"><b>${$esc(this._camera?.name || "Camera")}</b><span class="subtle">${$esc(this._date)} ${$esc(selected)}</span></div><div id="player" class="player"></div></div>
         <div class="card sidebar">
           <div class="stat"><span>Recording</span><b id="stat-recording">${$esc(values.recording)}</b></div><div class="stat"><span>Recorded today</span><b id="stat-today">${$esc(values.today)}</b></div>
           <div class="stat"><span>Available history</span><b id="stat-history">${$esc(values.history)}</b></div>
@@ -1114,7 +1113,7 @@ class TVTArchivePanel extends HTMLElement {
           <div class="stat"><span>Oldest recording</span><b id="stat-oldest">${$esc(values.oldest)}</b></div><div class="stat"><span>Latest recording</span><b id="stat-latest">${$esc(values.latest)}</b></div><div class="stat"><span>SD card</span><b id="stat-sd">${$esc(values.sd)}</b></div>
         </div>
       </div>
-      <div class="card timeline-card"><div class="timeline-title"><span>Click or drag to select a time</span><b>${selected}</b></div><div id="timeline" class="timeline">${this._timelineHtml()}</div></div>
+      <div class="card timeline-card"><div class="timeline-title"><span>Click or drag to select a time</span></div><div id="timeline" class="timeline">${this._timelineHtml()}</div></div>
       <div class="lower"><div class="card box"><div class="selection-controls"><label><span>Selected time</span><input id="selected" type="time" step="1" value="${selected}"></label>${btn("play", "Play from here", this._busy ? "disabled" : "", "filled")}</div></div>
         <div class="card box"><div class="range"><label><span>Download start</span><input id="range-start" type="time" step="1" value="${$esc(this._rangeStart)}"></label><label><span>Download end</span><input id="range-end" type="time" step="1" value="${$esc(this._rangeEnd)}"></label>${this._downloadUrl ? `<a id="save-download" class="download-link" href="${$esc(this._downloadUrl)}" download="${$esc(this._downloadFilename || "recording.mp4")}">Save file</a>` : btn("download", this._downloadActionLabel(), this._cancelling || (this._busy && !this._downloadJobId) ? "disabled" : "")}<div id="download-progress" class="download-progress ${this._busy || this._downloadPercent === 100 ? "visible" : ""}"><div class="download-track" role="progressbar" aria-label="Export progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.max(0, Math.min(100, Math.round(this._downloadPercent || 0)))}"><div id="download-progress-bar" class="download-bar" style="width:${Math.max(0, Math.min(100, Math.round(this._downloadPercent || 0)))}%"></div></div><span id="download-percent" class="download-percent">${Math.max(0, Math.min(100, Math.round(this._downloadPercent || 0)))}%</span></div></div></div></div>
       <div id="statusline" class="statusline ${this._error ? "error" : ""}">${$esc(this._error || this._message || "")}</div>
@@ -1201,22 +1200,11 @@ class TVTArchivePanel extends HTMLElement {
       this._message = "Download started";
       this._updateStatusLine();
     });
-    get("jump")?.addEventListener("click", (event) => { try { event.currentTarget.showPicker(); } catch (_) {} });
-    get("jump")?.addEventListener("change", (event) => {
-      const input = event.currentTarget;
-      clearTimeout(this._jumpTimer);
-      this._jumpTimer = setTimeout(() => {
-        if (!input.value) return;
-        const seconds = clockToSec(input.value);
-        if (!this._hasRecordingAt(seconds)) input.value = secToClock(this._markerSec());
-        this._pickTime(seconds, true);
-      }, 600);
-    });
     const timeline = get("timeline");
     if (!timeline) return;
     let drag = null;
     timeline.addEventListener("pointerdown", (event) => {
-      if (event.button || (event.pointerType !== "mouse" && !event.target.closest(".marker"))) return;
+      if (event.button || !event.target.closest(".timeline-inner") || (event.pointerType !== "mouse" && !event.target.closest(".marker"))) return;
       drag = {id: event.pointerId, x: event.clientX, moved: event.pointerType === "mouse"};
       timeline.setPointerCapture(event.pointerId);
       this._scrubbing = true;
@@ -1224,7 +1212,7 @@ class TVTArchivePanel extends HTMLElement {
       event.preventDefault();
     });
     timeline.addEventListener("pointermove", (event) => {
-      if (!drag) { if (event.pointerType === "mouse") this._scrubTo(event.clientX); return; }
+      if (!drag) { if (event.pointerType === "mouse") this._scrubTo(event.target.closest(".timeline-inner") ? event.clientX : null); return; }
       if (event.pointerId !== drag.id) return;
       if (Math.abs(event.clientX - drag.x) > 4) drag.moved = true;
       const rect = timeline.getBoundingClientRect();
@@ -1245,7 +1233,7 @@ class TVTArchivePanel extends HTMLElement {
     timeline.addEventListener("pointercancel", (event) => end(event, false));
     timeline.addEventListener("pointerleave", (event) => { if (!drag && event.pointerType === "mouse") this._scrubTo(null); });
     timeline.addEventListener("click", (event) => {
-      if (performance.now() - (this._dragEnd || 0) < 400) return;
+      if (performance.now() - (this._dragEnd || 0) < 400 || !event.target.closest(".timeline-inner")) return;
       const seconds = this._secondsAt(event.clientX);
       if (seconds !== null) this._pickTime(seconds);
     });
@@ -1273,7 +1261,7 @@ class TVTArchivePanel extends HTMLElement {
     return this._framePlayer?.secondsOfDay ?? this._selectedSec;
   }
 
-  async _pickTime(seconds, play = false) {
+  async _pickTime(seconds) {
     if (!this._hasRecordingAt(seconds)) {
       this._error = "";
       this._message = "No recording at this time";
@@ -1286,12 +1274,12 @@ class TVTArchivePanel extends HTMLElement {
     this._mode = "recording";
     if (this._canSeek()) { this._updateSelection(); this._seekStream(this._selectedSec); return; }
     await this._stopPlaybackSession();
-    if (play) this._playRecording(); else this._render();
+    this._render();
   }
 
-  _setJump(clock) {
-    const input = this.shadowRoot.getElementById("jump");
-    if (input && clock && this.shadowRoot.activeElement !== input) input.value = clock;
+  _setClock(clock) {
+    const head = this.shadowRoot.querySelector(".player-head .subtle");
+    if (head && clock) head.textContent = `${this._date} ${clock}`;
   }
 
   _selectTime(seconds) {
@@ -1327,7 +1315,7 @@ class TVTArchivePanel extends HTMLElement {
     const clock = secToClock(this._selectedSec);
     const set = (selector, value) => { const node = this.shadowRoot.querySelector(selector); if (node) node[selector.startsWith("#") ? "value" : "textContent"] = value; };
     set("#selected", clock); set("#range-start", this._rangeStart); set("#range-end", this._rangeEnd);
-    set(".timeline-title b", clock); this._setJump(clock);
+    this._setClock(clock);
     this._moveMarker(this._selectedSec);
   }
 
@@ -1493,7 +1481,7 @@ class TVTArchivePanel extends HTMLElement {
     }
     this._error = ""; this._message = ""; this._updateStatusLine();
     this._moveMarker(seconds);
-    this._setJump(secToClock(seconds));
+    this._setClock(secToClock(seconds));
     if (this._seekGeneration !== null) {
       this._queuedSeekSec = seconds;
       return;
@@ -1525,7 +1513,10 @@ class TVTArchivePanel extends HTMLElement {
   _seekBy(seconds) {
     const player = this._framePlayer;
     if (!player) { this._seekVideoBy(seconds); return; }
-    const label = `${seconds > 0 ? "+" : "−"}${Math.abs(seconds)} s`;
+    const now = performance.now(), streak = this._seekStreak;
+    const total = streak && Math.sign(streak.total) === Math.sign(seconds) && now - streak.at < 1000 ? streak.total + seconds : seconds;
+    this._seekStreak = {total, at: now};
+    const label = `${total > 0 ? "+" : "−"}${Math.abs(total)} s`;
     const pts = player.positionPts;
     if (seconds < 0 && this._seekGeneration === null && pts !== null && player.rewindTo(pts + seconds * 1e6)) {
       player.flash(label);
@@ -1633,7 +1624,7 @@ class TVTArchivePanel extends HTMLElement {
     this._paintedTicks = (this._paintedTicks + 1) % 5;
     if (seconds != null && (this._paintedTicks === 0 || player.paused)) {
       this._moveMarker(seconds);
-      this._setJump(player.clock);
+      this._setClock(player.clock);
     }
     const slow = player.speed !== null && player.speed < 0.85;
     if (slow !== this._slowHint) {

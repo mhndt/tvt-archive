@@ -45,7 +45,7 @@ from native9008 import (
     TVT9008Error,
 )
 
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 BASE = Path(os.environ.get("TVT_ARCHIVE_BASE", "/opt/tvt-archive"))
 CONFIG_DIRECTORY = Path(
     os.environ.get(
@@ -3211,7 +3211,7 @@ def authorized(header: str) -> bool:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "TVTArchiveBridge/1.0.1"
+    server_version = "TVTArchiveBridge/1.0.2"
     timeout = 60
 
     def log_message(self, fmt: str, *args: Any) -> None:
