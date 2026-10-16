@@ -17,8 +17,6 @@ Recordings are read directly from the camera over your LAN. Nothing leaves your 
 
 For a manual install, copy `custom_components/tvt_archive` from the release ZIP into `config/custom_components` and restart Home Assistant.
 
-The built-in bridge runs as a small background process inside Home Assistant and needs `ffmpeg`, which Home Assistant OS and Container already include. On Home Assistant Core, install `ffmpeg` on the host.
-
 <details>
 <summary>Optional app or container</summary>
 
