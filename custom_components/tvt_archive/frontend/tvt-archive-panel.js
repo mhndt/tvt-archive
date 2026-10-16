@@ -670,14 +670,18 @@ class TVTFramePlayer {
     this._syncButtons(); this._state("playing");
   }
 
+  get fullscreen() { return Boolean(document.fullscreenElement) || this.element.classList.contains("fp-full"); }
+
   toggleFullscreen() {
     if (document.fullscreenElement) { document.exitFullscreen?.(); return; }
-    if (!this._canFullscreen()) return;
-    this.element.requestFullscreen().catch(() => {});
+    if (this.fullscreen) { this._fill(false); return; }
+    if (!document.fullscreenEnabled || !this.element.requestFullscreen) { this._fill(true); return; }
+    this.element.requestFullscreen().catch(() => this._fill(true));
   }
 
-  _canFullscreen() {
-    return Boolean(document.fullscreenEnabled && this.element.requestFullscreen);
+  _fill(on) {
+    this.element.classList.toggle("fp-full", on);
+    this._syncButtons();
   }
 
   _showBar(ms) {
@@ -691,8 +695,7 @@ class TVTFramePlayer {
     const set = (act, name, label) => { for (const b of this.element.querySelectorAll(`button[data-act="${act}"]`)) { if (b.getAttribute("aria-label") !== label) { b.innerHTML = icon(name); b.setAttribute("aria-label", label); } } };
     set("toggle", this.paused ? "play" : "pause", this.paused ? "Play" : "Pause");
     set("mute", this.muted ? "muted" : "sound", this.muted ? "Unmute" : "Mute");
-    set("full", document.fullscreenElement ? "unfull" : "full", document.fullscreenElement ? "Exit full screen" : "Full screen");
-    this.element.querySelector('button[data-act="full"]').hidden = !this._canFullscreen();
+    set("full", this.fullscreen ? "unfull" : "full", this.fullscreen ? "Exit full screen" : "Full screen");
     const mute = this.element.querySelector('button[data-act="mute"]'); if (mute) mute.hidden = !this.hasAudio;
     const slider = this.element.querySelector(".fp-volume");
     if (slider) {
@@ -968,7 +971,7 @@ class TVTArchivePanel extends HTMLElement {
       if (start === null || stop === null || stop <= start) continue;
       html += `<div class="event" title="${$esc(event.type)} ${secToClock(start)}–${secToClock(stop)}" style="left:${(start/86400)*100}%;width:${((stop-start)/86400)*100}%"></div>`;
     }
-    html += `<div class="marker" style="left:${(this._selectedSec/86400)*100}%"></div></div>`;
+    html += `<div class="marker" style="left:${(this._selectedSec/86400)*100}%"></div><div class="scrub"></div></div>`;
     return html;
   }
 
@@ -982,7 +985,7 @@ class TVTArchivePanel extends HTMLElement {
       video: {software:"Software", copy:"Off", vaapi:"VAAPI"}[mode] || "—",
       oldest: status.availability?.earliest ? new Date(status.availability.earliest).toLocaleString() : "—",
       latest: status.availability?.latest ? new Date(status.availability.latest).toLocaleString() : "—",
-      sd: status.sd_card ? `${diskText(status.sd_card.status)}${status.sd_card.total_gb ? ` · ${status.sd_card.used_gb ?? "?"}/${status.sd_card.total_gb} GB` : ""}` : "—",
+      sd: status.sd_card ? (status.sd_card.status === "normal" && status.sd_card.total_gb ? `${status.sd_card.used_gb ?? "?"} / ${status.sd_card.total_gb} GB` : diskText(status.sd_card.status)) : "—",
     };
   }
 
@@ -1076,13 +1079,14 @@ class TVTArchivePanel extends HTMLElement {
       .player-head{padding:11px 14px;display:flex;justify-content:space-between;align-items:center;gap:10px;border-bottom:1px solid var(--divider-color)}
       .player{background:#000;min-height:min(62vh,640px);display:grid;place-items:center;position:relative;overflow:hidden}
       .player video,.player .frame-player{width:100%;height:min(62vh,640px);object-fit:contain;background:#000;grid-area:1/1}.player video{display:block}
-      .frame-player{position:relative;width:100%;background:#000;display:grid;grid-template:minmax(0,1fr)/minmax(0,1fr);grid-area:1/1;overflow:hidden;cursor:default;touch-action:manipulation}.frame-player canvas{width:100%;height:100%;object-fit:contain;display:block;grid-area:1/1;background:#000}.frame-player:fullscreen{width:100vw;height:100vh}
+      .frame-player{position:relative;width:100%;background:#000;display:grid;grid-template:minmax(0,1fr)/minmax(0,1fr);grid-area:1/1;overflow:hidden;cursor:default;touch-action:manipulation}.frame-player canvas{width:100%;height:100%;object-fit:contain;display:block;grid-area:1/1;background:#000}.frame-player:fullscreen{width:100vw;height:100vh}.player .frame-player.fp-full{position:fixed;inset:0;z-index:100;width:auto;height:auto;min-height:0;max-height:none;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
       .fp-osd{grid-area:1/1;place-self:start center;margin-top:14px;padding:6px 12px;border-radius:999px;background:rgba(0,0,0,.62);color:#fff;font-size:.88rem;font-variant-numeric:tabular-nums;pointer-events:none;opacity:0;transition:opacity .15s}.fp-osd.visible{opacity:1}
       .fp-center{grid-area:1/1;place-self:stretch;display:flex;align-items:center;justify-content:center;gap:44px;background:rgba(0,0,0,.4);opacity:0;pointer-events:none;transition:opacity .2s}.frame-player:not(.touch) .fp-center{display:none}.frame-player.touch.show-bar .fp-center,.frame-player.touch.paused .fp-center{opacity:1;pointer-events:auto}.fp-center button{touch-action:manipulation;color:#fff;width:52px;height:52px;padding:0;display:grid;place-items:center;background:none;filter:drop-shadow(0 1px 3px rgba(0,0,0,.5))}.fp-center button:is(:hover,:active){background:none}.fp-center .fp-big{width:68px;height:68px}.fp-center svg{width:32px;height:32px;fill:currentColor}.fp-center .fp-big svg{width:42px;height:42px}.frame-player.touch .fp-bar button:is([data-act="back"],[data-act="toggle"],[data-act="forward"]){display:none}
       .fp-bar{position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:4px;padding:4px 6px;background:linear-gradient(transparent,rgba(0,0,0,.65));color:#fff;opacity:0;transition:opacity .2s;pointer-events:none}.frame-player.show-bar .fp-bar,.frame-player.paused .fp-bar{opacity:1;pointer-events:auto}
       .fp-bar button[hidden]{display:none}.fp-bar button{touch-action:manipulation;color:#fff;width:40px;height:40px;padding:0;display:grid;place-items:center;border-radius:50%}.fp-bar button:hover{background:rgba(255,255,255,.15)}.fp-bar button:active{background:rgba(255,255,255,.3)}.fp-bar svg{width:26px;height:26px;fill:currentColor}.fp-speed{font-size:.8rem;opacity:.85;margin-left:6px}.fp-space{flex:1}.fp-volume{--fp-volume-level:100%;display:none;width:78px;height:20px;margin:0 2px;padding:0;border:0;border-radius:0;-webkit-appearance:none;appearance:none;background:linear-gradient(to right,var(--primary-color) 0 var(--fp-volume-level),rgba(255,255,255,.35) var(--fp-volume-level) 100%);background-size:100% 3px;background-position:center;background-repeat:no-repeat}.fp-volume::-webkit-slider-runnable-track{height:3px;background:transparent}.fp-volume::-webkit-slider-thumb{width:12px;height:12px;margin-top:-4.5px;border:0;border-radius:50%;-webkit-appearance:none;appearance:none;background:#fff}.fp-volume::-moz-range-track{height:3px;border:0;background:transparent}.fp-volume::-moz-range-progress{height:3px;background:transparent}.fp-volume::-moz-range-thumb{width:12px;height:12px;border:0;border-radius:50%;background:#fff}.fp-volume:focus-visible{outline:2px solid var(--primary-color);outline-offset:2px}@media(hover:hover) and (pointer:fine){.fp-volume:not([hidden]){display:block}}
       .empty{padding:32px;text-align:center;color:#bdbdbd}.timeline .empty{height:100%;padding:0;display:grid;place-items:center;color:var(--secondary-text-color)}.sidebar{padding:14px;display:grid;gap:10px;align-content:start}.stat{padding:10px 12px;background:var(--secondary-background-color);border-radius:10px}.stat span{color:var(--secondary-text-color);font-size:.8rem}.stat b{display:block;margin-top:3px;overflow-wrap:anywhere}
-      .timeline-card{padding:12px}.timeline-title{display:flex;justify-content:space-between;gap:10px;margin-bottom:8px}.timeline{height:112px;overflow-x:auto;overflow-y:hidden;position:relative;background:var(--secondary-background-color);border-radius:10px;cursor:crosshair}.timeline-inner{height:100%;position:relative;min-width:720px}.segment{position:absolute;top:38px;height:42px;border-radius:6px;background:var(--success-color,#43a047);background:color-mix(in srgb,var(--success-color,#43a047) 78%,var(--secondary-background-color) 22%)}.event{position:absolute;top:38px;height:42px;min-width:2px;border-radius:2px;background:var(--state-binary_sensor-motion-on-color,var(--amber-color,#ffc107))}.tick{position:absolute;top:0;bottom:0;width:0;border-left:1px solid var(--divider-color)}.tick span{position:absolute;left:0;top:7px;transform:translateX(-50%);font-size:.7rem;color:var(--secondary-text-color);white-space:nowrap}.tick:first-child span{left:6px;transform:none}.tick-end{left:auto!important;right:0}.tick-end span{left:auto;right:8px;transform:none}.marker{position:absolute;top:36px;bottom:12px;width:2px;background:var(--error-color,#e53935)}.marker:after{content:"";position:absolute;top:-9px;left:-4px;width:10px;height:10px;border-radius:50%;background:inherit}
+      .timeline-card{padding:12px}.timeline-title{display:flex;justify-content:space-between;gap:10px;margin-bottom:8px}.timeline{height:112px;overflow-x:auto;overflow-y:hidden;position:relative;user-select:none;-webkit-user-select:none;background:var(--secondary-background-color);border-radius:10px;cursor:crosshair}.timeline-inner{height:100%;position:relative;min-width:720px}.segment{position:absolute;top:38px;height:42px;border-radius:6px;background:var(--success-color,#43a047);background:color-mix(in srgb,var(--success-color,#43a047) 78%,var(--secondary-background-color) 22%)}.event{position:absolute;top:38px;height:42px;min-width:2px;border-radius:2px;background:var(--state-binary_sensor-motion-on-color,var(--amber-color,#ffc107))}.tick{position:absolute;top:0;bottom:0;width:0;border-left:1px solid var(--divider-color)}.tick span{position:absolute;left:0;top:7px;transform:translateX(-50%);font-size:.7rem;color:var(--secondary-text-color);white-space:nowrap}.tick:first-child span{left:6px;transform:none}.tick-end{left:auto!important;right:0}.tick-end span{left:auto;right:8px;transform:none}.marker{position:absolute;top:36px;bottom:12px;width:2px;background:var(--error-color,#e53935)}.marker:after{content:"";position:absolute;top:-9px;left:-4px;width:10px;height:10px;border-radius:50%;background:inherit}.marker{touch-action:none}.marker:before{content:"";position:absolute;left:-18px;right:-18px;top:-34px;bottom:-12px}.scrub{position:absolute;top:3px;z-index:2;display:none;transform:translateX(-50%);padding:2px 8px;border-radius:999px;background:var(--primary-text-color);color:var(--primary-background-color);font-size:.74rem;font-variant-numeric:tabular-nums;white-space:nowrap;pointer-events:none}.scrub.visible{display:block}.scrub.gap{opacity:.5}@media(pointer:coarse){.marker:after{top:-12px;left:-7px;width:16px;height:16px}}
+      .player-head .jump{display:inline-block;inline-size:auto;width:auto;min-width:8.5ch;height:auto;padding:0;border:0;border-bottom:1px dashed var(--secondary-text-color);border-radius:0;background:none;color:inherit;font:inherit;line-height:1.3;text-align:left;cursor:pointer}.player-head .jump::-webkit-calendar-picker-indicator{display:none}
       .lower{display:grid;grid-template-columns:1fr 1fr;gap:14px}.box{padding:13px;min-width:0;overflow:hidden}.selection-controls{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:end}.selection-controls>*{min-width:0;max-width:100%}.range{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;gap:8px;align-items:end}.range>*{min-width:0;max-width:100%}.selection-controls label,.range label{gap:8px}.download-progress{display:none;grid-column:1/-1;align-items:center;gap:0;font-size:.78rem;color:var(--secondary-text-color)}.download-progress.visible{display:flex}.download-track{height:5px;flex:1;overflow:hidden;border-radius:999px;background:var(--divider-color)}.download-bar{height:100%;width:0;background:var(--primary-color);transition:width .25s ease}.download-percent{flex:0 0 43px;text-align:center;font-variant-numeric:tabular-nums}.statusline{min-height:22px;color:var(--secondary-text-color)}.error{color:var(--error-color)}
       @media(min-width:901px) and (min-height:720px){
         :host{height:100dvh;overflow:hidden}.page{height:100%;overflow:hidden;padding:12px 18px;gap:10px;grid-template-rows:auto auto minmax(0,1fr) auto auto auto}
@@ -1090,7 +1094,7 @@ class TVTArchivePanel extends HTMLElement {
         .sidebar{min-height:0;overflow-y:auto;padding:10px;gap:7px;grid-auto-rows:minmax(56px,auto);align-content:start}.stat{padding:7px 10px;display:flex;flex-direction:column;justify-content:center}.timeline-card{padding:9px 10px}.timeline-title{margin-bottom:8px}.timeline{height:92px}.segment,.event{top:31px;height:35px}.marker{top:29px;bottom:10px}
         .lower{gap:10px}.box{padding:10px}.statusline{min-height:18px;font-size:.8rem}
       }
-      @media(max-width:900px){.shell{grid-template-columns:1fr}.sidebar{grid-template-columns:repeat(2,minmax(0,1fr))}.lower{grid-template-columns:1fr}.player,.player video,.player .frame-player{min-height:42vh;height:42vh}.page{padding:10px}}
+      @media(max-width:900px){.shell{display:contents}.shell>.card:first-child{order:1}.timeline-card{order:2}.statusline{order:3}.lower{order:4}.sidebar{order:5}.sidebar{grid-template-columns:repeat(2,minmax(0,1fr))}.lower{grid-template-columns:1fr}.player,.player video,.player .frame-player{min-height:42vh;height:42vh}.page{padding:10px}}
       @media(max-width:560px){
         .controls{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px}.controls label{width:100%;min-width:0;overflow:hidden}.controls button,.controls ha-button{grid-column:1/-1;justify-self:end}
         .controls input,.controls select{min-width:0;max-width:100%}
@@ -1102,7 +1106,7 @@ class TVTArchivePanel extends HTMLElement {
     </style><div class="page">
       <div class="toolbar">${menu}<div class="title">Recordings</div></div>
       <div class="controls"><label><span>Camera</span><select id="camera">${cameras}</select></label><label><span>Date</span><input id="date" type="date" value="${$esc(this._date)}"></label><label><span>${qualityLabel}</span><select id="quality">${qualities}</select></label><label><span>Timeline</span><select id="zoom"><option value="1">24 hours</option><option value="2">12-hour</option><option value="4">6-hour</option></select></label>${btn("refresh", "Refresh")}</div>
-      <div class="shell"><div class="card"><div class="player-head"><b>${$esc(this._camera?.name || "Camera")}</b><span class="subtle">${$esc(this._date)} ${$esc(selected)}</span></div><div id="player" class="player"></div></div>
+      <div class="shell"><div class="card"><div class="player-head"><b>${$esc(this._camera?.name || "Camera")}</b><span class="subtle">${$esc(this._date)} <input id="jump" class="jump" type="time" step="1" value="${selected}" aria-label="Jump to time" title="Jump to time"></span></div><div id="player" class="player"></div></div>
         <div class="card sidebar">
           <div class="stat"><span>Recording</span><b id="stat-recording">${$esc(values.recording)}</b></div><div class="stat"><span>Recorded today</span><b id="stat-today">${$esc(values.today)}</b></div>
           <div class="stat"><span>Available history</span><b id="stat-history">${$esc(values.history)}</b></div>
@@ -1110,7 +1114,7 @@ class TVTArchivePanel extends HTMLElement {
           <div class="stat"><span>Oldest recording</span><b id="stat-oldest">${$esc(values.oldest)}</b></div><div class="stat"><span>Latest recording</span><b id="stat-latest">${$esc(values.latest)}</b></div><div class="stat"><span>SD card</span><b id="stat-sd">${$esc(values.sd)}</b></div>
         </div>
       </div>
-      <div class="card timeline-card"><div class="timeline-title"><span>Click a recorded section to select a time</span><b>${selected}</b></div><div id="timeline" class="timeline">${this._timelineHtml()}</div></div>
+      <div class="card timeline-card"><div class="timeline-title"><span>Click or drag to select a time</span><b>${selected}</b></div><div id="timeline" class="timeline">${this._timelineHtml()}</div></div>
       <div class="lower"><div class="card box"><div class="selection-controls"><label><span>Selected time</span><input id="selected" type="time" step="1" value="${selected}"></label>${btn("play", "Play from here", this._busy ? "disabled" : "", "filled")}</div></div>
         <div class="card box"><div class="range"><label><span>Download start</span><input id="range-start" type="time" step="1" value="${$esc(this._rangeStart)}"></label><label><span>Download end</span><input id="range-end" type="time" step="1" value="${$esc(this._rangeEnd)}"></label>${this._downloadUrl ? `<a id="save-download" class="download-link" href="${$esc(this._downloadUrl)}" download="${$esc(this._downloadFilename || "recording.mp4")}">Save file</a>` : btn("download", this._downloadActionLabel(), this._cancelling || (this._busy && !this._downloadJobId) ? "disabled" : "")}<div id="download-progress" class="download-progress ${this._busy || this._downloadPercent === 100 ? "visible" : ""}"><div class="download-track" role="progressbar" aria-label="Export progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.max(0, Math.min(100, Math.round(this._downloadPercent || 0)))}"><div id="download-progress-bar" class="download-bar" style="width:${Math.max(0, Math.min(100, Math.round(this._downloadPercent || 0)))}%"></div></div><span id="download-percent" class="download-percent">${Math.max(0, Math.min(100, Math.round(this._downloadPercent || 0)))}%</span></div></div></div></div>
       <div id="statusline" class="statusline ${this._error ? "error" : ""}">${$esc(this._error || this._message || "")}</div>
@@ -1197,24 +1201,97 @@ class TVTArchivePanel extends HTMLElement {
       this._message = "Download started";
       this._updateStatusLine();
     });
-    const timeline = get("timeline");
-    timeline?.addEventListener("click", async (event) => {
-      const inner = timeline.querySelector(".timeline-inner"); if (!inner) return;
-      const rect = inner.getBoundingClientRect();
-      const seconds = Math.max(0, Math.min(86399, ((event.clientX - rect.left) / rect.width) * 86400));
-      if (!this._hasRecordingAt(seconds)) {
-        this._error = "";
-        this._message = "No recording at this time";
-        this._updateStatusLine();
-        return;
-      }
-      this._resetDownloadResult();
-      this._selectTime(seconds);
-      this._mode = "recording";
-      if (this._canSeek()) { this._updateSelection(); this._seekStream(this._selectedSec); return; }
-      await this._stopPlaybackSession();
-      this._render();
+    get("jump")?.addEventListener("click", (event) => { try { event.currentTarget.showPicker(); } catch (_) {} });
+    get("jump")?.addEventListener("change", (event) => {
+      const input = event.currentTarget;
+      clearTimeout(this._jumpTimer);
+      this._jumpTimer = setTimeout(() => {
+        if (!input.value) return;
+        const seconds = clockToSec(input.value);
+        if (!this._hasRecordingAt(seconds)) input.value = secToClock(this._markerSec());
+        this._pickTime(seconds, true);
+      }, 600);
     });
+    const timeline = get("timeline");
+    if (!timeline) return;
+    let drag = null;
+    timeline.addEventListener("pointerdown", (event) => {
+      if (event.button || (event.pointerType !== "mouse" && !event.target.closest(".marker"))) return;
+      drag = {id: event.pointerId, x: event.clientX, moved: event.pointerType === "mouse"};
+      timeline.setPointerCapture(event.pointerId);
+      this._scrubbing = true;
+      this._scrubTo(event.clientX, true);
+      event.preventDefault();
+    });
+    timeline.addEventListener("pointermove", (event) => {
+      if (!drag) { if (event.pointerType === "mouse") this._scrubTo(event.clientX); return; }
+      if (event.pointerId !== drag.id) return;
+      if (Math.abs(event.clientX - drag.x) > 4) drag.moved = true;
+      const rect = timeline.getBoundingClientRect();
+      if (event.clientX < rect.left + 32) timeline.scrollLeft -= 12;
+      else if (event.clientX > rect.right - 32) timeline.scrollLeft += 12;
+      this._scrubTo(event.clientX, true);
+    });
+    const end = (event, commit) => {
+      if (!drag || event.pointerId !== drag.id) return;
+      const moved = drag.moved;
+      drag = null; this._scrubbing = false; this._dragEnd = performance.now();
+      const seconds = this._secondsAt(event.clientX);
+      if (event.pointerType !== "mouse") this._scrubTo(null);
+      if (commit && moved && seconds !== null) this._pickTime(seconds);
+      else this._moveMarker(this._markerSec());
+    };
+    timeline.addEventListener("pointerup", (event) => end(event, true));
+    timeline.addEventListener("pointercancel", (event) => end(event, false));
+    timeline.addEventListener("pointerleave", (event) => { if (!drag && event.pointerType === "mouse") this._scrubTo(null); });
+    timeline.addEventListener("click", (event) => {
+      if (performance.now() - (this._dragEnd || 0) < 400) return;
+      const seconds = this._secondsAt(event.clientX);
+      if (seconds !== null) this._pickTime(seconds);
+    });
+  }
+
+  _secondsAt(x) {
+    const inner = this.shadowRoot.querySelector(".timeline-inner"); if (!inner) return null;
+    const rect = inner.getBoundingClientRect();
+    return Math.max(0, Math.min(86399, Math.floor(((x - rect.left) / rect.width) * 86400)));
+  }
+
+  _scrubTo(x, drag = false) {
+    const tip = this.shadowRoot.querySelector(".timeline-inner .scrub");
+    if (x === null || !tip) { tip?.classList.remove("visible"); return null; }
+    const seconds = this._secondsAt(x), width = tip.parentElement.clientWidth, left = (seconds / 86400) * width;
+    tip.textContent = secToClock(seconds);
+    tip.style.left = `${Math.max(32, Math.min(width - 32, left))}px`;
+    tip.classList.add("visible");
+    tip.classList.toggle("gap", !this._hasRecordingAt(seconds));
+    if (drag) { const marker = tip.parentElement.querySelector(".marker"); if (marker) marker.style.left = `${(seconds / 86400) * 100}%`; }
+    return seconds;
+  }
+
+  _markerSec() {
+    return this._framePlayer?.secondsOfDay ?? this._selectedSec;
+  }
+
+  async _pickTime(seconds, play = false) {
+    if (!this._hasRecordingAt(seconds)) {
+      this._error = "";
+      this._message = "No recording at this time";
+      this._updateStatusLine();
+      this._moveMarker(this._markerSec());
+      return;
+    }
+    this._resetDownloadResult();
+    this._selectTime(seconds);
+    this._mode = "recording";
+    if (this._canSeek()) { this._updateSelection(); this._seekStream(this._selectedSec); return; }
+    await this._stopPlaybackSession();
+    if (play) this._playRecording(); else this._render();
+  }
+
+  _setJump(clock) {
+    const input = this.shadowRoot.getElementById("jump");
+    if (input && clock && this.shadowRoot.activeElement !== input) input.value = clock;
   }
 
   _selectTime(seconds) {
@@ -1250,11 +1327,12 @@ class TVTArchivePanel extends HTMLElement {
     const clock = secToClock(this._selectedSec);
     const set = (selector, value) => { const node = this.shadowRoot.querySelector(selector); if (node) node[selector.startsWith("#") ? "value" : "textContent"] = value; };
     set("#selected", clock); set("#range-start", this._rangeStart); set("#range-end", this._rangeEnd);
-    set(".timeline-title b", clock); set(".player-head .subtle", `${this._date} ${clock}`);
+    set(".timeline-title b", clock); this._setJump(clock);
     this._moveMarker(this._selectedSec);
   }
 
   _moveMarker(seconds) {
+    if (this._scrubbing) return;
     const marker = this.shadowRoot.querySelector(".marker");
     if (marker) marker.style.left = `${(seconds / 86400) * 100}%`;
   }
@@ -1415,8 +1493,7 @@ class TVTArchivePanel extends HTMLElement {
     }
     this._error = ""; this._message = ""; this._updateStatusLine();
     this._moveMarker(seconds);
-    const head = this.shadowRoot.querySelector(".player-head .subtle");
-    if (head) head.textContent = `${this._date} ${secToClock(seconds)}`;
+    this._setJump(secToClock(seconds));
     if (this._seekGeneration !== null) {
       this._queuedSeekSec = seconds;
       return;
@@ -1506,6 +1583,7 @@ class TVTArchivePanel extends HTMLElement {
       if (player) player.toggleFullscreen();
       else if (document.fullscreenElement) document.exitFullscreen?.(); else video.requestFullscreen?.().catch(() => {});
     }
+    else if (key === "Escape" && player?.element.classList.contains("fp-full")) player.toggleFullscreen();
     else if (key === "ArrowUp" || key === "ArrowDown") {
       const delta = key === "ArrowUp" ? VOLUME_STEP : -VOLUME_STEP;
       if (player) { if (!player.hasAudio) return; player.setVolume(player.volume + delta); }
@@ -1555,8 +1633,7 @@ class TVTArchivePanel extends HTMLElement {
     this._paintedTicks = (this._paintedTicks + 1) % 5;
     if (seconds != null && (this._paintedTicks === 0 || player.paused)) {
       this._moveMarker(seconds);
-      const head = this.shadowRoot.querySelector(".player-head .subtle");
-      if (head) head.textContent = `${this._date} ${player.clock}`;
+      this._setJump(player.clock);
     }
     const slow = player.speed !== null && player.speed < 0.85;
     if (slow !== this._slowHint) {
