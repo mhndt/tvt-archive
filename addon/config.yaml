@@ -1,7 +1,7 @@
 name: TVT Archive
-version: "0.9.5"
+version: "1.0.0"
 slug: tvt_archive
-description: Play and export the recordings on TVT camera SD cards
+description: Optional bridge for the TVT Archive integration, with VAAPI encoding
 url: https://github.com/mhndt/tvt-archive
 arch:
   - amd64

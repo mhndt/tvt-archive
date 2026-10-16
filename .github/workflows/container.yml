@@ -6,14 +6,14 @@ on:
     paths:
       - Dockerfile
       - docker/**
-      - host/**
+      - custom_components/tvt_archive/bridge/**
       - compose/**
       - .github/workflows/container.yml
   pull_request:
     paths:
       - Dockerfile
       - docker/**
-      - host/**
+      - custom_components/tvt_archive/bridge/**
       - compose/**
       - .github/workflows/container.yml
   workflow_dispatch:

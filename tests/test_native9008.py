@@ -6,10 +6,10 @@ import sys
 import tempfile
 import time
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
-APP = Path(__file__).resolve().parents[1] / "host" / "app"
+APP = Path(__file__).resolve().parents[1] / "custom_components" / "tvt_archive" / "bridge"
 sys.path.insert(0, str(APP))
 
 import native9008  # noqa: E402
@@ -31,6 +31,42 @@ def video_frame(timestamp_us: int) -> native9008.InnerFrame:
 
 
 class NativePlaybackTests(unittest.TestCase):
+    def test_search_uses_the_requested_record_types(self) -> None:
+        start = datetime(2026, 9, 5)
+        xml = native9008._search_xml(start, start + timedelta(hours=1), ("motion", "a<b"))
+        self.assertIn(b"<item>motion</item><item>a&lt;b</item>", xml)
+        self.assertNotIn(b"schedule", xml)
+
+    def test_sd_card_status(self) -> None:
+        client = native9008.TVT9008Client("192.0.2.1", 9008, "user", "pass")
+        replies = {
+            b"normal": (
+                b"<config><types><sdCardStatus><enum>no card</enum></sdCardStatus></types>"
+                b'<sdCardInfo><totalSize type="uint32">118763</totalSize>'
+                b'<usedSize type="uint32">106883</usedSize>'
+                b'<status type="sdCardStatus">normal</status></sdCardInfo></config>'
+            ),
+            b"no card": b"<config><sdCardInfo><status>no card</status></sdCardInfo></config>",
+        }
+        client.config_command = lambda name: native9008.InnerFrame(0, 0, 3, replies[key])
+        key = b"normal"
+        self.assertEqual(
+            client.sd_card(), {"status": "normal", "total_gb": 116.0, "used_gb": 104.4}
+        )
+        key = b"no card"
+        self.assertEqual(
+            client.sd_card(), {"status": "no_sd_card", "total_gb": None, "used_gb": None}
+        )
+
+    def test_record_types_tolerate_unquoted_attributes(self) -> None:
+        client = native9008.TVT9008Client("192.0.2.1", 9008, "user", "pass")
+        reply = (
+            b'<?xml version="1.0"?>\r\n<config><recTypeCaps type="list" count=2>'
+            b"<item>schedule</item><item>motion</item></recTypeCaps></config>"
+        )
+        client.config_command = lambda name: native9008.InnerFrame(0, 0, 3, reply)
+        self.assertEqual(client.record_types(), ("schedule", "motion"))
+
     @staticmethod
     def _fragment(
         object_id: int,
@@ -166,7 +202,14 @@ class NativePlaybackTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             summary = client.capture(start, 2, Path(directory))
         kinds = [kind for kind, _, _ in sent]
-        self.assertEqual(kinds, [native9008.KIND_PLAYBACK_START, native9008.KIND_PLAYBACK_CONTINUE])
+        self.assertEqual(
+            kinds,
+            [
+                native9008.KIND_PLAYBACK_START,
+                native9008.KIND_PLAYBACK_CONTINUE,
+                native9008.KIND_PLAYBACK_STOP,
+            ],
+        )
         self.assertEqual(summary.continuation_commands, 1)
         self.assertEqual(summary.housekeeping_frames, 0)
         self.assertNotIn(0x00000907, kinds)
@@ -262,6 +305,12 @@ class NativePlaybackTests(unittest.TestCase):
             self.assertTrue(fake.closed)
             self.assertIsNone(client.sock)
             self.assertIsNone(client.reader)
+            client = native9008.TVT9008Client("camera", 9008, "user", "password")
+            client.wait_for = lambda *args, **kwargs: native9008.InnerFrame(
+                native9008.KIND_LOGIN_FAILED, native9008.LOGIN_REQUEST_ID, 3, b"\x02\x00\x00\x00"
+            )  # type: ignore[method-assign]
+            with self.assertRaisesRegex(native9008.TVT9008AuthError, r"code 2"):
+                client.connect()
         finally:
             native9008.socket.create_connection = original
 

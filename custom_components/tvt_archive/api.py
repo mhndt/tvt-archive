@@ -89,6 +89,16 @@ class TVTArchiveApi:
             "GET", f"/api/cameras/{camera_id}/availability", params={"days": str(days)}
         )
 
+    async def thumbnail(self, camera_id: str, at: str) -> bytes:
+        async with self.session.get(
+            self._url(f"/api/cameras/{camera_id}/thumbnail/{at}"),
+            headers=self.headers,
+            timeout=self.timeout,
+        ) as response:
+            if response.status >= 400:
+                raise TVTArchiveApiError(await response.text())
+            return await response.read()
+
     async def create_session(self, camera_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         return await self.request("POST", f"/api/cameras/{camera_id}/sessions", json_data=payload)
 

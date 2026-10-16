@@ -16,6 +16,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import socket
 import struct
 import subprocess
@@ -38,10 +39,13 @@ from native9008 import (
     KIND_PLAYBACK_START_RESPONSE,
     KIND_RECORDED_MEDIA,
     MEDIA_HEADER_SIZE,
+    REC_TYPES,
+    TVT9008AuthError,
     TVT9008Client,
+    TVT9008Error,
 )
 
-APP_VERSION = "0.9.5"
+APP_VERSION = "1.0.0"
 BASE = Path(os.environ.get("TVT_ARCHIVE_BASE", "/opt/tvt-archive"))
 CONFIG_DIRECTORY = Path(
     os.environ.get(
@@ -53,15 +57,17 @@ CONFIG_PATH = CONFIG_DIRECTORY / "config.json"
 STATE = Path(os.environ.get("STATE_DIRECTORY", "/var/lib/tvt-archive"))
 CACHE = Path(os.environ.get("CACHE_DIRECTORY", "/var/cache/tvt-archive"))
 WORK = STATE / "work"
+THUMBS = CACHE / "thumbs"
 INDEX = STATE / "index"
 LOGS = STATE / "logs"
-CAPTURE_HELPER = BASE / "app" / "archive_capture.py"
-HLS_JS_PATH = BASE / "static" / "hls.min.js"
+CAPTURE_HELPER = Path(__file__).with_name("archive_capture.py")
+HLS_JS_PATH = Path(os.environ.get("TVT_ARCHIVE_HLS_JS", BASE / "static" / "hls.min.js"))
+EMBEDDED = os.environ.get("TVT_ARCHIVE_EMBEDDED") == "1"
 OPTIONS_PATH = Path("/data/options.json")
 
 
 def drop_privileges(uid: int = 10001, gid: int = 10001) -> None:
-    if not hasattr(os, "geteuid") or os.geteuid() != 0:
+    if EMBEDDED or not hasattr(os, "geteuid") or os.geteuid() != 0:
         return
     for directory in (CONFIG_DIRECTORY, STATE, CACHE):
         directory.mkdir(parents=True, exist_ok=True)
@@ -183,9 +189,9 @@ for _camera_item in _configured_cameras:
         raise ValueError(f"Duplicate configured camera ID: {_camera_id}")
     CAMERAS[_camera_id] = dict(_camera_item)
 
-TOKEN = str(SERVER["token"])
-BIND = str(SERVER.get("bind", "0.0.0.0"))
-PORT = int(SERVER.get("port", 8099))
+TOKEN = os.environ.get("TVT_ARCHIVE_TOKEN") or str(SERVER["token"])
+BIND = os.environ.get("TVT_ARCHIVE_BIND") or str(SERVER.get("bind", "0.0.0.0"))
+PORT = int(os.environ.get("TVT_ARCHIVE_PORT") or SERVER.get("port", 8099))
 CACHE_HOURS = int(PROCESSING.get("cache_hours", 6))
 DEFAULT_GAIN = int(PROCESSING.get("default_gain_db", 0))
 PLAYBACK_MAX_SECONDS = int(PROCESSING.get("playback_max_seconds", 900))
@@ -223,7 +229,7 @@ PLAYBACK_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
 )
 SESSIONS_LOCK = threading.RLock()
 SESSIONS: dict[str, PlaybackSession] = {}
-HLS_IDLE_SECONDS = max(60, int(PROCESSING.get("hls_idle_seconds", 300)))
+HLS_IDLE_SECONDS = max(30, int(PROCESSING.get("hls_idle_seconds", 60)))
 HLS_RETAIN_SECONDS = max(300, int(PROCESSING.get("hls_retain_seconds", 1800)))
 HLS_SEGMENT_SECONDS = max(1, min(int(PROCESSING.get("hls_segment_seconds", 1)), 6))
 COPY_MAX_GOP_SECONDS = 2.0 * HLS_SEGMENT_SECONDS
@@ -282,6 +288,7 @@ HLS_AUDIO_PROBE_MEDIA_SECONDS = max(
     min(float(PROCESSING.get("hls_audio_probe_media_seconds", HLS_START_BUFFER_SECONDS)), 10.0),
 )
 
+CONTINUOUS_TYPES = ("schedule", "manual", "nic broken")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 TIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}$")
 
@@ -450,9 +457,14 @@ KEYFRAME_FLAG = 1
 BAG_END, END_EVENT = 2, 3
 STREAM_WINDOW_FRAMES = 150
 STREAM_IDLE_SECONDS = 20
-STREAM_PAUSE_LIMIT_SECONDS = 900
+# A paused stream gives the camera back after this long and reconnects on resume.
+STREAM_RELEASE_SECONDS = 60
 STREAM_RETAIN_SECONDS = 300
 FIRST_REQUEST_ID = 11
+STREAM_SEEK_TIMEOUT_SECONDS = max(
+    3.0, min(float(PROCESSING.get("stream_seek_timeout_seconds", 8)), 60.0)
+)
+STREAM_SEEK_RECONNECTS = 1
 
 
 def frame_record(kind: int, flags: int, pts_us: int, payload: bytes = b"") -> bytes:
@@ -524,8 +536,16 @@ class FrameSession:
     last_progress: float = 0.0
     utc_offset: int | None = None
     seek_to: dt.datetime | None = None
+    stop_at: dt.datetime | None = None
     request_id: int = FIRST_REQUEST_ID
     pending_request_id: int | None = None
+    pending_target: dt.datetime | None = None
+    pending_since: float = 0.0
+    seek_reconnects: int = 0
+    released_at: float = 0.0
+    video_floor_us: int = 0
+    audio_floor_us: int = 0
+    audio_us: int = 0
     stop_event: threading.Event = dataclasses.field(default_factory=threading.Event, repr=False)
     ready: threading.Condition = dataclasses.field(default_factory=threading.Condition, repr=False)
     queue: collections.deque = dataclasses.field(default_factory=collections.deque, repr=False)
@@ -757,8 +777,26 @@ def capture_environment(item: dict[str, Any]) -> dict[str, str]:
     return env
 
 
+AUTH_RETRY_SECONDS = 600
+AUTH_FAILURES: dict[tuple[str, int, str, str], float] = {}
+
+
+class _GuardedClient(TVT9008Client):
+    """Holds off after a rejected login so the camera does not lock the account."""
+
+    def connect(self) -> None:
+        key = (self.host, self.port, self.username, self.password)
+        if time.time() - AUTH_FAILURES.get(key, 0) < AUTH_RETRY_SECONDS:
+            raise TVT9008AuthError("Camera rejected the login; waiting before retrying")
+        try:
+            super().connect()
+        except TVT9008AuthError:
+            AUTH_FAILURES[key] = time.time()
+            raise
+
+
 def _metadata_client(item: dict[str, Any]) -> TVT9008Client:
-    return TVT9008Client(
+    return _GuardedClient(
         str(item.get("connect_host", item["host"])),
         int(item.get("connect_port", item.get("port", 9008))),
         str(item["username"]),
@@ -1180,8 +1218,26 @@ def merge_segments(
     if cursor < query_stop:
         gaps.append((cursor, query_stop))
     recorded_seconds = sum((stop - start).total_seconds() for start, stop in merged)
+    events = []
+    for segment in raw_segments:
+        if segment.get("type") in CONTINUOUS_TYPES:
+            continue
+        try:
+            start = max(dt.datetime.fromisoformat(str(segment["start"])), query_start)
+            stop = min(dt.datetime.fromisoformat(str(segment["stop"])), query_stop)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if stop > start:
+            events.append(
+                {
+                    "start": start.isoformat(timespec="seconds"),
+                    "stop": stop.isoformat(timespec="seconds"),
+                    "type": str(segment.get("type", "event")),
+                }
+            )
     return {
         "raw_segments": raw_segments,
+        "events": sorted(events, key=lambda event: event["start"]),
         "merged_ranges": [
             {
                 "start": start.isoformat(timespec="seconds"),
@@ -1233,7 +1289,14 @@ def search_window(
             return json.loads(cache_path.read_text(encoding="utf-8"))
         try:
             with _metadata_client(item) as client:
-                raw_segments = client.search(start, stop)
+                types = _read_camera_capabilities(camera_id).get("record_types")
+                if not types:
+                    try:
+                        types = list(client.record_types())
+                    except (TVT9008Error, TimeoutError):
+                        types = list(REC_TYPES)
+                    _remember_capability(camera_id, "record_types", types)
+                raw_segments = client.search(start, stop, tuple(types))
         except Exception:
             if cache_path and cache_path.exists():
                 LOG.warning("Using cached archive metadata for %s after refresh failure", camera_id)
@@ -1303,13 +1366,25 @@ def get_availability(camera_id: str, days: int) -> dict[str, Any]:
 
 def get_status(camera_id: str, *, force: bool = False) -> dict[str, Any]:
     try:
-        today = get_timeline(camera_id, dt.date.today(), force=force)
-        availability = get_availability(camera_id, int(PROCESSING.get("availability_days", 45)))
+        try:
+            with metadata_lock(camera_id), _metadata_client(camera(camera_id)) as client:
+                sd_card = client.sd_card()
+        except TVT9008AuthError:
+            raise
+        except (OSError, EOFError, TimeoutError, TVT9008Error):
+            sd_card = {"status": "unknown"}
+        if sd_card["status"] in ("no_sd_card", "unformatted", "error"):
+            today = {"recorded_hours": 0, "recording_now": False, "merged_ranges": []}
+            availability = {"available_history_hours": 0, "days_with_recordings": []}
+        else:
+            today = get_timeline(camera_id, dt.date.today(), force=force)
+            availability = get_availability(camera_id, int(PROCESSING.get("availability_days", 45)))
         return {
             "camera": safe_camera(camera_id),
             "online": True,
             "timeline_today": today,
             "availability": availability,
+            "sd_card": sd_card,
             "encoder": encoder_info(),
             "gop_seconds": _read_camera_capabilities(camera_id).get("gop_seconds"),
         }
@@ -1319,10 +1394,83 @@ def get_status(camera_id: str, *, force: bool = False) -> dict[str, Any]:
             "camera": safe_camera(camera_id),
             "online": False,
             "error": str(error),
+            "auth_failed": isinstance(error, TVT9008AuthError),
             "timeline_today": {},
             "availability": {},
             "encoder": encoder_info(),
         }
+
+
+def get_thumbnail(camera_id: str, start: dt.datetime | None) -> Path:
+    """JPEG of the first keyframe at or after `start`; None means the latest recording."""
+    item = camera(camera_id)
+    if start is None:
+        latest = get_availability(camera_id, 2).get("latest")
+        if not latest:
+            raise KeyError("No recordings")
+        start = dt.datetime.fromisoformat(latest) - dt.timedelta(seconds=30)
+        start = start.replace(minute=start.minute - start.minute % 10, second=0)
+    name = f"{validated_camera_id(camera_id)}-{start:%Y%m%d%H%M%S}.jpg"
+    path = path_under(THUMBS, name)
+    if path.exists():
+        return path
+    with metadata_lock(camera_id):
+        if path.exists():
+            return path
+        frame = b""
+        with _metadata_client(item) as client:
+            client.send(
+                KIND_PLAYBACK_START,
+                FIRST_REQUEST_ID,
+                _range_body(start, start + dt.timedelta(seconds=60)),
+            )
+            client.wait_for(KIND_PLAYBACK_START_RESPONSE, FIRST_REQUEST_ID, 10.0)
+            deadline = time.monotonic() + 10
+            while not frame and time.monotonic() < deadline:
+                try:
+                    received = client.read_frame()
+                except TimeoutError:
+                    continue
+                if received is None or received.kind != KIND_RECORDED_MEDIA:
+                    continue
+                if received.body[:2] == b"\x00\x00" and received.body[3:4] == b"\x03":
+                    break
+                kind, payload, _, keyframe = TVT9008Client._extract_media(received)
+                if kind == "video" and keyframe:
+                    frame = payload
+            client.stop_playback()
+        if not frame:
+            raise KeyError("No recording at this time")
+        jpeg = subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "h264",
+                "-i",
+                "pipe:0",
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale=-2:270",
+                "-q:v",
+                "5",
+                "-f",
+                "mjpeg",
+                "pipe:1",
+            ],
+            input=frame,
+            capture_output=True,
+            timeout=20,
+            check=True,
+        ).stdout
+        THUMBS.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_bytes(jpeg)
+        os.replace(temporary, path)
+    return path
 
 
 @functools.cache
@@ -1420,6 +1568,12 @@ def clean_cache() -> None:
     for path in CACHE.glob("*.mp4"):
         try:
             if path.stat().st_mtime < cutoff:
+                path.unlink()
+        except FileNotFoundError:
+            pass
+    for path in THUMBS.glob("*.jpg"):
+        try:
+            if path.stat().st_mtime < time.time() - 14 * 86400:
                 path.unlink()
         except FileNotFoundError:
             pass
@@ -1533,7 +1687,7 @@ def generate_job(job: Job) -> None:
                 duration=duration,
                 work_directory=work_directory,
                 timeout=duration * 2 + 90,
-                env=capture_environment(item),
+                env={**capture_environment(item), "TVT_BACKUP": "1"},
                 log_path=capture_log,
             )
         finally:
@@ -2139,6 +2293,9 @@ def _hls_command(video_input: str, audio_input: str | None, session: PlaybackSes
         "512",
         "-r",
         f"{session.source_fps:.6f}",
+        # Raw H.264 has no timestamps; ffmpeg 8 otherwise holds audio back forever.
+        "-bsf:v",
+        f"setts=ts=N/({session.source_fps:.6f}*TB)",
         "-f",
         "h264",
         "-i",
@@ -2532,17 +2689,51 @@ def _begin_seek(session: FrameSession) -> None:
     target, session.seek_to = session.seek_to, None
     if target is None or session.client is None:
         return
-    session.pending_request_id = session.request_id + 1
-    session.phase = "Seeking"
+    with session.ready:
+        session.pending_request_id = max(session.request_id, session.pending_request_id or 0) + 1
+        session.pending_target = target
+        session.pending_since = time.monotonic()
+        session.phase = "Seeking"
+    # One playback per connection, as in NVMS; without the stop every seek leaks a stream.
+    session.client.stop_playback()
     session.client.send(
         KIND_PLAYBACK_START, session.pending_request_id, _range_body(target, _end_of_day(target))
     )
+
+
+def _reconnect_seek(session: FrameSession) -> None:
+    target = session.pending_target
+    if target is None:
+        return
+    if session.seek_reconnects >= STREAM_SEEK_RECONNECTS:
+        raise TimeoutError("The camera stopped answering seek requests")
+    session.seek_reconnects += 1
+    LOG.warning(
+        "Stream %s: no media %.0f s after seeking; reconnecting",
+        session.id,
+        STREAM_SEEK_TIMEOUT_SECONDS,
+    )
+    old, session.client = session.client, None
+    if old is not None:
+        old.close()
+    client = _metadata_client(camera(session.camera_id))
+    client.connect()
+    session.client = client
+    _drain(client, 1.5, session.stop_event)
+    with session.ready:
+        session.request_id = FIRST_REQUEST_ID - 1
+        session.pending_request_id = FIRST_REQUEST_ID
+        session.pending_since = time.monotonic()
+    client.send(KIND_PLAYBACK_START, FIRST_REQUEST_ID, _range_body(target, _end_of_day(target)))
 
 
 def _switch_stream(session: FrameSession, transcoder: Transcoder | None) -> None:
     with session.ready:
         session.request_id = session.pending_request_id or session.request_id
         session.pending_request_id = None
+        session.pending_target = None
+        session.seek_reconnects = 0
+        session.video_floor_us = session.audio_floor_us = 0
         session.queue.clear()
         session.delivered = session.rendered = 0
         session.bag_pending = False
@@ -2673,21 +2864,70 @@ class Transcoder:
             pass
 
 
-def _pump_frames(session: FrameSession, transcoder: Transcoder | None) -> None:
-    client = session.client
-    assert client is not None
+def _release_camera(session: FrameSession, slot: threading.BoundedSemaphore) -> None:
+    client, session.client = session.client, None
+    if client is not None:
+        client.stop_playback()
+        client.close()
+    session.released_at = time.monotonic()
+    session.video_floor_us, session.audio_floor_us = session.position_us, session.audio_us
+    session.phase = "Paused"
+    slot.release()
+
+
+def _resume_camera(session: FrameSession, slot: threading.BoundedSemaphore) -> None:
+    while not slot.acquire(timeout=0.5):
+        if session.stop_event.is_set():
+            raise JobCancelled
+    try:
+        client = _metadata_client(camera(session.camera_id))
+        client.connect()
+    except Exception:
+        slot.release()
+        raise
+    _drain(client, 1.5, session.stop_event)
+    start = dt.datetime.fromtimestamp(session.position_us / 1_000_000).replace(microsecond=0)
+    with session.ready:
+        session.request_id = max(session.request_id, session.pending_request_id or 0) + 1
+        session.bag_pending = False
+        session.released_at = 0.0
+        session.client = client
+        session.phase = "Playing"
+    if session.seek_to is None:
+        client.send(KIND_PLAYBACK_START, session.request_id, _range_body(start, session.stop_at))
+
+
+def _pump_frames(
+    session: FrameSession, transcoder: Transcoder | None, slot: threading.BoundedSemaphore
+) -> None:
     while not session.stop_event.is_set():
+        if session.client is None:
+            if session.idle_seconds() > STREAM_IDLE_SECONDS:
+                session.phase = "Nobody is watching"
+                return
+            if session.seek_to is None and session.last_progress <= session.released_at:
+                session.stop_event.wait(0.5)
+                continue
+            _resume_camera(session, slot)
         if session.seek_to is not None:
             _begin_seek(session)
+        if (
+            session.pending_request_id is not None
+            and time.monotonic() - session.pending_since > STREAM_SEEK_TIMEOUT_SECONDS
+        ):
+            _reconnect_seek(session)
+        client = session.client
+        assert client is not None
         if session.idle_seconds() > STREAM_IDLE_SECONDS:
             session.phase = "Nobody is watching"
             return
         if (
             session.last_progress
-            and time.monotonic() - session.last_progress > STREAM_PAUSE_LIMIT_SECONDS
+            and session.pending_request_id is None
+            and time.monotonic() - session.last_progress > STREAM_RELEASE_SECONDS
         ):
-            session.phase = "Paused too long"
-            return
+            _release_camera(session, slot)
+            continue
         try:
             frame = client.read_frame()
         except TimeoutError:
@@ -2712,6 +2952,8 @@ def _pump_frames(session: FrameSession, transcoder: Transcoder | None) -> None:
             session.phase = "End of the recording"
             return
         media_type, payload, pts_us, keyframe = TVT9008Client._extract_media(frame)
+        if pts_us <= (session.video_floor_us if media_type == "video" else session.audio_floor_us):
+            continue
         if media_type == "video":
             if not session.width:
                 session.width, session.height = struct.unpack_from("<II", body, 8)
@@ -2733,6 +2975,7 @@ def _pump_frames(session: FrameSession, transcoder: Transcoder | None) -> None:
                 )
         elif media_type == "audio":
             session.has_audio = True
+            session.audio_us = pts_us
             session.push(REC_AUDIO, frame_record(REC_AUDIO, 0, pts_us, payload))
 
 
@@ -2750,7 +2993,7 @@ def run_frame_session(session: FrameSession) -> None:
         session.status = "running"
         session.phase = "Opening the camera archive"
         start = parse_local_timestamp(str(session.request["start"]))
-        stop = start + dt.timedelta(seconds=int(session.request["duration"]))
+        stop = session.stop_at = start + dt.timedelta(seconds=int(session.request["duration"]))
         client = _metadata_client(item)
         client.connect()
         session.client = client
@@ -2763,11 +3006,13 @@ def run_frame_session(session: FrameSession) -> None:
             transcoder.start()
         session.phase = "Waiting for the first frame"
         session.pump_started = time.monotonic()
-        _pump_frames(session, transcoder)
+        _pump_frames(session, transcoder, slot)
         if session.status not in ("complete",):
             session.status = "stopped"
             if session.phase == "Playing":
                 session.phase = "Stopped"
+    except JobCancelled:
+        session.status = "stopped"
     except Exception as error:
         LOG.exception("Stream %s failed", session.id)
         session.status = "error"
@@ -2777,6 +3022,7 @@ def run_frame_session(session: FrameSession) -> None:
         if transcoder is not None:
             transcoder.close()
         if session.client is not None:
+            session.client.stop_playback()
             session.client.close()
         session.finished_at = time.time()
         session.push(
@@ -2790,7 +3036,8 @@ def run_frame_session(session: FrameSession) -> None:
                 ).encode(),
             ),
         )
-        slot.release()
+        if not session.released_at:
+            slot.release()
         LOG.info(
             "Stream %s %s after %d bags, %.1f media seconds, speed %s",
             session.id,
@@ -2799,6 +3046,13 @@ def run_frame_session(session: FrameSession) -> None:
             session.media_us / 1_000_000,
             session.speed(),
         )
+
+
+def _stop_viewers(camera_id: str) -> None:
+    """The newest viewer of a camera wins; downloads keep their place in the queue."""
+    for other in [*FRAME_SESSIONS.values(), *SESSIONS.values()]:
+        if other.camera_id == camera_id and other.status in ("queued", "running", "playing"):
+            other.stop_event.set()
 
 
 def create_frame_session(camera_id: str, request: dict[str, Any]) -> FrameSession:
@@ -2822,9 +3076,7 @@ def create_frame_session(camera_id: str, request: dict[str, Any]) -> FrameSessio
     )
     with CONFIG_LOCK, SESSIONS_LOCK:
         camera(camera_id)
-        for other in FRAME_SESSIONS.values():
-            if other.camera_id == camera_id and not other.finished():
-                other.stop_event.set()
+        _stop_viewers(camera_id)
         FRAME_SESSIONS[value.id] = value
     PLAYBACK_EXECUTOR.submit(run_frame_session, value)
     return value
@@ -2878,6 +3130,7 @@ def create_playback_session(camera_id: str, request: dict[str, Any]) -> Playback
     )
     with CONFIG_LOCK, SESSIONS_LOCK:
         camera(camera_id)
+        _stop_viewers(camera_id)
         SESSIONS[session_id] = value
     PLAYBACK_EXECUTOR.submit(generate_hls_session, value)
     return value
@@ -2923,7 +3176,7 @@ def cleanup_loop() -> None:
 
 def announce_to_supervisor() -> None:
     token = os.environ.get("SUPERVISOR_TOKEN")
-    if not token:
+    if EMBEDDED or not token:
         return
     host = socket.gethostname()
     body = json.dumps(
@@ -2945,6 +3198,12 @@ def announce_to_supervisor() -> None:
             LOG.warning("Supervisor discovery failed: %s", error)
 
 
+def watch_parent(parent: int) -> None:
+    while os.getppid() == parent:
+        time.sleep(2)
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
 def authorized(header: str) -> bool:
     if not header.startswith("Bearer "):
         return False
@@ -2952,7 +3211,7 @@ def authorized(header: str) -> bool:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "TVTArchiveBridge/0.9.5"
+    server_version = "TVTArchiveBridge/1.0.0"
     timeout = 60
 
     def log_message(self, fmt: str, *args: Any) -> None:
@@ -3175,6 +3434,17 @@ class Handler(BaseHTTPRequestHandler):
             if match:
                 self._json(_session(match.group(1)).public(), head_only=head_only)
                 return
+            match = re.fullmatch(r"/api/cameras/([^/]+)/thumbnail/([\w:-]+)", path)
+            if match:
+                at = None if match.group(2) == "latest" else parse_local_timestamp(match.group(2))
+                cache = "private, max-age=600" if at is None else "private, max-age=604800"
+                self._send_range(
+                    get_thumbnail(match.group(1), at),
+                    "image/jpeg",
+                    {"Cache-Control": cache},
+                    head_only=head_only,
+                )
+                return
             match = re.fullmatch(r"/api/cameras/([^/]+)/(timeline|availability|status)", path)
             if match:
                 camera_id, action = match.groups()
@@ -3343,12 +3613,17 @@ if __name__ == "__main__":
     if sys.argv[1:] not in ([], ["run"]):
         raise SystemExit(f"usage: {sys.argv[0]} [run|show-token]")
     drop_privileges()
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     if ENCODER == "vaapi" and not Path(DRI_DEVICE).exists():
         raise SystemExit(
             f"encoder is vaapi but {DRI_DEVICE} does not exist; use software or pass the GPU through"
         )
     threading.Thread(target=cleanup_loop, name="cache-cleanup", daemon=True).start()
     threading.Thread(target=announce_to_supervisor, name="discovery", daemon=True).start()
+    if EMBEDDED:
+        threading.Thread(
+            target=watch_parent, args=(os.getppid(),), name="parent", daemon=True
+        ).start()
     clean_cache()
     server = ThreadingHTTPServer((BIND, PORT), Handler)
     LOG.info("TVT Archive Bridge %s listening on %s:%s", APP_VERSION, BIND, PORT)

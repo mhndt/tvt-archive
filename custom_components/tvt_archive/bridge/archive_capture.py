@@ -10,7 +10,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from native9008 import TVT9008Client, TVT9008Error
+from native9008 import TVT9008AuthError, TVT9008Client, TVT9008Error
 
 STOP = False
 
@@ -33,6 +33,7 @@ def capture(start: datetime, duration: int, directory: Path) -> int:
     username = required("TVT_USER")
     password = required("TVT_PASSWORD")
     timeout = float(os.environ.get("TVT_TIMEOUT", "8"))
+    backup = os.environ.get("TVT_BACKUP") == "1"
     attempts = max(1, min(8, int(os.environ.get("TVT_CAPTURE_CONNECT_ATTEMPTS", "5"))))
     backoff = (0.0, 0.5, 1.0, 2.0, 3.0, 5.0, 5.0, 5.0)
     last_error: BaseException | None = None
@@ -41,12 +42,16 @@ def capture(start: datetime, duration: int, directory: Path) -> int:
             return 143
         try:
             with TVT9008Client(host, port, username, password, timeout=timeout) as client:
-                result = client.capture(start, duration, directory, stop_requested=lambda: STOP)
+                result = client.capture(
+                    start, duration, directory, stop_requested=lambda: STOP, backup=backup
+                )
             if result.timed_out:
                 raise TimeoutError("Capture timed out before the requested range completed")
             if result.video_frames < 2 or result.video_bytes <= 0:
                 raise RuntimeError(f"Capture returned {result.video_frames} video frames")
             return 0
+        except TVT9008AuthError:
+            raise
         except (OSError, EOFError, TimeoutError, TVT9008Error) as error:
             last_error = error
             # Don't retry after media starts.

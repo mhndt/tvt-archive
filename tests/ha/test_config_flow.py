@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from common import CAMERA, TOKEN, URL
 from homeassistant import config_entries
@@ -36,9 +36,57 @@ async def _start_user_flow(hass: HomeAssistant):
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
+    assert result["type"] is FlowResultType.MENU
+    assert result["menu_options"] == ["builtin", "remote"]
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "remote"}
+    )
     assert result["type"] is FlowResultType.FORM
-    assert result["step_id"] == "user"
+    assert result["step_id"] == "remote"
     return result
+
+
+def _local(api: AsyncMock) -> MagicMock:
+    bridge = MagicMock(token="local-token", api=api)
+    bridge.async_start = AsyncMock(return_value=api)
+    return bridge
+
+
+async def _builtin(hass: HomeAssistant, bridge: MagicMock):
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    with patch("custom_components.tvt_archive.config_flow.async_local_bridge", return_value=bridge):
+        return await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "builtin"}
+        )
+
+
+async def test_builtin_flow_asks_for_first_camera(hass: HomeAssistant, api: AsyncMock) -> None:
+    result = await _builtin(hass, _local(api))
+    assert result["step_id"] == "camera"
+    with patch("custom_components.tvt_archive.async_setup_entry", return_value=True):
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], CAMERA_FORM)
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"] == {"mode": "builtin"}
+    api.add_camera.assert_awaited_once_with(CAMERA_FORM)
+
+
+async def test_builtin_twice_is_aborted(hass: HomeAssistant, api: AsyncMock) -> None:
+    MockConfigEntry(
+        domain=DOMAIN, version=2, unique_id="builtin", data={"mode": "builtin"}
+    ).add_to_hass(hass)
+    result = await _builtin(hass, _local(api))
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+
+
+async def test_builtin_start_failure_aborts(hass: HomeAssistant, api: AsyncMock) -> None:
+    bridge = _local(api)
+    bridge.async_start.side_effect = RuntimeError("ffmpeg was not found")
+    result = await _builtin(hass, bridge)
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "builtin_failed"
 
 
 async def test_user_flow_with_existing_cameras(hass: HomeAssistant, api: AsyncMock) -> None:
@@ -155,7 +203,7 @@ async def test_options_remove_camera(hass: HomeAssistant, api: AsyncMock) -> Non
     entry.add_to_hass(hass)
     api.cameras.side_effect = [{"cameras": [CAMERA]}, {"cameras": []}]
     result = await hass.config_entries.options.async_init(entry.entry_id)
-    assert result["menu_options"] == ["add_camera", "edit_camera", "remove_camera"]
+    assert result["menu_options"] == ["add_camera", "edit_camera", "remove_camera", "motion"]
     result = await hass.config_entries.options.async_configure(
         result["flow_id"], {"next_step_id": "remove_camera"}
     )
@@ -213,3 +261,23 @@ async def test_addon_discovery_updates_existing_token(hass: HomeAssistant, api: 
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "already_configured"
     assert entry.data["token"] == "new"
+
+
+async def test_options_motion_sensors(hass: HomeAssistant, api: AsyncMock) -> None:
+    entry = _entry()
+    entry.add_to_hass(hass)
+    api.cameras.return_value = {"cameras": [CAMERA]}
+    hass.states.async_set("binary_sensor.front_motion", "off", {"device_class": "motion"})
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "motion"}
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"camera_id": "front"}
+    )
+    assert result["step_id"] == "motion_entities"
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"motion": ["binary_sensor.front_motion"]}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options == {"motion": {"front": ["binary_sensor.front_motion"]}}

@@ -5,6 +5,7 @@ import hmac
 import logging
 import re
 import time
+from datetime import date
 from typing import Any
 
 from aiohttp import web
@@ -12,7 +13,8 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
 from .api import TVTArchiveApiError
-from .const import DOMAIN
+from .const import CONF_MOTION, DOMAIN
+from .motion import async_motion_events, auto_motion_entities
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -92,6 +94,20 @@ def _add_hls_url(entry_id: str, data: dict[str, Any], session: dict[str, Any]) -
     return result
 
 
+async def _ha_motion(hass, entry_id, data, camera_id, day) -> list[dict[str, str]]:
+    entry = hass.config_entries.async_get_entry(entry_id)
+    configured = entry.options.get(CONF_MOTION, {}).get(camera_id) if entry else None
+    if configured is None:
+        cameras = data["coordinator"].data.get("cameras", [])
+        host = next((c.get("host") for c in cameras if str(c.get("id")) == camera_id), None)
+        configured = auto_motion_entities(hass, host)
+    try:
+        return await async_motion_events(hass, configured, date.fromisoformat(day))
+    except Exception as error:  # noqa: BLE001
+        _LOGGER.debug("Motion history unavailable: %s", error)
+        return []
+
+
 class EntriesView(HomeAssistantView):
     url = "/api/tvt_archive/entries"
     name = "api:tvt_archive:entries"
@@ -134,10 +150,12 @@ class TimelineView(HomeAssistantView):
         date = request.query.get("date")
         if not date:
             raise web.HTTPBadRequest(text="date is required")
-        data = _entry_data(request.app["hass"], entry_id)
-        return self.json(
-            await data["api"].timeline(camera_id, date, request.query.get("refresh") == "1")
-        )
+        hass = request.app["hass"]
+        data = _entry_data(hass, entry_id)
+        timeline = await data["api"].timeline(camera_id, date, request.query.get("refresh") == "1")
+        if not timeline.get("events"):
+            timeline["events"] = await _ha_motion(hass, entry_id, data, camera_id, date)
+        return self.json(timeline)
 
 
 class AvailabilityView(HomeAssistantView):
@@ -149,6 +167,25 @@ class AvailabilityView(HomeAssistantView):
         data = _entry_data(request.app["hass"], entry_id)
         return self.json(
             await data["api"].availability(camera_id, int(request.query.get("days", "45")))
+        )
+
+
+class ThumbnailView(HomeAssistantView):
+    url = "/api/tvt_archive/{entry_id}/cameras/{camera_id}/thumbnail/{at}"
+    name = "api:tvt_archive:thumbnail"
+    requires_auth = True
+
+    async def get(self, request, entry_id, camera_id, at):
+        data = _entry_data(request.app["hass"], entry_id)
+        try:
+            image = await data["api"].thumbnail(camera_id, at)
+        except TVTArchiveApiError as error:
+            raise web.HTTPNotFound(text="No thumbnail") from error
+        max_age = 600 if at == "latest" else 604800
+        return web.Response(
+            body=image,
+            content_type="image/jpeg",
+            headers={"Cache-Control": f"private, max-age={max_age}"},
         )
 
 
@@ -464,6 +501,7 @@ def register_views(hass: HomeAssistant) -> None:
         StatusView(),
         TimelineView(),
         AvailabilityView(),
+        ThumbnailView(),
         CreateSessionView(),
         SessionView(),
         CreateStreamView(),

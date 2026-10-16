@@ -1,6 +1,9 @@
 DOMAIN = "tvt_archive"
 CONF_URL = "url"
 CONF_TOKEN = "token"
+CONF_MODE = "mode"
+CONF_MOTION = "motion"
+MODE_BUILTIN = "builtin"
 PLATFORMS = ["sensor", "binary_sensor"]
 PANEL_MODULE_PATH = "/tvt_archive/tvt-archive-panel.js"
 PANEL_LOGO_PATH = "/tvt_archive/logo.png"

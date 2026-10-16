@@ -49,6 +49,9 @@ Archive requests use target `3`.
 | Recording metadata | `0x00000411` | `0x0100040F` |
 | Start playback | `0x0000090B` | `0x01000909` |
 | Continue playback | `0x0000090A` | — |
+| Suspend playback | `0x00000907` | — |
+| Resume playback | `0x00000906` | — |
+| Stop playback | `0x00000908` | — |
 | Recorded media | — | `0x01000C05` |
 
 ## Login
@@ -72,13 +75,19 @@ Metadata requests use request ID `0x0000FFFF`.
 
 The body begins with a 64-byte NUL-padded ASCII command name.
 
+### Capabilities
+
+`GetRecordType` lists the recording types the camera supports, as `item` elements. `GetSdCardStatus` returns `status` (`normal`, `no card`, `unformat`, `formatting`, `format fail`, and others) with `totalSize` and `usedSize` in MB.
+
+Some firmware returns unquoted attribute values in these replies, such as `count=6`, so they are not always well-formed XML.
+
 ### Recording dates
 
 `SearchRecordDate` returns dates containing recordings. Dates are represented as `YYYY-MM-DD`.
 
 ### Recording ranges
 
-`SearchByTime` appends an XML request containing `starttime`, `endtime`, and the recording types to include:
+`SearchByTime` appends an XML request containing `starttime`, `endtime`, and the recording types to include, normally those from `GetRecordType`:
 
 ```text
 manual
@@ -106,7 +115,7 @@ Playback starts with `0x0000090B`. The request body is 32 bytes:
 ```text
 +0x00  uint32  0x00145000
 +0x04  byte    1
-+0x05  byte    0
++0x05  byte    backup: 1 for exports
 +0x06  byte    0
 +0x07  byte    0
 +0x08  uint32  1
@@ -117,7 +126,7 @@ Playback starts with `0x0000090B`. The request body is 32 bytes:
 
 The start and end epochs are derived from camera-local timestamps.
 
-A successful request is acknowledged with `0x01000909`. Recorded media then arrives as `0x01000C05` using the playback request ID.
+A successful request is acknowledged with `0x01000909`. NVMS ignores the acknowledgement body. Recorded media then arrives as `0x01000C05` using the playback request ID.
 
 ## Recorded media
 
@@ -158,7 +167,9 @@ A bag-end message has its first two body bytes set to zero and body byte 3 set t
 
 A message with its first two body bytes set to zero and body byte 3 set to `3` marks the end of the recording.
 
+NVMS also sends `0x00000907` with request ID `0` and an empty body when its player falls more than 80 frames behind, then `0x0000090A` once it catches up.
+
 ## Seeking
 
-Seeking uses another `0x0000090B` request on the existing connection with a new request ID and start time.
+NVMS runs one playback per connection. To seek it sends `0x00000908` with request ID `0` and an empty body, then another `0x0000090B` with a new request ID and start time. Media for the old request ID is discarded.
 

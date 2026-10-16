@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import BinaryIO
+from xml.sax.saxutils import escape
 
 OUTER_MAGIC = b"1111"
 HEAD_MAGIC = b"head"
@@ -27,11 +28,14 @@ TARGET_CAMERA = 3
 
 KIND_LOGIN_REQUEST = 0x00000101
 KIND_LOGIN_RESPONSE = 0x01000101
+KIND_LOGIN_FAILED = 0x01000102
 KIND_CONFIG_REQUEST = 0x00000411
 KIND_CONFIG_RESPONSE = 0x0100040F
 KIND_PLAYBACK_START = 0x0000090B
 KIND_PLAYBACK_START_RESPONSE = 0x01000909
 KIND_PLAYBACK_CONTINUE = 0x0000090A
+KIND_PLAYBACK_STOP = 0x00000908
+STOP_REQUEST_ID = 0
 BAG_END_MARKER = 2
 CONTINUATION_SILENCE_SECONDS = 1.0
 NATIVE_VIDEO_STALL_SECONDS = max(
@@ -58,6 +62,10 @@ EXPECTED_AUDIO_BYTES = 320
 
 class TVT9008Error(RuntimeError):
     """Raised for transport or protocol failures."""
+
+
+class TVT9008AuthError(TVT9008Error, ValueError):
+    """Raised when the camera rejects the username or password."""
 
 
 @dataclass
@@ -307,15 +315,29 @@ def _command_field(name: str) -> bytes:
     return encoded.ljust(64, b"\x00")
 
 
-def _search_xml(start: datetime, stop: datetime) -> bytes:
+REC_TYPES = ("manual", "nic broken", "schedule", "motion", "sensor", "intel detection")
+SD_CARD_STATES = {
+    "normal": "normal",
+    "formated": "normal",
+    "formatting": "formatting",
+    "unformat": "unformatted",
+    "uninit": "unformatted",
+    "no card": "no_sd_card",
+    "popup": "no_sd_card",
+    "invalid card": "error",
+    "format fail": "error",
+}
+
+
+def _search_xml(start: datetime, stop: datetime, types: tuple[str, ...] = REC_TYPES) -> bytes:
+    items = "".join(f"<item>{escape(t)}</item>" for t in types)
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<config version="1.0" xmlns="http://www.ipc.com/ver10">\n'
         "  <search>\n"
         '    <recTypes type="list">\n'
         '      <itemType type="recType"/>\n'
-        "      <item>manual</item><item>nic broken</item><item>schedule</item>\n"
-        "      <item>motion</item><item>sensor</item><item>intel detection</item>\n"
+        f"      {items}\n"
         "    </recTypes>\n"
         f'    <starttime type="string"><![CDATA[{start:%Y-%m-%d %H:%M:%S}]]></starttime>\n'
         f'    <endtime type="string"><![CDATA[{stop:%Y-%m-%d %H:%M:%S}]]></endtime>\n'
@@ -394,7 +416,12 @@ class TVT9008Client:
             self.send(
                 KIND_LOGIN_REQUEST, LOGIN_REQUEST_ID, _login_body(self.username, self.password, key)
             )
-            self.wait_for(KIND_LOGIN_RESPONSE, LOGIN_REQUEST_ID, self.timeout)
+            reply = self.wait_for(
+                (KIND_LOGIN_RESPONSE, KIND_LOGIN_FAILED), LOGIN_REQUEST_ID, self.timeout
+            )
+            if reply.kind == KIND_LOGIN_FAILED:
+                code = struct.unpack_from("<I", reply.body)[0] if len(reply.body) >= 4 else 0
+                raise TVT9008AuthError(f"Camera rejected the login (code {code})")
             sock.settimeout(0.75)
             self._heartbeat_stop.clear()
             self._heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
@@ -441,18 +468,21 @@ class TVT9008Client:
             return None
         return _parse_inner(*item)
 
-    def wait_for(self, kind: int, request_id: int | None, timeout: float) -> InnerFrame:
+    def wait_for(
+        self, kind: int | tuple[int, ...], request_id: int | None, timeout: float
+    ) -> InnerFrame:
+        kinds = kind if isinstance(kind, tuple) else (kind,)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
                 frame = self.read_frame()
             except TimeoutError:
                 continue
-            if frame is None or frame.kind != kind:
+            if frame is None or frame.kind not in kinds:
                 continue
             if request_id is None or frame.request_id == request_id:
                 return frame
-        raise TimeoutError(f"Timed out waiting for kind 0x{kind:08X}")
+        raise TimeoutError(f"Timed out waiting for kind 0x{kinds[0]:08X}")
 
     def config_command(self, name: str, extra: bytes = b"") -> InnerFrame:
         body = _command_field(name) + extra + (b"\x00\x00" if extra else b"")
@@ -471,10 +501,33 @@ class TVT9008Client:
         )
         return sorted(dates)
 
-    def search(self, start: datetime, stop: datetime) -> list[dict[str, object]]:
+    def sd_card(self) -> dict[str, object]:
+        text = _strip_http(self.config_command("GetSdCardStatus").body).decode(errors="replace")
+        status = re.search(r"<status[^>]*>([^<]+)</status>", text)
+        sizes = {
+            key: int(value)
+            for key, value in re.findall(r"<(totalSize|usedSize)[^>]*>(\d+)</", text)
+        }
+        return {
+            "status": SD_CARD_STATES.get(status.group(1).strip() if status else "", "unknown"),
+            "total_gb": round(sizes["totalSize"] / 1024, 1) if "totalSize" in sizes else None,
+            "used_gb": round(sizes["usedSize"] / 1024, 1) if "usedSize" in sizes else None,
+        }
+
+    def record_types(self) -> tuple[str, ...]:
+        # Some firmware returns unquoted attributes here, so skip the XML parser.
+        text = _strip_http(self.config_command("GetRecordType").body).decode(errors="replace")
+        types = tuple(t.strip() for t in re.findall(r"<item>([^<]+)</item>", text) if t.strip())
+        return types or REC_TYPES
+
+    def search(
+        self, start: datetime, stop: datetime, types: tuple[str, ...] = REC_TYPES
+    ) -> list[dict[str, object]]:
         if stop <= start:
             raise ValueError("Search stop must be after start")
-        _, root = _parse_xml(self.config_command("SearchByTime", _search_xml(start, stop)).body)
+        _, root = _parse_xml(
+            self.config_command("SearchByTime", _search_xml(start, stop, types)).body
+        )
         results: list[dict[str, object]] = []
         for element in root.iter():
             if _local_name(element.tag) != "item":
@@ -501,11 +554,18 @@ class TVT9008Client:
             )
         return results
 
+    def stop_playback(self) -> None:
+        try:
+            self.send(KIND_PLAYBACK_STOP, STOP_REQUEST_ID)
+        except (OSError, TVT9008Error):
+            pass
+
     @staticmethod
-    def _playback_body(start_epoch: int, stop_epoch: int) -> bytes:
+    def _playback_body(start_epoch: int, stop_epoch: int, backup: bool = False) -> bytes:
         body = bytearray(32)
         struct.pack_into("<I", body, 0, 0x00145000)
         body[4] = 1
+        body[5] = int(backup)
         struct.pack_into("<I", body, 8, 1)
         struct.pack_into("<QQI", body, 12, start_epoch, stop_epoch, 0)
         return bytes(body)
@@ -538,6 +598,7 @@ class TVT9008Client:
         stop_requested: Callable[[], bool] | None = None,
         request_id: int = 11,
         timing_interval_frames: int = 6,
+        backup: bool = False,
     ) -> CaptureSummary:
         output_directory.mkdir(parents=True, exist_ok=True)
         video_path = output_directory / "video.h264"
@@ -549,7 +610,9 @@ class TVT9008Client:
         start_epoch = int(time.mktime(start.timetuple()))
         stop_epoch = int(time.mktime(stop.timetuple()))
         summary = CaptureSummary()
-        self.send(KIND_PLAYBACK_START, request_id, self._playback_body(start_epoch, stop_epoch))
+        self.send(
+            KIND_PLAYBACK_START, request_id, self._playback_body(start_epoch, stop_epoch, backup)
+        )
         self.wait_for(KIND_PLAYBACK_START_RESPONSE, request_id, self.timeout)
         target_end_us = stop_epoch * 1_000_000
         deadline = time.monotonic() + duration * NATIVE_CAPTURE_DEADLINE_FACTOR + 60
@@ -672,7 +735,7 @@ class TVT9008Client:
         if self.reader is not None:
             summary.fragmented_objects = self.reader.fragmented_objects
             summary.fragment_chunks = self.reader.fragment_chunks
-        # No stop command; closing the socket ends playback.
+        self.stop_playback()
         write_timing()
         _atomic_json(summary_path, summary.as_dict())
         return summary

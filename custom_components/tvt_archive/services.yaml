@@ -1,0 +1,21 @@
+save_recording:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          integration: tvt_archive
+    start:
+      selector:
+        datetime:
+    duration:
+      required: true
+      default: 120
+      selector:
+        number:
+          min: 5
+          max: 3600
+          unit_of_measurement: s
+    filename:
+      selector:
+        text:

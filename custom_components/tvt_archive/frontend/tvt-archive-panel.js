@@ -246,9 +246,14 @@ class TVTFmp4Player {
 const FRAME_PLAYER_SUPPORTED = typeof VideoDecoder === "function" && typeof EncodedVideoChunk === "function";
 const REC_INFO = 0, REC_VIDEO = 1, REC_AUDIO = 2, REC_MARK = 3, REC_END = 4;
 const DECODED_MAX = 8, PENDING_MAX = 600, PENDING_RESUME = 400, GAP_COLLAPSE_US = 3e6;
+const HISTORY_MAX_CHUNKS = 1500, HISTORY_MAX_BYTES = 64 * 1024 * 1024, AUDIO_HISTORY_US = 70e6;
+const SEEK_STEP_SECONDS = 10, ARROW_STEP_SECONDS = 5, VOLUME_STEP = 0.05, FRAME_SECONDS = 0.04;
 const ICONS = {
   play: "M8,5.14V19.14L19,12.14L8,5.14Z",
   pause: "M14,19H18V5H14M6,19H10V5H6V19Z",
+  stop: "M18,18H6V6H18V18Z",
+  back10: "M12.5,3C17.15,3 21.08,6.03 22.47,10.22L20.1,11C19.05,7.81 16.04,5.5 12.5,5.5C10.54,5.5 8.77,6.22 7.38,7.38L10,10H3V3L5.6,5.6C7.45,4 9.85,3 12.5,3M10,12V22H8V14H6V12H10M18,14V20C18,21.11 17.11,22 16,22H14A2,2 0 0,1 12,20V14A2,2 0 0,1 14,12H16C17.11,12 18,12.9 18,14M14,14V20H16V14H14Z",
+  forward10: "M10,12V22H8V14H6V12H10M18,14V20C18,21.11 17.11,22 16,22H14A2,2 0 0,1 12,20V14A2,2 0 0,1 14,12H16C17.11,12 18,12.9 18,14M14,14V20H16V14H14M11.5,3C14.15,3 16.55,4 18.4,5.6L21,3V10H14L16.62,7.38C15.23,6.22 13.46,5.5 11.5,5.5C7.96,5.5 4.95,7.81 3.9,11L1.53,10.22C2.92,6.03 6.85,3 11.5,3Z",
   sound: "M14,3.23V5.29C16.89,6.15 19,8.83 19,12C19,15.17 16.89,17.84 14,18.7V20.77C18,19.86 21,16.28 21,12C21,7.72 18,4.14 14,3.23M16.5,12C16.5,10.23 15.5,8.71 14,7.97V16C15.5,15.29 16.5,13.76 16.5,12M3,9V15H7L12,20V4L7,9H3Z",
   muted: "M12,4L9.91,6.09L12,8.18M4.27,3L3,4.27L7.73,9H3V15H7L12,20V13.27L16.25,17.53C15.58,18.04 14.83,18.46 14,18.7V20.77C15.38,20.45 16.63,19.82 17.68,18.96L19.73,21L21,19.73L12,10.73M19,12C19,12.94 18.8,13.82 18.46,14.64L19.97,16.15C20.62,14.91 21,13.5 21,12C21,7.72 18,4.14 14,3.23V5.29C16.89,6.15 19,8.83 19,12M16.5,12C16.5,10.23 15.5,8.71 14,7.97V10.18L16.45,12.63C16.5,12.43 16.5,12.21 16.5,12Z",
   full: "M5,5H10V7H7V10H5V5M14,5H19V10H17V7H14V5M17,14H19V19H14V17H17V14M10,17V19H5V14H7V17H10Z",
@@ -279,15 +284,16 @@ const nalUnits = (data) => {
 };
 
 class TVTFramePlayer {
-  constructor({onState, onError, onEnded, onProgress}) {
-    this.onState = onState; this.onError = onError; this.onEnded = onEnded; this.onProgress = onProgress;
+  constructor({onState, onError, onEnded, onProgress, onSeekBy, onStop}) {
+    this.onState = onState; this.onError = onError; this.onEnded = onEnded; this.onProgress = onProgress; this.onSeekBy = onSeekBy; this.onStop = onStop;
     this.element = document.createElement("div");
     this.element.className = "frame-player";
-    this.element.innerHTML = `<canvas></canvas><div class="fp-wait"><span class="player-spinner"></span><span class="fp-wait-text">Opening recording</span></div>
-      <div class="fp-bar"><button data-act="toggle" aria-label="Pause">${icon("pause")}</button><span class="fp-speed"></span><span class="fp-space"></span><button data-act="mute" aria-label="Mute">${icon("sound")}</button><input class="fp-volume" type="range" min="0" max="1" step="0.05" value="1" aria-label="Volume"><button data-act="full" aria-label="Full screen">${icon("full")}</button></div>`;
+    this.element.innerHTML = `<canvas></canvas><div class="fp-osd"></div><div class="fp-center"><button data-act="back" aria-label="Back ${SEEK_STEP_SECONDS} seconds">${icon("back10")}</button><button data-act="toggle" class="fp-big" aria-label="Pause">${icon("pause")}</button><button data-act="forward" aria-label="Forward ${SEEK_STEP_SECONDS} seconds">${icon("forward10")}</button></div>
+      <div class="fp-bar"><button data-act="back" aria-label="Back ${SEEK_STEP_SECONDS} seconds" title="Back ${SEEK_STEP_SECONDS} s (J)">${icon("back10")}</button><button data-act="toggle" aria-label="Pause" title="Play/pause (K)">${icon("pause")}</button><button data-act="stop" aria-label="Stop" title="Stop">${icon("stop")}</button><button data-act="forward" aria-label="Forward ${SEEK_STEP_SECONDS} seconds" title="Forward ${SEEK_STEP_SECONDS} s (L)">${icon("forward10")}</button><span class="fp-speed"></span><span class="fp-space"></span><button data-act="mute" aria-label="Mute">${icon("sound")}</button><input class="fp-volume" type="range" min="0" max="1" step="0.05" value="1" aria-label="Volume"><button data-act="full" aria-label="Full screen">${icon("full")}</button></div>`;
     this.canvas = this.element.querySelector("canvas");
     this.ctx = this.canvas.getContext("2d");
-    this.frames = []; this.pending = []; this.audioQueue = []; this.arrivals = []; this.stepOnce = false;
+    this.frames = []; this.pending = []; this.audioQueue = []; this.arrivals = []; this.stepOnce = 0;
+    this.history = []; this.historyBytes = 0; this.audioHistory = []; this.discardBefore = null; this.paintedMax = -Infinity; this.osdTimer = null;
     this.decoder = null; this.sps = null; this.pps = null; this.configured = false; this.needKey = true;
     this.paused = false; this.destroyed = false; this.ended = false; this.started = false;
     this.lastPts = null; this.lastWall = 0; this.rendered = 0; this.generation = 0; this.speed = null;
@@ -303,6 +309,7 @@ class TVTFramePlayer {
       if (!this.hoverable) this._showBar(this.element.classList.contains("show-bar") ? 0 : 2500);
     });
     this.hoverable = window.matchMedia("(hover: hover)").matches;
+    this.element.classList.toggle("touch", !this.hoverable);
     this.element.addEventListener("pointerenter", (event) => { if (event.pointerType !== "touch") this._showBar(2500); });
     this.element.addEventListener("pointermove", (event) => { if (event.pointerType !== "touch") this._showBar(2500); });
     this.element.addEventListener("pointerleave", (event) => { if (event.pointerType !== "touch") this._showBar(0); });
@@ -314,7 +321,23 @@ class TVTFramePlayer {
       if (this.gain) this.gain.gain.value = this.volume;
       this._syncButtons();
     });
-    this.element.addEventListener("dblclick", (event) => { if (!event.target.closest("button")) this._action("full"); });
+    this.lastTap = 0; this.lastTapSide = 0; this.lastPointer = "mouse";
+    this.element.addEventListener("pointerdown", (event) => { this.lastPointer = event.pointerType; });
+    this.element.addEventListener("pointerup", (event) => {
+      if (event.pointerType !== "touch" || event.target.closest("button,.fp-bar")) return;
+      const rect = this.element.getBoundingClientRect(), zone = (event.clientX - rect.left) / rect.width, now = performance.now();
+      const side = zone < 0.35 ? -1 : zone > 0.65 ? 1 : 0;
+      if (side && side === this.lastTapSide && now - this.lastTap < 350) {
+        this.lastTap = 0;
+        this.onSeekBy?.(side * SEEK_STEP_SECONDS);
+        return;
+      }
+      this.lastTap = now; this.lastTapSide = side;
+    });
+    this.element.addEventListener("dblclick", (event) => {
+      if (event.target.closest("button") || (this.lastPointer === "touch" && this.lastTapSide)) return;
+      this._action("full");
+    });
     this._onFullscreen = () => this._syncButtons();
     document.addEventListener("fullscreenchange", this._onFullscreen);
     this._syncButtons();
@@ -419,9 +442,89 @@ class TVTFramePlayer {
   _feedDecoder() {
     while (this.pending.length && this._decodedCount() < DECODED_MAX && this.decoder?.state === "configured") {
       const chunk = this.pending.shift();
-      try { this.decoder.decode(chunk); } catch (_) { this.needKey = true; }
+      try { this.decoder.decode(chunk); } catch (_) { this.needKey = true; continue; }
+      this._remember(chunk);
     }
     this._room();
+  }
+
+  _remember(chunk) {
+    this.history.push(chunk);
+    this.historyBytes += chunk.byteLength;
+    while (this.history.length > HISTORY_MAX_CHUNKS || this.historyBytes > HISTORY_MAX_BYTES) {
+      let next = 1;
+      while (next < this.history.length && this.history[next].type !== "key") next += 1;
+      if (next >= this.history.length) break;
+      for (const old of this.history.splice(0, next)) this.historyBytes -= old.byteLength;
+    }
+  }
+
+  get positionPts() { return this.discardBefore ?? this.lastPts; }
+
+  _chunks() { return this.history.concat(this.pending); }
+
+  canRewindTo(pts) {
+    const first = this.history[0] || this.pending[0];
+    return Boolean(first) && first.type === "key" && pts >= first.timestamp && !this.ended;
+  }
+
+  rewindTo(pts) {
+    if (!this.canRewindTo(pts) || this.decoder?.state !== "configured") return false;
+    const chunks = this._chunks();
+    let target = -1;
+    for (let i = chunks.length - 1; i >= 0; i -= 1) if (chunks[i].timestamp <= pts) { target = i; break; }
+    let key = target;
+    while (key >= 0 && chunks[key].type !== "key") key -= 1;
+    if (key < 0) return false;
+    const targetPts = chunks[target].timestamp;
+    for (const frame of this.frames) frame.close();
+    this.frames = [];
+    try { this.decoder.reset(); } catch (_) { return false; }
+    this.configured = false; this.configKey = null; this._configure();
+    if (!this.configured) return false;
+    this.needKey = false;
+    this.history = chunks.slice(0, key);
+    this.historyBytes = this.history.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+    this.pending = chunks.slice(key);
+    this.discardBefore = targetPts;
+    this.lastPts = null;
+    const replayAudio = this.audioHistory.filter((item) => item.pts >= targetPts);
+    this.audioHistory = this.audioHistory.filter((item) => item.pts < targetPts);
+    this.audioQueue = replayAudio.concat(this.audioQueue);
+    if (this.paused) this.stepOnce = 1;
+    this._feedDecoder();
+    return true;
+  }
+
+  step(direction) {
+    if (this.ended && direction > 0 && !this.frames.length) return;
+    if (!this.paused) this.pause();
+    if (direction > 0) { this.stepOnce += 1; this.flash("Next frame"); return; }
+    const current = this.positionPts;
+    if (current === null) return;
+    const chunks = this._chunks();
+    let previous = null;
+    for (let i = chunks.length - 1; i >= 0; i -= 1) if (chunks[i].timestamp < current) { previous = chunks[i].timestamp; break; }
+    if (previous !== null && this.rewindTo(previous)) this.flash("Previous frame");
+    else this.flash("No earlier frame buffered");
+  }
+
+  setVolume(level) {
+    this.volume = Math.max(0, Math.min(1, level));
+    this.muted = this.volume === 0;
+    if (this.gain) this.gain.gain.value = this.volume;
+    if (!this.muted) this.audio?.resume().catch(() => {});
+    this._syncButtons();
+    this.flash(`Volume ${Math.round(this.volume * 100)}%`);
+  }
+
+  flash(text) {
+    const osd = this.element.querySelector(".fp-osd");
+    if (!osd) return;
+    osd.textContent = text;
+    osd.classList.add("visible");
+    clearTimeout(this.osdTimer);
+    this.osdTimer = setTimeout(() => osd.classList.remove("visible"), 700);
   }
 
   _configure() {
@@ -450,13 +553,18 @@ class TVTFramePlayer {
 
   _output(frame) {
     if (this.destroyed) { frame.close(); return; }
+    if (this.discardBefore !== null) {
+      if (frame.timestamp < this.discardBefore) { frame.close(); return; }
+      this.discardBefore = null;
+    }
     this.frames.push(frame);
   }
 
   _flush() {
     for (const frame of this.frames) frame.close();
     this.frames = []; this.pending = []; this.audioQueue = []; this.arrivals = [];
-    this.stepOnce = this.paused;
+    this.history = []; this.historyBytes = 0; this.audioHistory = []; this.discardBefore = null; this.paintedMax = -Infinity;
+    this.stepOnce = this.paused ? 1 : 0;
     this.lastPts = null; this.rendered = 0; this.speed = null; this.needKey = true;
     try { if (this.decoder && this.decoder.state === "configured") this.decoder.reset(); } catch (_) {}
     if (this.decoder && this.decoder.state !== "closed" && this.sps && this.pps) { this.configured = false; this.configKey = null; this._configure(); }
@@ -478,14 +586,17 @@ class TVTFramePlayer {
       const gap = this.lastPts === null ? 0 : frame.timestamp - this.lastPts;
       const due = this.lastPts === null || gap < 0 || gap > GAP_COLLAPSE_US ? now : this.lastWall + gap / 1000;
       if (now >= due) {
-        this.stepOnce = false;
+        if (this.paused) this.stepOnce = Math.max(0, this.stepOnce - 1);
         this.frames.shift();
         this._paint(frame);
         this.lastWall = now - due < 30 ? due : now;
         this.lastPts = frame.timestamp;
         frame.close();
-        this.rendered += 1;
-        if (this.rendered === 1) this._state(this.paused ? "paused" : "playing");
+        if (this.lastPts > this.paintedMax) {
+          this.paintedMax = this.lastPts;
+          this.rendered += 1;
+          if (this.rendered === 1) this._state(this.paused ? "paused" : "playing");
+        }
         this.onProgress?.(this);
       }
     }
@@ -505,7 +616,9 @@ class TVTFramePlayer {
   _scheduleAudio(now) {
     if (!this.audio || this.paused || this.lastPts === null) return;
     while (this.audioQueue.length && this.audioQueue[0].pts <= this.lastPts + 600000) {
-      const {pts, data} = this.audioQueue.shift();
+      const item = this.audioQueue.shift(), {pts, data} = item;
+      this.audioHistory.push(item);
+      while (this.audioHistory.length && pts - this.audioHistory[0].pts > AUDIO_HISTORY_US) this.audioHistory.shift();
       if (this.muted) continue;
       const wallMs = this.lastWall + (pts - this.lastPts) / 1000;
       let when = this.audio.currentTime + (wallMs - now) / 1000;
@@ -521,10 +634,11 @@ class TVTFramePlayer {
 
   // Apply the camera's UTC offset.
   get secondsOfDay() {
-    if (this.lastPts === null) return null;
+    const pts = this.positionPts;
+    if (pts === null) return null;
     let offset = this.offsets.length ? this.offsets[0].offset : -new Date().getTimezoneOffset() * 60;
-    for (const entry of this.offsets) { if (entry.pts <= this.lastPts) offset = entry.offset; else break; }
-    return Math.floor((this.lastPts / 1e6 + offset) % 86400 + 86400) % 86400;
+    for (const entry of this.offsets) { if (entry.pts <= pts) offset = entry.offset; else break; }
+    return Math.floor((pts / 1e6 + offset) % 86400 + 86400) % 86400;
   }
   get clock() {
     const s = this.secondsOfDay;
@@ -534,6 +648,9 @@ class TVTFramePlayer {
 
   _action(name) {
     if (name === "toggle") this.paused ? this.resume() : this.pause();
+    else if (name === "back") this.onSeekBy?.(-SEEK_STEP_SECONDS);
+    else if (name === "stop") { this.onStop?.(); return; }
+    else if (name === "forward") this.onSeekBy?.(SEEK_STEP_SECONDS);
     else if (name === "mute") {
       this.muted = !this.muted;
       if (this.muted === false && this.volume === 0) this.volume = 1;
@@ -548,7 +665,7 @@ class TVTFramePlayer {
   pause() { if (this.paused || this.ended) return; this.paused = true; this.element.classList.add("paused"); this._syncButtons(); this._state("paused"); }
   resume() {
     if (!this.paused) return;
-    this.paused = false; this.element.classList.remove("paused");
+    this.paused = false; this.stepOnce = 0; this.element.classList.remove("paused");
     this.lastWall = performance.now(); this.audio?.resume().catch(() => {});
     this._syncButtons(); this._state("playing");
   }
@@ -571,7 +688,7 @@ class TVTFramePlayer {
   }
 
   _syncButtons() {
-    const set = (act, name, label) => { const b = this.element.querySelector(`button[data-act="${act}"]`); if (b && b.getAttribute("aria-label") !== label) { b.innerHTML = icon(name); b.setAttribute("aria-label", label); } };
+    const set = (act, name, label) => { for (const b of this.element.querySelectorAll(`button[data-act="${act}"]`)) { if (b.getAttribute("aria-label") !== label) { b.innerHTML = icon(name); b.setAttribute("aria-label", label); } } };
     set("toggle", this.paused ? "play" : "pause", this.paused ? "Play" : "Pause");
     set("mute", this.muted ? "muted" : "sound", this.muted ? "Unmute" : "Mute");
     set("full", document.fullscreenElement ? "unfull" : "full", document.fullscreenElement ? "Exit full screen" : "Full screen");
@@ -592,11 +709,6 @@ class TVTFramePlayer {
   }
 
   _state(name) {
-    const wait = this.element.querySelector(".fp-wait");
-    if (wait) {
-      wait.classList.toggle("visible", name === "opening" || name === "seeking");
-      const text = wait.querySelector(".fp-wait-text"); if (text) text.textContent = name === "seeking" ? "Seeking" : "Opening recording";
-    }
     this.onState?.(name);
   }
 
@@ -611,6 +723,7 @@ class TVTFramePlayer {
     this.destroyed = true;
     clearTimeout(this.timer);
     clearTimeout(this.barTimer);
+    clearTimeout(this.osdTimer);
     document.removeEventListener("fullscreenchange", this._onFullscreen);
     try { this.abort?.abort(); } catch (_) {}
     for (const frame of this.frames) frame.close();
@@ -655,6 +768,9 @@ class TVTArchivePanel extends HTMLElement {
     this._framePlayer = null;
     this._seekGeneration = null;
     this._queuedSeekSec = null;
+    this._seekTargetSec = null;
+    this._paintedTicks = 0;
+    this._onKeyDown = (event) => this._handleKey(event);
     this._streamPollTimer = null;
     this._progressTimer = null;
     this._reportedRendered = -1;
@@ -693,6 +809,8 @@ class TVTArchivePanel extends HTMLElement {
   set route(value) { this._route = value; }
 
   connectedCallback() {
+    // Capture phase: keep HA's single-key shortcuts from firing too.
+    window.addEventListener("keydown", this._onKeyDown, true);
     this._render();
     if (this._loaded && this._downloadJobId) {
       clearTimeout(this._pollTimer);
@@ -701,6 +819,7 @@ class TVTArchivePanel extends HTMLElement {
     }
   }
   disconnectedCallback() {
+    window.removeEventListener("keydown", this._onKeyDown, true);
     clearTimeout(this._pollTimer);
     clearTimeout(this._sessionPollTimer);
     clearTimeout(this._playbackRetryTimer);
@@ -844,6 +963,11 @@ class TVTArchivePanel extends HTMLElement {
       if (start === null || stop === null || stop <= start) continue;
       html += `<div class="segment" style="left:${(start/86400)*100}%;width:${Math.max(.08,((stop-start)/86400)*100)}%"></div>`;
     }
+    for (const event of this._timeline.events || []) {
+      const start = timelineSec(event.start, this._date), stop = timelineSec(event.stop, this._date);
+      if (start === null || stop === null || stop <= start) continue;
+      html += `<div class="event" title="${$esc(event.type)} ${secToClock(start)}–${secToClock(stop)}" style="left:${(start/86400)*100}%;width:${((stop-start)/86400)*100}%"></div>`;
+    }
     html += `<div class="marker" style="left:${(this._selectedSec/86400)*100}%"></div></div>`;
     return html;
   }
@@ -858,6 +982,7 @@ class TVTArchivePanel extends HTMLElement {
       video: {software:"Software", copy:"Off", vaapi:"VAAPI"}[mode] || "—",
       oldest: status.availability?.earliest ? new Date(status.availability.earliest).toLocaleString() : "—",
       latest: status.availability?.latest ? new Date(status.availability.latest).toLocaleString() : "—",
+      sd: status.sd_card ? `${diskText(status.sd_card.status)}${status.sd_card.total_gb ? ` · ${status.sd_card.used_gb ?? "?"}/${status.sd_card.total_gb} GB` : ""}` : "—",
     };
   }
 
@@ -950,18 +1075,19 @@ class TVTArchivePanel extends HTMLElement {
       .shell{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:14px}.card{background:var(--ha-card-background,var(--card-background-color));border-radius:var(--ha-card-border-radius,12px);border:var(--ha-card-border-width,1px) solid var(--ha-card-border-color,var(--divider-color));box-shadow:var(--ha-card-box-shadow,none);overflow:hidden;min-width:0}
       .player-head{padding:11px 14px;display:flex;justify-content:space-between;align-items:center;gap:10px;border-bottom:1px solid var(--divider-color)}
       .player{background:#000;min-height:min(62vh,640px);display:grid;place-items:center;position:relative;overflow:hidden}
-      .player video,.player .frame-player{width:100%;height:min(62vh,640px);object-fit:contain;background:#000;display:block;grid-area:1/1}.player-state{display:none;grid-area:1/1;align-self:stretch;justify-self:stretch;z-index:2;align-items:center;justify-content:center;pointer-events:none;color:#fff;font-size:.92rem}.player-state.visible{display:flex}.player-state-content{display:flex;align-items:center;gap:10px;padding:10px 13px;border-radius:10px;background:rgba(0,0,0,.58);color:#fff}.player-spinner{width:18px;height:18px;border-radius:50%;border:3px solid rgba(255,255,255,.25);border-top-color:#fff;animation:tvt-spin .8s linear infinite}@keyframes tvt-spin{to{transform:rotate(360deg)}}
-      .frame-player{position:relative;width:100%;background:#000;display:grid;grid-area:1/1;overflow:hidden;cursor:default}.frame-player canvas{width:100%;height:100%;object-fit:contain;display:block;grid-area:1/1;background:#000}.frame-player:fullscreen{width:100vw;height:100vh}
-      .fp-wait{display:none;grid-area:1/1;place-self:center;align-items:center;gap:10px;padding:10px 13px;border-radius:10px;background:rgba(0,0,0,.58);color:#fff;font-size:.92rem;pointer-events:none}.fp-wait.visible{display:flex}
+      .player video,.player .frame-player{width:100%;height:min(62vh,640px);object-fit:contain;background:#000;grid-area:1/1}.player video{display:block}
+      .frame-player{position:relative;width:100%;background:#000;display:grid;grid-template:minmax(0,1fr)/minmax(0,1fr);grid-area:1/1;overflow:hidden;cursor:default;touch-action:manipulation}.frame-player canvas{width:100%;height:100%;object-fit:contain;display:block;grid-area:1/1;background:#000}.frame-player:fullscreen{width:100vw;height:100vh}
+      .fp-osd{grid-area:1/1;place-self:start center;margin-top:14px;padding:6px 12px;border-radius:999px;background:rgba(0,0,0,.62);color:#fff;font-size:.88rem;font-variant-numeric:tabular-nums;pointer-events:none;opacity:0;transition:opacity .15s}.fp-osd.visible{opacity:1}
+      .fp-center{grid-area:1/1;place-self:stretch;display:flex;align-items:center;justify-content:center;gap:44px;background:rgba(0,0,0,.4);opacity:0;pointer-events:none;transition:opacity .2s}.frame-player:not(.touch) .fp-center{display:none}.frame-player.touch.show-bar .fp-center,.frame-player.touch.paused .fp-center{opacity:1;pointer-events:auto}.fp-center button{touch-action:manipulation;color:#fff;width:52px;height:52px;padding:0;display:grid;place-items:center;background:none;filter:drop-shadow(0 1px 3px rgba(0,0,0,.5))}.fp-center button:is(:hover,:active){background:none}.fp-center .fp-big{width:68px;height:68px}.fp-center svg{width:32px;height:32px;fill:currentColor}.fp-center .fp-big svg{width:42px;height:42px}.frame-player.touch .fp-bar button:is([data-act="back"],[data-act="toggle"],[data-act="forward"]){display:none}
       .fp-bar{position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:4px;padding:4px 6px;background:linear-gradient(transparent,rgba(0,0,0,.65));color:#fff;opacity:0;transition:opacity .2s;pointer-events:none}.frame-player.show-bar .fp-bar,.frame-player.paused .fp-bar{opacity:1;pointer-events:auto}
       .fp-bar button[hidden]{display:none}.fp-bar button{touch-action:manipulation;color:#fff;width:40px;height:40px;padding:0;display:grid;place-items:center;border-radius:50%}.fp-bar button:hover{background:rgba(255,255,255,.15)}.fp-bar button:active{background:rgba(255,255,255,.3)}.fp-bar svg{width:26px;height:26px;fill:currentColor}.fp-speed{font-size:.8rem;opacity:.85;margin-left:6px}.fp-space{flex:1}.fp-volume{--fp-volume-level:100%;display:none;width:78px;height:20px;margin:0 2px;padding:0;border:0;border-radius:0;-webkit-appearance:none;appearance:none;background:linear-gradient(to right,var(--primary-color) 0 var(--fp-volume-level),rgba(255,255,255,.35) var(--fp-volume-level) 100%);background-size:100% 3px;background-position:center;background-repeat:no-repeat}.fp-volume::-webkit-slider-runnable-track{height:3px;background:transparent}.fp-volume::-webkit-slider-thumb{width:12px;height:12px;margin-top:-4.5px;border:0;border-radius:50%;-webkit-appearance:none;appearance:none;background:#fff}.fp-volume::-moz-range-track{height:3px;border:0;background:transparent}.fp-volume::-moz-range-progress{height:3px;background:transparent}.fp-volume::-moz-range-thumb{width:12px;height:12px;border:0;border-radius:50%;background:#fff}.fp-volume:focus-visible{outline:2px solid var(--primary-color);outline-offset:2px}@media(hover:hover) and (pointer:fine){.fp-volume:not([hidden]){display:block}}
       .empty{padding:32px;text-align:center;color:#bdbdbd}.timeline .empty{height:100%;padding:0;display:grid;place-items:center;color:var(--secondary-text-color)}.sidebar{padding:14px;display:grid;gap:10px;align-content:start}.stat{padding:10px 12px;background:var(--secondary-background-color);border-radius:10px}.stat span{color:var(--secondary-text-color);font-size:.8rem}.stat b{display:block;margin-top:3px;overflow-wrap:anywhere}
-      .timeline-card{padding:12px}.timeline-title{display:flex;justify-content:space-between;gap:10px;margin-bottom:8px}.timeline{height:112px;overflow-x:auto;overflow-y:hidden;position:relative;background:var(--secondary-background-color);border-radius:10px;cursor:crosshair}.timeline-inner{height:100%;position:relative;min-width:720px}.segment{position:absolute;top:38px;height:42px;border-radius:6px;background:var(--success-color,#43a047);background:color-mix(in srgb,var(--success-color,#43a047) 78%,var(--secondary-background-color) 22%)}.tick{position:absolute;top:0;bottom:0;width:0;border-left:1px solid var(--divider-color)}.tick span{position:absolute;left:0;top:7px;transform:translateX(-50%);font-size:.7rem;color:var(--secondary-text-color);white-space:nowrap}.tick:first-child span{left:6px;transform:none}.tick-end{left:auto!important;right:0}.tick-end span{left:auto;right:8px;transform:none}.marker{position:absolute;top:36px;bottom:12px;width:2px;background:var(--error-color,#e53935)}.marker:after{content:"";position:absolute;top:-9px;left:-4px;width:10px;height:10px;border-radius:50%;background:inherit}
+      .timeline-card{padding:12px}.timeline-title{display:flex;justify-content:space-between;gap:10px;margin-bottom:8px}.timeline{height:112px;overflow-x:auto;overflow-y:hidden;position:relative;background:var(--secondary-background-color);border-radius:10px;cursor:crosshair}.timeline-inner{height:100%;position:relative;min-width:720px}.segment{position:absolute;top:38px;height:42px;border-radius:6px;background:var(--success-color,#43a047);background:color-mix(in srgb,var(--success-color,#43a047) 78%,var(--secondary-background-color) 22%)}.event{position:absolute;top:38px;height:42px;min-width:2px;border-radius:2px;background:var(--state-binary_sensor-motion-on-color,var(--amber-color,#ffc107))}.tick{position:absolute;top:0;bottom:0;width:0;border-left:1px solid var(--divider-color)}.tick span{position:absolute;left:0;top:7px;transform:translateX(-50%);font-size:.7rem;color:var(--secondary-text-color);white-space:nowrap}.tick:first-child span{left:6px;transform:none}.tick-end{left:auto!important;right:0}.tick-end span{left:auto;right:8px;transform:none}.marker{position:absolute;top:36px;bottom:12px;width:2px;background:var(--error-color,#e53935)}.marker:after{content:"";position:absolute;top:-9px;left:-4px;width:10px;height:10px;border-radius:50%;background:inherit}
       .lower{display:grid;grid-template-columns:1fr 1fr;gap:14px}.box{padding:13px;min-width:0;overflow:hidden}.selection-controls{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:end}.selection-controls>*{min-width:0;max-width:100%}.range{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;gap:8px;align-items:end}.range>*{min-width:0;max-width:100%}.selection-controls label,.range label{gap:8px}.download-progress{display:none;grid-column:1/-1;align-items:center;gap:0;font-size:.78rem;color:var(--secondary-text-color)}.download-progress.visible{display:flex}.download-track{height:5px;flex:1;overflow:hidden;border-radius:999px;background:var(--divider-color)}.download-bar{height:100%;width:0;background:var(--primary-color);transition:width .25s ease}.download-percent{flex:0 0 43px;text-align:center;font-variant-numeric:tabular-nums}.statusline{min-height:22px;color:var(--secondary-text-color)}.error{color:var(--error-color)}
       @media(min-width:901px) and (min-height:720px){
         :host{height:100dvh;overflow:hidden}.page{height:100%;overflow:hidden;padding:12px 18px;gap:10px;grid-template-rows:auto auto minmax(0,1fr) auto auto auto}
         .shell{min-height:0;gap:10px}.shell>.card:first-child{display:grid;grid-template-rows:auto minmax(0,1fr);min-height:0}.player{height:100%;min-height:0}.player video,.player .frame-player{height:100%;min-height:0;max-height:none}
-        .sidebar{min-height:0;overflow:hidden;padding:10px;gap:7px;grid-auto-rows:minmax(56px,auto);align-content:start}.stat{padding:7px 10px;display:flex;flex-direction:column;justify-content:center}.timeline-card{padding:9px 10px}.timeline-title{margin-bottom:8px}.timeline{height:92px}.segment{top:31px;height:35px}.marker{top:29px;bottom:10px}
+        .sidebar{min-height:0;overflow-y:auto;padding:10px;gap:7px;grid-auto-rows:minmax(56px,auto);align-content:start}.stat{padding:7px 10px;display:flex;flex-direction:column;justify-content:center}.timeline-card{padding:9px 10px}.timeline-title{margin-bottom:8px}.timeline{height:92px}.segment,.event{top:31px;height:35px}.marker{top:29px;bottom:10px}
         .lower{gap:10px}.box{padding:10px}.statusline{min-height:18px;font-size:.8rem}
       }
       @media(max-width:900px){.shell{grid-template-columns:1fr}.sidebar{grid-template-columns:repeat(2,minmax(0,1fr))}.lower{grid-template-columns:1fr}.player,.player video,.player .frame-player{min-height:42vh;height:42vh}.page{padding:10px}}
@@ -981,7 +1107,7 @@ class TVTArchivePanel extends HTMLElement {
           <div class="stat"><span>Recording</span><b id="stat-recording">${$esc(values.recording)}</b></div><div class="stat"><span>Recorded today</span><b id="stat-today">${$esc(values.today)}</b></div>
           <div class="stat"><span>Available history</span><b id="stat-history">${$esc(values.history)}</b></div>
 <div class="stat"><span>Encoding</span><b id="stat-video">${$esc(values.video)}</b></div>
-          <div class="stat"><span>Oldest recording</span><b id="stat-oldest">${$esc(values.oldest)}</b></div><div class="stat"><span>Latest recording</span><b id="stat-latest">${$esc(values.latest)}</b></div>
+          <div class="stat"><span>Oldest recording</span><b id="stat-oldest">${$esc(values.oldest)}</b></div><div class="stat"><span>Latest recording</span><b id="stat-latest">${$esc(values.latest)}</b></div><div class="stat"><span>SD card</span><b id="stat-sd">${$esc(values.sd)}</b></div>
         </div>
       </div>
       <div class="card timeline-card"><div class="timeline-title"><span>Click a recorded section to select a time</span><b>${selected}</b></div><div id="timeline" class="timeline">${this._timelineHtml()}</div></div>
@@ -1003,9 +1129,10 @@ class TVTArchivePanel extends HTMLElement {
     const get = (id) => this.shadowRoot.getElementById(id);
     const zoom = get("zoom"); if (zoom) zoom.value = String(this._zoom);
     get("camera")?.addEventListener("change", async (event) => {
+      const cameraId = event.target.value;
       await this._stopPlaybackSession();
       this._resetDownloadResult();
-      this._cameraId = event.target.value;
+      this._cameraId = cameraId;
       this._camera = this._cameras.find((camera) => camera.id === this._cameraId);
       this._timeline = null; this._status = null; this._mode = "recording"; this._persistState();
       await Promise.all([this._loadTimeline(), this._loadStatus()]);
@@ -1143,35 +1270,17 @@ class TVTArchivePanel extends HTMLElement {
     this._attachHlsPlayer(host, this._playbackSession.playlist_url);
   }
 
-  _setRecordingPlayerState(state, detail = {}) {
-    const overlay = this.shadowRoot.getElementById("player-state");
-    if (!overlay) return;
-    const alreadyStarted = Boolean(this._recordingController?.started);
-    if (state === "playing" || state === "seeking" || alreadyStarted) {
-      overlay.className = "player-state";
-      overlay.replaceChildren();
-      return;
-    }
-    overlay.className = "player-state visible";
-    overlay.innerHTML = `<div class="player-state-content"><span class="player-spinner"></span><span>Opening recording</span></div>`;
-  }
-
   _createRecordingPlayer(host, url = null) {
     this._recordingController?.destroy();
     const video = this._recordingPlayer || document.createElement("video");
     video.controls = false; video.autoplay = false; video.playsInline = true;
     video.preload = "auto";
-    const overlay = document.createElement("div");
-    overlay.id = "player-state";
-    overlay.className = "player-state visible";
-    overlay.innerHTML = `<div class="player-state-content"><span class="player-spinner"></span><span>Opening recording</span></div>`;
-    host.replaceChildren(video, overlay);
+    host.replaceChildren(video);
     this._recordingPlayer = video;
     const controller = new TVTFmp4Player(
       video, url, this._playbackSession?.player_script_url, this._playbackSession?.mime_type, this._playbackSession?.start_buffer_seconds,
       () => { this._message = ""; this._playbackRetryCount = 0; this._playbackRetryPending = false; this._updateStatusLine(); },
       (message) => this._handlePlaybackFailure(message || "The recording could not be opened."),
-      (state, detail) => this._setRecordingPlayerState(state, detail),
     );
     this._recordingController = controller;
     return controller;
@@ -1211,6 +1320,7 @@ class TVTArchivePanel extends HTMLElement {
     this._stream = null;
     this._seekGeneration = null;
     this._queuedSeekSec = null;
+    this._seekTargetSec = null;
     this._slowHint = false;
     this._framePlayer?.destroy();
     this._framePlayer = null;
@@ -1273,6 +1383,8 @@ class TVTArchivePanel extends HTMLElement {
       onError: (message) => this._handlePlaybackFailure(message),
       onEnded: (error) => this._streamEnded(error),
       onProgress: (current) => this._streamProgress(current),
+      onSeekBy: (seconds) => this._seekBy(seconds),
+      onStop: () => this._stopStream(),
     });
     this._framePlayer = player;
     this._reportedRendered = -1;
@@ -1310,6 +1422,7 @@ class TVTArchivePanel extends HTMLElement {
       return;
     }
     this._seekGeneration = player.generation;
+    this._seekTargetSec = seconds;
     try {
       await this._api("POST", `tvt_archive/${this._entryId}/streams/${stream.id}`, {seek: secToClock(Math.floor(seconds))});
     } catch (error) {
@@ -1317,6 +1430,90 @@ class TVTArchivePanel extends HTMLElement {
       this._queuedSeekSec = null;
       this._handlePlaybackFailure(errorText(error));
     }
+  }
+
+  _recordedTarget(target, direction) {
+    if (this._hasRecordingAt(target)) return target;
+    const ranges = (this._timeline?.merged_ranges || [])
+      .map((range) => [timelineSec(range.start, this._date), timelineSec(range.stop, this._date)])
+      .filter(([start, stop]) => start !== null && stop !== null && stop > start);
+    if (direction > 0) {
+      const next = ranges.filter(([start]) => start > target).sort((a, b) => a[0] - b[0])[0];
+      return next ? next[0] : null;
+    }
+    const previous = ranges.filter(([, stop]) => stop <= target).sort((a, b) => b[1] - a[1])[0];
+    return previous ? Math.max(previous[0], previous[1] - 1) : null;
+  }
+
+  _seekBy(seconds) {
+    const player = this._framePlayer;
+    if (!player) { this._seekVideoBy(seconds); return; }
+    const label = `${seconds > 0 ? "+" : "−"}${Math.abs(seconds)} s`;
+    const pts = player.positionPts;
+    if (seconds < 0 && this._seekGeneration === null && pts !== null && player.rewindTo(pts + seconds * 1e6)) {
+      player.flash(label);
+      return;
+    }
+    const pendingTarget = this._seekGeneration !== null ? (this._queuedSeekSec ?? this._seekTargetSec) : null;
+    const base = pendingTarget ?? this._playedSecondsOfDay();
+    const target = this._recordedTarget(Math.max(0, Math.min(86399, Math.round(base + seconds))), seconds);
+    if (target === null) { player.flash(seconds > 0 ? "No later recording today" : "No earlier recording today"); return; }
+    player.flash(label);
+    this._resetDownloadResult();
+    this._selectTime(target);
+    this._updateSelection();
+    if (this._canSeek()) this._seekStream(target);
+    else this._playRecording();
+  }
+
+  async _stopStream() {
+    const seconds = this._framePlayer?.secondsOfDay;
+    if (seconds != null) this._selectTime(seconds);
+    this._message = "";
+    await this._stopPlaybackSession(true);
+  }
+
+  _seekVideoBy(seconds) {
+    const video = this._recordingPlayer;
+    if (!video || !this._recordingController?.started) return;
+    const end = Number.isFinite(video.duration) ? video.duration : Infinity;
+    try { video.currentTime = Math.max(0, Math.min(end, Number(video.currentTime || 0) + seconds)); } catch (_) {}
+  }
+
+  _handleKey(event) {
+    if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey || event.isComposing) return;
+    const player = this._framePlayer;
+    const video = this._recordingController?.started ? this._recordingPlayer : null;
+    if (!player && !video) return;
+    const origin = event.composedPath?.()[0] || event.target;
+    const tag = origin?.tagName || "";
+    if (/^(INPUT|SELECT|TEXTAREA)$/.test(tag) || origin?.isContentEditable) return;
+    const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+    if (key === " " && /^(BUTTON|HA-BUTTON|A)$/.test(tag)) return;
+    const seek = {j: -SEEK_STEP_SECONDS, l: SEEK_STEP_SECONDS, ArrowLeft: -ARROW_STEP_SECONDS, ArrowRight: ARROW_STEP_SECONDS}[key];
+    if (seek !== undefined) this._seekBy(seek);
+    else if (key === " " || key === "k") {
+      if (player) player._action("toggle");
+      else if (video.paused) video.play().catch(() => {}); else video.pause();
+    }
+    else if (key === "," || key === ".") {
+      const direction = key === "." ? 1 : -1;
+      if (player) player.step(direction);
+      else { video.pause(); try { video.currentTime = Math.max(0, video.currentTime + direction * FRAME_SECONDS); } catch (_) {} }
+    }
+    else if (key === "m") { if (player) player._action("mute"); else video.muted = !video.muted; }
+    else if (key === "f") {
+      if (player) player.toggleFullscreen();
+      else if (document.fullscreenElement) document.exitFullscreen?.(); else video.requestFullscreen?.().catch(() => {});
+    }
+    else if (key === "ArrowUp" || key === "ArrowDown") {
+      const delta = key === "ArrowUp" ? VOLUME_STEP : -VOLUME_STEP;
+      if (player) { if (!player.hasAudio) return; player.setVolume(player.volume + delta); }
+      else { video.muted = false; video.volume = Math.max(0, Math.min(1, video.volume + delta)); }
+    }
+    else return;
+    event.preventDefault();
+    event.stopPropagation();
   }
 
   async _pollStream(id) {
@@ -1355,7 +1552,8 @@ class TVTArchivePanel extends HTMLElement {
       }
     }
     const seconds = player.secondsOfDay;
-    if (seconds != null && player.rendered % 5 === 0) {
+    this._paintedTicks = (this._paintedTicks + 1) % 5;
+    if (seconds != null && (this._paintedTicks === 0 || player.paused)) {
       this._moveMarker(seconds);
       const head = this.shadowRoot.querySelector(".player-head .subtle");
       if (head) head.textContent = `${this._date} ${player.clock}`;

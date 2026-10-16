@@ -7,7 +7,7 @@ from typing import Any
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorEntityDescription
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import UnitOfTime
+from homeassistant.const import EntityCategory, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.util import dt as dt_util
@@ -19,6 +19,7 @@ from .entity import TVTArchiveEntity
 @dataclass(frozen=True, kw_only=True)
 class TVTSensorDescription(SensorEntityDescription):
     value_fn: Callable[[dict[str, Any]], Any]
+    attrs_fn: Callable[[dict[str, Any]], dict[str, Any]] | None = None
     timestamp: bool = False
 
 
@@ -42,6 +43,7 @@ DESCRIPTIONS = (
     TVTSensorDescription(
         key="oldest_recording",
         translation_key="oldest_recording",
+        entity_category=EntityCategory.DIAGNOSTIC,
         device_class=SensorDeviceClass.TIMESTAMP,
         icon="mdi:history",
         timestamp=True,
@@ -50,10 +52,23 @@ DESCRIPTIONS = (
     TVTSensorDescription(
         key="latest_recording",
         translation_key="latest_recording",
+        entity_category=EntityCategory.DIAGNOSTIC,
         device_class=SensorDeviceClass.TIMESTAMP,
         icon="mdi:clock-check",
         timestamp=True,
         value_fn=lambda s: s.get("availability", {}).get("latest"),
+    ),
+    TVTSensorDescription(
+        key="sd_card",
+        translation_key="sd_card",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        device_class=SensorDeviceClass.ENUM,
+        options=["normal", "no_sd_card", "unformatted", "formatting", "error", "unknown"],
+        icon="mdi:sd",
+        value_fn=lambda s: s.get("sd_card", {}).get("status"),
+        attrs_fn=lambda s: {
+            k: v for k, v in s.get("sd_card", {}).items() if k in ("total_gb", "used_gb")
+        },
     ),
 )
 
@@ -97,6 +112,11 @@ class TVTArchiveSensor(TVTArchiveEntity, SensorEntity):
             if zone is not None:
                 parsed = parsed.replace(tzinfo=zone)
         return parsed
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        attrs_fn = self.entity_description.attrs_fn
+        return attrs_fn(self.status) if attrs_fn else None
 
     @property
     def available(self) -> bool:

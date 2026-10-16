@@ -8,7 +8,10 @@ __pycache__
 *.pyo
 dist
 assets
-custom_components
+custom_components/*
+!custom_components/tvt_archive
+custom_components/tvt_archive/*
+!custom_components/tvt_archive/bridge
 docs
 tests
 README.md

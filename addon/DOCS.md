@@ -1,6 +1,6 @@
 # TVT Archive
 
-Runs the bridge that gives Home Assistant access to recordings stored on compatible TVT cameras.
+Optional. The TVT Archive integration includes a built-in bridge, so this app is only needed to encode Low quality on an Intel or AMD GPU with VAAPI.
 
 ## Setup
 

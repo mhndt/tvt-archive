@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from common import CAMERA, TOKEN, URL
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import issue_registry as ir
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.tvt_archive.api import TVTArchiveAuthError
@@ -23,8 +24,13 @@ async def _setup(hass: HomeAssistant) -> MockConfigEntry:
 
 async def test_entities_are_created(hass: HomeAssistant, api: AsyncMock) -> None:
     api.cameras.return_value = {"cameras": [CAMERA]}
+    api.status.return_value["sd_card"] = {"status": "no_sd_card", "total_gb": None}
     entry = await _setup(hass)
     assert entry.state is ConfigEntryState.LOADED
+    sd_card = hass.states.get("sensor.front_sd_card")
+    assert sd_card.state == "no_sd_card"
+    assert sd_card.attributes["total_gb"] is None
+    assert ir.async_get(hass).async_get_issue(DOMAIN, "sd_card_front")
     assert hass.states.get("binary_sensor.front_recording").state == "on"
     assert hass.states.get("sensor.front_recorded_today").state == "2.5"
     assert hass.states.get("sensor.front_available_history").state == "76.9"
@@ -37,3 +43,19 @@ async def test_bad_token_starts_reauth(hass: HomeAssistant, api: AsyncMock) -> N
     assert entry.state is ConfigEntryState.SETUP_ERROR
     flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
     assert flows and flows[0]["context"]["source"] == "reauth"
+
+
+async def test_builtin_entry_runs_the_local_bridge(hass: HomeAssistant, api: AsyncMock) -> None:
+    api.cameras.return_value = {"cameras": [CAMERA]}
+    bridge = MagicMock(token="local-token", api=api)
+    bridge.async_start = AsyncMock(return_value=api)
+    bridge.async_stop = AsyncMock()
+    entry = MockConfigEntry(domain=DOMAIN, version=2, unique_id="builtin", data={"mode": "builtin"})
+    entry.add_to_hass(hass)
+    with patch("custom_components.tvt_archive.async_local_bridge", return_value=bridge):
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        assert entry.state is ConfigEntryState.LOADED
+        await hass.config_entries.async_unload(entry.entry_id)
+    bridge.async_start.assert_awaited_once()
+    bridge.async_stop.assert_awaited_once()

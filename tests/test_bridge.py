@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-APP = ROOT / "host" / "app"
+APP = ROOT / "custom_components" / "tvt_archive" / "bridge"
 TEMP = tempfile.TemporaryDirectory()
 BASE = Path(TEMP.name)
 CONFIG = BASE / "config"
@@ -41,7 +41,7 @@ CONFIG.mkdir()
 )
 os.environ.update(
     {
-        "TVT_ARCHIVE_BASE": str(ROOT / "host"),
+        "TVT_ARCHIVE_BASE": str(ROOT),
         "CREDENTIALS_DIRECTORY": str(CONFIG),
         "STATE_DIRECTORY": str(STATE),
         "CACHE_DIRECTORY": str(CACHE),
@@ -49,6 +49,7 @@ os.environ.update(
 )
 sys.path.insert(0, str(APP))
 bridge = importlib.import_module("bridge")
+native9008 = importlib.import_module("native9008")
 
 
 class BridgeTests(unittest.TestCase):
@@ -218,6 +219,62 @@ class BridgeTests(unittest.TestCase):
         finally:
             slot.release()
 
+    def test_rejected_login_is_not_retried_at_once(self) -> None:
+        attempts = []
+
+        def reject(client):
+            attempts.append(client.password)
+            raise native9008.TVT9008AuthError("Camera rejected the login (code 2)")
+
+        item = {"host": "192.0.2.10", "port": 9008, "username": "u", "password": "bad"}
+        with patch.object(native9008.TVT9008Client, "connect", reject):
+            for _ in range(3):
+                with self.assertRaises(native9008.TVT9008AuthError):
+                    bridge._metadata_client(item).connect()
+            with self.assertRaises(native9008.TVT9008AuthError):
+                bridge._metadata_client({**item, "password": "new"}).connect()
+        self.assertEqual(attempts, ["bad", "new"])
+        bridge.AUTH_FAILURES.clear()
+
+    def test_newest_viewer_stops_older_playback(self) -> None:
+        old_stream = bridge.FrameSession(id="d" * 32, camera_id="front_door", request={})
+        old_stream.status = "playing"
+        old_hls = bridge.PlaybackSession(
+            id="e" * 32, camera_id="front_door", request={}, work_directory=str(bridge.WORK)
+        )
+        old_hls.status = "running"
+        with bridge.SESSIONS_LOCK:
+            bridge.FRAME_SESSIONS[old_stream.id] = old_stream
+            bridge.SESSIONS[old_hls.id] = old_hls
+        try:
+            bridge._stop_viewers("front_door")
+            self.assertTrue(old_stream.stop_event.is_set())
+            self.assertTrue(old_hls.stop_event.is_set())
+        finally:
+            with bridge.SESSIONS_LOCK:
+                bridge.FRAME_SESSIONS.pop(old_stream.id, None)
+                bridge.SESSIONS.pop(old_hls.id, None)
+
+    def test_events_come_from_non_continuous_segments(self) -> None:
+        day = datetime(2026, 9, 5)
+        result = bridge.merge_segments(
+            [
+                {"start": "2026-09-05T00:00:00", "stop": "2026-09-05T12:00:00", "type": "schedule"},
+                {"start": "2026-09-05T08:00:00", "stop": "2026-09-05T08:00:30", "type": "motion"},
+                {"start": "2026-09-04T23:59:50", "stop": "2026-09-05T00:00:20", "type": "sensor"},
+            ],
+            day,
+            day.replace(hour=23, minute=59, second=59),
+        )
+        self.assertEqual(
+            result["events"],
+            [
+                {"start": "2026-09-05T00:00:00", "stop": "2026-09-05T00:00:20", "type": "sensor"},
+                {"start": "2026-09-05T08:00:00", "stop": "2026-09-05T08:00:30", "type": "motion"},
+            ],
+        )
+        self.assertEqual(len(result["merged_ranges"]), 1)
+
     def test_frame_record_round_trip(self) -> None:
         record = bridge.frame_record(bridge.REC_VIDEO, bridge.KEYFRAME_FLAG, 1234567, b"abc")
         magic, kind, flags, pts, length = bridge.FRAME_HEADER.unpack_from(record)
@@ -255,6 +312,32 @@ class BridgeTests(unittest.TestCase):
         finally:
             with bridge.SESSIONS_LOCK:
                 bridge.FRAME_SESSIONS.pop(stream.id, None)
+
+    def test_seek_stops_the_old_stream_first(self) -> None:
+        sent: list[tuple[int, int]] = []
+
+        class Client:
+            def send(self, kind, request_id, body=b""):
+                sent.append((kind, request_id))
+
+            def stop_playback(self):
+                self.send(native9008.KIND_PLAYBACK_STOP, 0)
+
+        stream = bridge.FrameSession(id="b" * 32, camera_id="front_door", request={})
+        stream.client = Client()
+        for minute in (1, 2):
+            stream.seek_to = datetime(2026, 9, 5, 2, minute)
+            bridge._begin_seek(stream)
+        stop, start = native9008.KIND_PLAYBACK_STOP, bridge.KIND_PLAYBACK_START
+        self.assertEqual(sent, [(stop, 0), (start, 12), (stop, 0), (start, 13)])
+        self.assertEqual(stream.pending_target, datetime(2026, 9, 5, 2, 2))
+
+    def test_stalled_seek_gives_up_after_reconnecting(self) -> None:
+        stream = bridge.FrameSession(id="c" * 32, camera_id="front_door", request={})
+        stream.pending_target = datetime(2026, 9, 5, 2, 0)
+        stream.seek_reconnects = bridge.STREAM_SEEK_RECONNECTS
+        with self.assertRaises(TimeoutError):
+            bridge._reconnect_seek(stream)
 
     def test_utc_offset_follows_the_timestamp(self) -> None:
         for month in (1, 7):

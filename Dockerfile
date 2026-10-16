@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     test "$(wc -c < /export/hls.min.js)" -gt 400000
 
 FROM debian:${DEBIAN_VERSION}
-ARG APP_VERSION=0.9.5
+ARG APP_VERSION=1.0.0
 ARG VCS_REF=unknown
 ARG BUILD_DATE=unknown
 
@@ -60,9 +60,9 @@ RUN set -eux; \
     find / -xdev -type f -perm /6000 -exec chmod a-s {} +
 
 WORKDIR /opt/tvt-archive
-COPY --chown=root:root host/app/bridge.py ./app/bridge.py
-COPY --chown=root:root host/app/native9008.py ./app/native9008.py
-COPY --chown=root:root host/app/archive_capture.py ./app/archive_capture.py
+COPY --chown=root:root custom_components/tvt_archive/bridge/bridge.py ./app/bridge.py
+COPY --chown=root:root custom_components/tvt_archive/bridge/native9008.py ./app/native9008.py
+COPY --chown=root:root custom_components/tvt_archive/bridge/archive_capture.py ./app/archive_capture.py
 RUN chmod 0755 ./app/bridge.py ./app/native9008.py ./app/archive_capture.py
 
 EXPOSE 8099
