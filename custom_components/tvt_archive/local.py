@@ -8,14 +8,30 @@ import shutil
 import socket
 import sys
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
-from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+from homeassistant.const import (
+    CONF_HOST,
+    CONF_PASSWORD,
+    CONF_PORT,
+    CONF_USERNAME,
+    EVENT_HOMEASSISTANT_STOP,
+)
 from homeassistant.core import Event, HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import TVTArchiveApi
-from .const import DOMAIN
+from .const import (
+    CONF_MODE,
+    CONF_RECORDING_AUDIO,
+    CONF_TOKEN,
+    CONF_URL,
+    DEFAULT_PORT,
+    DOMAIN,
+    MODE_BUILTIN,
+)
 
 _LOGGER = logging.getLogger(__name__)
 _BRIDGE = Path(__file__).with_name("bridge") / "bridge.py"
@@ -141,3 +157,38 @@ def async_local_bridge(hass: HomeAssistant) -> LocalBridge:
     if _DATA not in data:
         data[_DATA] = LocalBridge(hass)
     return data[_DATA]
+
+
+def is_builtin(data: Mapping[str, Any]) -> bool:
+    return data.get(CONF_MODE) == MODE_BUILTIN
+
+
+def bridge_key(data: Mapping[str, Any]) -> str:
+    return MODE_BUILTIN if is_builtin(data) else str(data.get(CONF_URL, "")).lower()
+
+
+def bridge_data(data: Mapping[str, Any]) -> dict[str, Any]:
+    if is_builtin(data):
+        return {CONF_MODE: MODE_BUILTIN}
+    return {CONF_URL: data[CONF_URL], CONF_TOKEN: data[CONF_TOKEN]}
+
+
+def camera_login(camera: Mapping[str, Any], password: str = "") -> dict[str, Any]:
+    """Camera login kept in the entry, so the bridge can be repopulated."""
+    login = {
+        CONF_HOST: camera[CONF_HOST],
+        CONF_PORT: int(camera.get(CONF_PORT, DEFAULT_PORT)),
+        CONF_USERNAME: camera.get(CONF_USERNAME, "admin"),
+        CONF_RECORDING_AUDIO: camera.get(CONF_RECORDING_AUDIO, "auto"),
+    }
+    return {**login, CONF_PASSWORD: password} if password else login
+
+
+def camera_uid(host: str, port: int) -> str:
+    return f"{str(host).strip().lower()}:{int(port)}"
+
+
+async def async_bridge_api(hass: HomeAssistant, data: Mapping[str, Any]) -> TVTArchiveApi:
+    if is_builtin(data):
+        return await async_local_bridge(hass).async_start()
+    return TVTArchiveApi(async_get_clientsession(hass), data[CONF_URL], data[CONF_TOKEN])

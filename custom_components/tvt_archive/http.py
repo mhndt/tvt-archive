@@ -96,8 +96,8 @@ def _add_hls_url(entry_id: str, data: dict[str, Any], session: dict[str, Any]) -
 
 async def _ha_motion(hass, entry_id, data, camera_id, day) -> list[dict[str, str]]:
     entry = hass.config_entries.async_get_entry(entry_id)
-    configured = entry.options.get(CONF_MOTION, {}).get(camera_id) if entry else None
-    if configured is None:
+    configured = entry.options.get(CONF_MOTION) if entry else None
+    if not isinstance(configured, list):
         cameras = data["coordinator"].data.get("cameras", [])
         host = next((c.get("host") for c in cameras if str(c.get("id")) == camera_id), None)
         configured = auto_motion_entities(hass, host)
@@ -120,6 +120,22 @@ class EntriesView(HomeAssistantView):
             if entry.entry_id in hass.data.get(DOMAIN, {}):
                 entries.append({"entry_id": entry.entry_id, "title": entry.title})
         return self.json({"entries": entries})
+
+
+class AllCamerasView(HomeAssistantView):
+    url = "/api/tvt_archive/cameras"
+    name = "api:tvt_archive:all_cameras"
+    requires_auth = True
+
+    async def get(self, request):
+        hass = request.app["hass"]
+        cameras = [
+            {**camera, "entry_id": entry.entry_id}
+            for entry in hass.config_entries.async_entries(DOMAIN)
+            if isinstance(data := hass.data.get(DOMAIN, {}).get(entry.entry_id), dict)
+            for camera in data["coordinator"].data.get("cameras", [])
+        ]
+        return self.json({"cameras": cameras})
 
 
 class CamerasView(HomeAssistantView):
@@ -497,6 +513,7 @@ class MediaView(HomeAssistantView):
 def register_views(hass: HomeAssistant) -> None:
     for view in (
         EntriesView(),
+        AllCamerasView(),
         CamerasView(),
         StatusView(),
         TimelineView(),

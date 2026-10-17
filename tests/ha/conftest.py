@@ -15,8 +15,8 @@ def auto_enable_custom_integrations(enable_custom_integrations: None) -> None:
 @pytest.fixture
 def api() -> Generator[AsyncMock]:
     client = AsyncMock()
-    client.health.return_value = {"ok": True, "version": "1.0.0"}
-    client.cameras.return_value = {"cameras": []}
+    client.health.return_value = {"ok": True, "version": "1.1.0"}
+    client.cameras.return_value = {"cameras": [CAMERA]}
     client.add_camera.return_value = {"camera": CAMERA, "test": {"online": True}}
     client.update_camera.return_value = {"camera": CAMERA, "test": {"online": True}}
     client.delete_camera.return_value = {"removed": CAMERA}
@@ -32,6 +32,6 @@ def api() -> Generator[AsyncMock]:
     }
     with (
         patch("custom_components.tvt_archive.config_flow.TVTArchiveApi", return_value=client),
-        patch("custom_components.tvt_archive.TVTArchiveApi", return_value=client),
+        patch("custom_components.tvt_archive.local.TVTArchiveApi", return_value=client),
     ):
         yield client

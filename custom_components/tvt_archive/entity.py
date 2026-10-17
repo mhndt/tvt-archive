@@ -22,7 +22,7 @@ class TVTArchiveEntity(CoordinatorEntity[TVTArchiveCoordinator]):
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, f"{entry_id}:{camera_id}")},
             name=camera_name,
-            configuration_url=f"homeassistant://tvt-archive?{urlencode({'camera': camera_id, 'mode': 'recording'})}",
+            configuration_url=f"homeassistant://tvt-archive?{urlencode({'camera': entry_id})}",
         )
 
     @property

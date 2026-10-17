@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 from urllib.parse import urljoin
 
-from aiohttp import ClientResponse, ClientSession, ClientTimeout
+from aiohttp import ClientError, ClientResponse, ClientSession, ClientTimeout
 
 
 class TVTArchiveApiError(Exception):
@@ -36,24 +36,27 @@ class TVTArchiveApi:
         params: dict[str, Any] | None = None,
         json_data: dict[str, Any] | None = None,
     ) -> Any:
-        async with self.session.request(
-            method,
-            self._url(path),
-            headers=self.headers,
-            params=params,
-            json=json_data,
-            timeout=self.timeout,
-        ) as response:
-            try:
-                data = await response.json(content_type=None)
-            except Exception:
-                data = {"error": await response.text()}
-            if response.status >= 400:
-                message = str(data.get("error", f"Bridge returned HTTP {response.status}"))
-                if response.status == 401:
-                    raise TVTArchiveAuthError(message)
-                raise TVTArchiveApiError(message)
-            return data
+        try:
+            async with self.session.request(
+                method,
+                self._url(path),
+                headers=self.headers,
+                params=params,
+                json=json_data,
+                timeout=self.timeout,
+            ) as response:
+                try:
+                    data = await response.json(content_type=None)
+                except Exception:
+                    data = {"error": await response.text()}
+        except (ClientError, TimeoutError) as error:
+            raise TVTArchiveApiError(f"Bridge is unreachable: {error}") from error
+        if response.status >= 400:
+            message = str(data.get("error", f"Bridge returned HTTP {response.status}"))
+            if response.status == 401:
+                raise TVTArchiveAuthError(message)
+            raise TVTArchiveApiError(message)
+        return data
 
     async def health(self) -> dict[str, Any]:
         return await self.request("GET", "/api/health")

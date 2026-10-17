@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -235,6 +236,17 @@ class BridgeTests(unittest.TestCase):
                 bridge._metadata_client({**item, "password": "new"}).connect()
         self.assertEqual(attempts, ["bad", "new"])
         bridge.AUTH_FAILURES.clear()
+
+    def test_reentered_login_is_tested_again(self) -> None:
+        item = bridge.camera("front_door")
+        bridge.AUTH_FAILURES[bridge._guard_key(item)] = time.time()
+        with (
+            patch.object(bridge, "test_camera_definition", return_value={"online": True}) as test,
+            patch.object(bridge, "persist_camera_map"),
+        ):
+            bridge.update_camera_definition("front_door", {"password": item["password"]})
+        test.assert_called_once()
+        self.assertNotIn(bridge._guard_key(item), bridge.AUTH_FAILURES)
 
     def test_newest_viewer_stops_older_playback(self) -> None:
         old_stream = bridge.FrameSession(id="d" * 32, camera_id="front_door", request={})

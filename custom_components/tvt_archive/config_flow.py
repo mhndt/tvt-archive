@@ -25,13 +25,27 @@ from homeassistant.helpers.selector import (
 from homeassistant.helpers.service_info.hassio import HassioServiceInfo
 
 from .api import TVTArchiveApi, TVTArchiveApiError, TVTArchiveAuthError
-from .const import CONF_MODE, CONF_MOTION, CONF_TOKEN, DOMAIN, MODE_BUILTIN
-from .local import async_local_bridge
+from .const import (
+    CONF_CAMERA_ID,
+    CONF_MODE,
+    CONF_MOTION,
+    CONF_RECORDING_AUDIO,
+    CONF_TOKEN,
+    DEFAULT_PORT,
+    DOMAIN,
+    MODE_BUILTIN,
+)
+from .local import (
+    async_bridge_api,
+    async_local_bridge,
+    bridge_key,
+    camera_login,
+    camera_uid,
+    is_builtin,
+)
 from .motion import auto_motion_entities
 
-CONF_CAMERA_ID = "camera_id"
-CONF_CONFIRM = "confirm"
-CONF_RECORDING_AUDIO = "recording_audio"
+NEW_CAMERA = "new"
 
 RECORDING_AUDIO_MODES = {
     "auto": "Auto (recommended)",
@@ -42,7 +56,9 @@ RECORDING_AUDIO_MODES = {
 PASSWORD = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
 
 
-def _camera_schema(defaults: dict[str, Any] | None = None, *, editing: bool = False) -> vol.Schema:
+def _camera_schema(
+    defaults: Mapping[str, Any] | None = None, *, editing: bool = False
+) -> vol.Schema:
     defaults = defaults or {}
     password = vol.Optional(CONF_PASSWORD, default="") if editing else vol.Required(CONF_PASSWORD)
     return vol.Schema(
@@ -51,7 +67,7 @@ def _camera_schema(defaults: dict[str, Any] | None = None, *, editing: bool = Fa
             vol.Required(CONF_HOST, default=defaults.get(CONF_HOST, "")): str,
             vol.Required(CONF_USERNAME, default=defaults.get(CONF_USERNAME, "admin")): str,
             password: PASSWORD,
-            vol.Required(CONF_PORT, default=int(defaults.get(CONF_PORT, 9008))): vol.All(
+            vol.Required(CONF_PORT, default=int(defaults.get(CONF_PORT, DEFAULT_PORT))): vol.All(
                 vol.Coerce(int), vol.Range(min=1, max=65535)
             ),
             vol.Required(
@@ -61,66 +77,54 @@ def _camera_schema(defaults: dict[str, Any] | None = None, *, editing: bool = Fa
     )
 
 
-def _camera_defaults(camera: dict[str, Any]) -> dict[str, Any]:
-    return {
-        CONF_NAME: camera.get("name", camera.get("id", "")),
-        CONF_HOST: camera.get("host", ""),
-        CONF_USERNAME: camera.get("username", "admin"),
-        CONF_PORT: camera.get("port", 9008),
-        CONF_RECORDING_AUDIO: camera.get("recording_audio", "auto"),
-    }
-
-
 def _camera_error(error: Exception) -> str:
-    return (
-        "camera_auth_failed" if "rejected the login" in str(error) else "camera_connection_failed"
-    )
-
-
-def _entry_title(count: int) -> str:
-    return f"TVT Archive ({count} camera{'s' if count != 1 else ''})"
+    text = str(error)
+    if "rejected the login" in text:
+        return "camera_auth_failed"
+    if "Wait for this camera" in text:
+        return "camera_busy"
+    return "camera_connection_failed"
 
 
 class TVTArchiveConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    VERSION = 2
+    VERSION = 3
 
     def __init__(self) -> None:
-        self._url: str | None = None
-        self._token: str | None = None
+        self._bridge: dict[str, Any] = {}
         self._api: TVTArchiveApi | None = None
-        self._data: dict[str, Any] = {}
+        self._defaults: dict[str, Any] = {}
+        self._orphans: dict[str, dict[str, Any]] = {}
+        self._adopt: dict[str, Any] = {}
 
     @staticmethod
     @callback
     def async_get_options_flow(config_entry: config_entries.ConfigEntry):
-        return TVTArchiveOptionsFlow(config_entry)
+        return TVTArchiveOptionsFlow()
+
+    def _remote_entries(self) -> list[config_entries.ConfigEntry]:
+        return [e for e in self._async_current_entries() if CONF_URL in e.data]
 
     async def async_step_user(self, user_input=None):
         return self.async_show_menu(step_id="user", menu_options=["builtin", "remote"])
 
     async def async_step_builtin(self, user_input=None):
-        await self.async_set_unique_id(MODE_BUILTIN)
-        self._abort_if_unique_id_configured()
         try:
             self._api = await async_local_bridge(self.hass).async_start()
-            cameras = await self._api.cameras()
+            await self._api.health()
         except Exception:
             return self.async_abort(reason="builtin_failed")
-        self._data = {CONF_MODE: MODE_BUILTIN}
-        count = len(cameras.get("cameras", []))
-        if count == 0:
-            return await self.async_step_camera()
-        return self.async_create_entry(title=_entry_title(count), data=self._data)
+        self._bridge = {CONF_MODE: MODE_BUILTIN}
+        return await self.async_step_pick()
 
     async def async_step_remote(self, user_input=None):
         errors = {}
+        known = {e.data[CONF_URL].lower(): e.data[CONF_TOKEN] for e in self._remote_entries()}
         if user_input is not None:
             url = str(user_input[CONF_URL]).rstrip("/")
-            token = str(user_input[CONF_TOKEN])
+            token = str(user_input.get(CONF_TOKEN) or known.get(url.lower(), ""))
             api = TVTArchiveApi(async_get_clientsession(self.hass), url, token)
             try:
                 await api.health()
-                cameras = await api.cameras()
             except TVTArchiveAuthError:
                 errors["base"] = "invalid_auth"
             except TVTArchiveApiError:
@@ -128,22 +132,17 @@ class TVTArchiveConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except Exception:
                 errors["base"] = "unknown"
             else:
-                await self.async_set_unique_id(url.lower())
-                self._abort_if_unique_id_configured()
-                count = len(cameras.get("cameras", []))
-                self._data = {CONF_URL: url, CONF_TOKEN: token}
-                if count == 0:
-                    self._api = api
-                    return await self.async_step_camera()
-                return self.async_create_entry(title=_entry_title(count), data=self._data)
+                self._api, self._bridge = api, {CONF_URL: url, CONF_TOKEN: token}
+                return await self.async_step_pick()
+        default_url = next(iter(known), "") if user_input is None else user_input[CONF_URL]
         return self.async_show_form(
             step_id="remote",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_URL): TextSelector(
+                    vol.Required(CONF_URL, default=default_url): TextSelector(
                         TextSelectorConfig(type=TextSelectorType.URL)
                     ),
-                    vol.Required(CONF_TOKEN): PASSWORD,
+                    vol.Optional(CONF_TOKEN): PASSWORD,
                 }
             ),
             errors=errors,
@@ -153,41 +152,215 @@ class TVTArchiveConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         config = discovery_info.config
         url = f"http://{config['host']}:{config['port']}"
         token = str(config["token"])
+        existing = [e for e in self._remote_entries() if e.data[CONF_URL].lower() == url.lower()]
+        for entry in existing:
+            if entry.data[CONF_TOKEN] != token:
+                self.hass.config_entries.async_update_entry(
+                    entry, data={**entry.data, CONF_TOKEN: token}
+                )
+                self.hass.config_entries.async_schedule_reload(entry.entry_id)
+        if existing:
+            return self.async_abort(reason="already_configured")
         await self.async_set_unique_id(url.lower())
-        self._abort_if_unique_id_configured(updates={CONF_URL: url, CONF_TOKEN: token})
-        self._url, self._token = url, token
+        self._abort_if_unique_id_configured()
+        self._bridge = {CONF_URL: url, CONF_TOKEN: token}
         self.context["title_placeholders"] = {"name": discovery_info.name}
         return await self.async_step_hassio_confirm()
 
     async def async_step_hassio_confirm(self, user_input=None):
-        if self._url is None or self._token is None:
-            return self.async_abort(reason="cannot_connect")
         if user_input is None:
             return self.async_show_form(step_id="hassio_confirm")
-        api = TVTArchiveApi(async_get_clientsession(self.hass), self._url, self._token)
+        api = TVTArchiveApi(
+            async_get_clientsession(self.hass), self._bridge[CONF_URL], self._bridge[CONF_TOKEN]
+        )
         try:
             await api.health()
-            cameras = await api.cameras()
         except Exception:
             return self.async_abort(reason="cannot_connect")
-        count = len(cameras.get("cameras", []))
-        self._data = {CONF_URL: self._url, CONF_TOKEN: self._token}
-        if count == 0:
-            self._api = api
+        self._api = api
+        return await self.async_step_pick()
+
+    async def async_step_integration_discovery(self, discovery_info: dict[str, Any]):
+        host, port = discovery_info[CONF_HOST], int(discovery_info.get(CONF_PORT, DEFAULT_PORT))
+        await self.async_set_unique_id(camera_uid(host, port))
+        self._abort_if_unique_id_configured()
+        self._defaults = {
+            CONF_NAME: discovery_info.get(CONF_NAME, host),
+            CONF_HOST: host,
+            CONF_PORT: port,
+            CONF_USERNAME: discovery_info.get(CONF_USERNAME, "admin"),
+        }
+        self.context["title_placeholders"] = {"name": self._defaults[CONF_NAME]}
+        return await self.async_step_user()
+
+    async def async_step_import(self, import_data: dict[str, Any]):
+        data = dict(import_data)
+        if uid := data.pop("unique_id"):
+            await self.async_set_unique_id(uid, raise_on_progress=False)
+        title, motion = data.pop("title"), data.pop(CONF_MOTION, None)
+        return self.async_create_entry(
+            title=title, data=data, options={CONF_MOTION: motion} if motion is not None else {}
+        )
+
+    async def async_step_pick(self, user_input=None):
+        """Offer cameras the bridge already has but no entry uses yet."""
+        assert self._api is not None
+        if user_input is None:
+            try:
+                cameras = (await self._api.cameras()).get("cameras", [])
+            except TVTArchiveApiError:
+                return self.async_abort(reason="cannot_connect")
+            key = bridge_key(self._bridge)
+            shared = [e for e in self._async_current_entries() if bridge_key(e.data) == key]
+            used = {str(e.data.get(CONF_CAMERA_ID)) for e in shared}
+            if any(CONF_CAMERA_ID not in e.data for e in shared):
+                used.update(str(c["id"]) for c in cameras)  # Not split yet, so all taken.
+            self._orphans = {str(c["id"]): c for c in cameras if str(c["id"]) not in used}
+            if not self._orphans or self._defaults:
+                return await self.async_step_camera()
+            choices = {i: str(c.get("name", i)) for i, c in self._orphans.items()}
+            return self.async_show_form(
+                step_id="pick",
+                data_schema=vol.Schema(
+                    {
+                        vol.Required(CONF_CAMERA_ID, default=next(iter(choices))): vol.In(
+                            {**choices, NEW_CAMERA: "Add a new camera"}
+                        )
+                    }
+                ),
+            )
+        camera = self._orphans.get(str(user_input[CONF_CAMERA_ID]))
+        if camera is None:
             return await self.async_step_camera()
-        return self.async_create_entry(title=_entry_title(count), data=self._data)
+        await self.async_set_unique_id(
+            camera_uid(camera["host"], camera.get("port", DEFAULT_PORT)), raise_on_progress=False
+        )
+        self._abort_if_unique_id_configured()
+        self._adopt = camera
+        return await self.async_step_adopt()
+
+    async def async_step_adopt(self, user_input=None):
+        """Confirm the login of a camera the bridge already has."""
+        assert self._api is not None
+        camera, errors = self._adopt, {}
+        if user_input is not None:
+            try:
+                await self._api.update_camera(str(camera["id"]), dict(user_input))
+            except TVTArchiveApiError as error:
+                errors["base"] = _camera_error(error)
+            except Exception:
+                errors["base"] = "unknown"
+            else:
+                return self.async_create_entry(
+                    title=str(camera.get("name", camera["id"])),
+                    data={
+                        **self._bridge,
+                        CONF_CAMERA_ID: str(camera["id"]),
+                        **camera_login({**camera, **user_input}, user_input[CONF_PASSWORD]),
+                    },
+                )
+        return self.async_show_form(
+            step_id="adopt",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_USERNAME, default=camera.get(CONF_USERNAME, "admin")): str,
+                    vol.Required(CONF_PASSWORD): PASSWORD,
+                }
+            ),
+            description_placeholders={"camera": str(camera.get("name", camera["id"]))},
+            errors=errors,
+        )
+
+    async def async_step_camera(self, user_input=None):
+        if self._api is None or not self._bridge:
+            return self.async_abort(reason="cannot_connect")
+        errors = {}
+        if user_input is not None:
+            await self.async_set_unique_id(
+                camera_uid(user_input[CONF_HOST], user_input[CONF_PORT]), raise_on_progress=False
+            )
+            self._abort_if_unique_id_configured()
+            try:
+                result = await self._api.add_camera(dict(user_input))
+            except TVTArchiveApiError as error:
+                errors["base"] = _camera_error(error)
+            except Exception:
+                errors["base"] = "unknown"
+            else:
+                return self.async_create_entry(
+                    title=user_input[CONF_NAME],
+                    data={
+                        **self._bridge,
+                        CONF_CAMERA_ID: str(result["camera"]["id"]),
+                        **camera_login(user_input, user_input[CONF_PASSWORD]),
+                    },
+                )
+        return self.async_show_form(
+            step_id="camera",
+            data_schema=_camera_schema(user_input or self._defaults),
+            errors=errors,
+        )
+
+    async def _entry_camera(self, entry: config_entries.ConfigEntry) -> dict[str, Any]:
+        self._api = await async_bridge_api(self.hass, entry.data)
+        cameras = (await self._api.cameras()).get("cameras", [])
+        camera_id = str(entry.data[CONF_CAMERA_ID])
+        return next((c for c in cameras if str(c["id"]) == camera_id), {})
 
     async def async_step_reauth(self, entry_data: Mapping[str, Any]):
+        if not is_builtin(entry_data):
+            api = TVTArchiveApi(
+                async_get_clientsession(self.hass), entry_data[CONF_URL], entry_data[CONF_TOKEN]
+            )
+            try:
+                await api.health()
+            except TVTArchiveAuthError:
+                return await self.async_step_reauth_token()
+            except Exception:  # noqa: BLE001
+                pass
         return await self.async_step_reauth_confirm()
 
     async def async_step_reauth_confirm(self, user_input=None):
         entry = self._get_reauth_entry()
         errors = {}
         if user_input is not None:
+            try:
+                assert self._api is not None
+                await self._api.update_camera(str(entry.data[CONF_CAMERA_ID]), dict(user_input))
+            except TVTArchiveApiError as error:
+                errors["base"] = _camera_error(error)
+            except Exception:
+                errors["base"] = "unknown"
+            else:
+                return self.async_update_reload_and_abort(entry, data_updates=dict(user_input))
+        else:
+            try:
+                camera = await self._entry_camera(entry)
+            except Exception:  # noqa: BLE001
+                return self.async_abort(reason="cannot_connect")
+            self._defaults = {CONF_USERNAME: camera.get(CONF_USERNAME, "admin")}
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_USERNAME, default=self._defaults.get(CONF_USERNAME, "admin")
+                    ): str,
+                    vol.Required(CONF_PASSWORD): PASSWORD,
+                }
+            ),
+            description_placeholders={"camera": entry.title},
+            errors=errors,
+        )
+
+    async def async_step_reauth_token(self, user_input=None):
+        entry = self._get_reauth_entry()
+        errors = {}
+        if user_input is not None:
             token = str(user_input[CONF_TOKEN])
             api = TVTArchiveApi(async_get_clientsession(self.hass), entry.data[CONF_URL], token)
             try:
-                await api.cameras()
+                await api.health()
             except TVTArchiveAuthError:
                 errors["base"] = "invalid_auth"
             except TVTArchiveApiError:
@@ -195,145 +368,82 @@ class TVTArchiveConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except Exception:
                 errors["base"] = "unknown"
             else:
+                for other in self._remote_entries():
+                    if other is not entry and bridge_key(other.data) == bridge_key(entry.data):
+                        self.hass.config_entries.async_update_entry(
+                            other, data={**other.data, CONF_TOKEN: token}
+                        )
+                        self.hass.config_entries.async_schedule_reload(other.entry_id)
                 return self.async_update_reload_and_abort(entry, data_updates={CONF_TOKEN: token})
         return self.async_show_form(
-            step_id="reauth_confirm",
+            step_id="reauth_token",
             data_schema=vol.Schema({vol.Required(CONF_TOKEN): PASSWORD}),
             errors=errors,
         )
 
-    async def async_step_camera(self, user_input=None):
-        if self._api is None or not self._data:
-            return self.async_abort(reason="cannot_connect")
+    async def async_step_reconfigure(self, user_input=None):
+        entry = self._get_reconfigure_entry()
         errors = {}
         if user_input is not None:
-            try:
-                await self._api.add_camera(dict(user_input))
-            except TVTArchiveApiError as error:
-                errors["base"] = _camera_error(error)
-            except Exception:
-                errors["base"] = "unknown"
+            uid = camera_uid(user_input[CONF_HOST], user_input[CONF_PORT])
+            if any(
+                e.unique_id == uid and e.entry_id != entry.entry_id
+                for e in self._async_current_entries()
+            ):
+                errors["base"] = "already_configured"
             else:
-                return self.async_create_entry(title=_entry_title(1), data=self._data)
-        return self.async_show_form(
-            step_id="camera", data_schema=_camera_schema(user_input), errors=errors
-        )
-
-
-class TVTArchiveOptionsFlow(config_entries.OptionsFlow):
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        self._entry = config_entry
-        self._cameras: dict[str, dict[str, Any]] = {}
-        self._camera_id: str | None = None
-
-    def _api(self) -> TVTArchiveApi:
-        loaded = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id)
-        if loaded:
-            return loaded["api"]
-        if self._entry.data.get(CONF_MODE) == MODE_BUILTIN:
-            api = async_local_bridge(self.hass).api
-            if api is None:
-                raise TVTArchiveApiError("Built-in bridge is not running")
-            return api
-        return TVTArchiveApi(
-            async_get_clientsession(self.hass),
-            self._entry.data[CONF_URL],
-            self._entry.data[CONF_TOKEN],
-        )
-
-    async def _refresh_cameras(self) -> None:
-        payload = await self._api().cameras()
-        self._cameras = {str(camera["id"]): camera for camera in payload.get("cameras", [])}
-
-    async def _finish(self):
-        await self._refresh_cameras()
-        self.hass.config_entries.async_update_entry(
-            self._entry, title=_entry_title(len(self._cameras))
-        )
-        self.hass.async_create_task(self.hass.config_entries.async_reload(self._entry.entry_id))
-        return self.async_create_entry(title="", data=dict(self._entry.options))
-
-    def _camera_choices(self) -> vol.Schema:
-        choices = {
-            camera_id: str(camera.get("name", camera_id))
-            for camera_id, camera in self._cameras.items()
-        }
-        return vol.Schema({vol.Required(CONF_CAMERA_ID): vol.In(choices)})
-
-    async def async_step_init(self, user_input=None):
-        try:
-            await self._refresh_cameras()
-        except TVTArchiveApiError:
-            return self.async_abort(reason="cannot_connect")
-        options = ["add_camera"]
-        if self._cameras:
-            options += ["edit_camera", "remove_camera", "motion"]
-        return self.async_show_menu(step_id="init", menu_options=options)
-
-    async def async_step_add_camera(self, user_input=None):
-        errors = {}
-        if user_input is not None:
+                try:
+                    assert self._api is not None
+                    await self._api.update_camera(str(entry.data[CONF_CAMERA_ID]), dict(user_input))
+                except TVTArchiveApiError as error:
+                    errors["base"] = _camera_error(error)
+                except Exception:
+                    errors["base"] = "unknown"
+                else:
+                    return self.async_update_reload_and_abort(
+                        entry,
+                        title=user_input[CONF_NAME],
+                        unique_id=uid,
+                        data_updates=camera_login(user_input, user_input.get(CONF_PASSWORD, "")),
+                    )
+            defaults = {**self._defaults, **user_input}
+        else:
             try:
-                await self._api().add_camera(dict(user_input))
-            except TVTArchiveApiError as error:
-                errors["base"] = _camera_error(error)
-            except Exception:
-                errors["base"] = "unknown"
-            else:
-                return await self._finish()
+                camera = await self._entry_camera(entry)
+            except Exception:  # noqa: BLE001
+                return self.async_abort(reason="cannot_connect")
+            if not camera:
+                return self.async_abort(reason="camera_not_found")
+            defaults = self._defaults = {
+                CONF_NAME: camera.get("name", entry.title),
+                CONF_HOST: camera.get("host", ""),
+                CONF_PORT: camera.get("port", DEFAULT_PORT),
+                CONF_USERNAME: camera.get("username", "admin"),
+                CONF_RECORDING_AUDIO: camera.get("recording_audio", "auto"),
+            }
         return self.async_show_form(
-            step_id="add_camera", data_schema=_camera_schema(user_input), errors=errors
-        )
-
-    async def async_step_edit_camera(self, user_input=None):
-        if user_input is not None:
-            self._camera_id = str(user_input[CONF_CAMERA_ID])
-            return await self.async_step_edit_camera_details()
-        return self.async_show_form(step_id="edit_camera", data_schema=self._camera_choices())
-
-    async def async_step_edit_camera_details(self, user_input=None):
-        camera_id = self._camera_id
-        if not camera_id or camera_id not in self._cameras:
-            return self.async_abort(reason="camera_not_found")
-        defaults = _camera_defaults(self._cameras[camera_id])
-        errors = {}
-        if user_input is not None:
-            try:
-                await self._api().update_camera(camera_id, dict(user_input))
-            except TVTArchiveApiError as error:
-                errors["base"] = _camera_error(error)
-            except Exception:
-                errors["base"] = "unknown"
-            else:
-                return await self._finish()
-            defaults.update(user_input)
-        return self.async_show_form(
-            step_id="edit_camera_details",
+            step_id="reconfigure",
             data_schema=_camera_schema(defaults, editing=True),
             errors=errors,
         )
 
-    async def async_step_motion(self, user_input=None):
-        if user_input is not None:
-            self._camera_id = str(user_input[CONF_CAMERA_ID])
-            return await self.async_step_motion_entities()
-        return self.async_show_form(step_id="motion", data_schema=self._camera_choices())
 
-    async def async_step_motion_entities(self, user_input=None):
-        camera_id = self._camera_id
-        if not camera_id or camera_id not in self._cameras:
-            return self.async_abort(reason="camera_not_found")
-        motion = dict(self._entry.options.get(CONF_MOTION, {}))
+class TVTArchiveOptionsFlow(config_entries.OptionsFlow):
+    async def async_step_init(self, user_input=None):
+        entry = self.config_entry
         if user_input is not None:
-            motion[camera_id] = list(user_input.get(CONF_MOTION, []))
             return self.async_create_entry(
-                title="", data={**self._entry.options, CONF_MOTION: motion}
+                title="", data={**entry.options, CONF_MOTION: list(user_input.get(CONF_MOTION, []))}
             )
-        current = motion.get(camera_id)
-        if current is None:
-            current = auto_motion_entities(self.hass, self._cameras[camera_id].get("host"))
+        current = entry.options.get(CONF_MOTION)
+        if not isinstance(current, list):
+            host = None
+            data = self.hass.data.get(DOMAIN, {}).get(entry.entry_id)
+            if data:
+                host = next(iter(data["coordinator"].data.get("cameras", [])), {}).get("host")
+            current = auto_motion_entities(self.hass, host)
         return self.async_show_form(
-            step_id="motion_entities",
+            step_id="init",
             data_schema=vol.Schema(
                 {
                     vol.Optional(CONF_MOTION, default=current): EntitySelector(
@@ -345,38 +455,5 @@ class TVTArchiveOptionsFlow(config_entries.OptionsFlow):
                     )
                 }
             ),
-            description_placeholders={
-                "camera_name": str(self._cameras[camera_id].get("name", camera_id))
-            },
-        )
-
-    async def async_step_remove_camera(self, user_input=None):
-        if user_input is not None:
-            self._camera_id = str(user_input[CONF_CAMERA_ID])
-            return await self.async_step_confirm_remove()
-        return self.async_show_form(step_id="remove_camera", data_schema=self._camera_choices())
-
-    async def async_step_confirm_remove(self, user_input=None):
-        camera_id = self._camera_id
-        if not camera_id or camera_id not in self._cameras:
-            return self.async_abort(reason="camera_not_found")
-        errors = {}
-        if user_input is not None:
-            if not user_input[CONF_CONFIRM]:
-                return await self.async_step_init()
-            try:
-                await self._api().delete_camera(camera_id)
-            except TVTArchiveApiError:
-                errors["base"] = "camera_remove_failed"
-            except Exception:
-                errors["base"] = "unknown"
-            else:
-                return await self._finish()
-        return self.async_show_form(
-            step_id="confirm_remove",
-            data_schema=vol.Schema({vol.Required(CONF_CONFIRM, default=False): bool}),
-            description_placeholders={
-                "camera_name": str(self._cameras[camera_id].get("name", camera_id))
-            },
-            errors=errors,
+            description_placeholders={"camera_name": entry.title},
         )

@@ -45,7 +45,7 @@ from native9008 import (
     TVT9008Error,
 )
 
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.1.0"
 BASE = Path(os.environ.get("TVT_ARCHIVE_BASE", "/opt/tvt-archive"))
 CONFIG_DIRECTORY = Path(
     os.environ.get(
@@ -781,6 +781,15 @@ AUTH_RETRY_SECONDS = 600
 AUTH_FAILURES: dict[tuple[str, int, str, str], float] = {}
 
 
+def _guard_key(item: dict[str, Any]) -> tuple[str, int, str, str]:
+    return (
+        str(item.get("connect_host", item["host"])),
+        int(item.get("connect_port", item.get("port", 9008))),
+        str(item["username"]),
+        str(item["password"]),
+    )
+
+
 class _GuardedClient(TVT9008Client):
     """Holds off after a rejected login so the camera does not lock the account."""
 
@@ -1103,7 +1112,8 @@ def update_camera_definition(camera_id: str, payload: dict[str, Any]) -> dict[st
         raise ValueError("Wait for this camera's active playback/download job to finish")
     item = normalize_camera_definition(payload, existing, fixed_id=camera_id)
     connection_keys = ("host", "port", "username", "password")
-    if any(item.get(key) != existing.get(key) for key in connection_keys):
+    if payload.get("password") or any(item.get(k) != existing.get(k) for k in connection_keys):
+        AUTH_FAILURES.pop(_guard_key(item), None)
         with camera_lock(camera_id):
             test = test_camera_definition(item)
     else:
@@ -3211,7 +3221,7 @@ def authorized(header: str) -> bool:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "TVTArchiveBridge/1.0.3"
+    server_version = "TVTArchiveBridge/1.1.0"
     timeout = 60
 
     def log_message(self, fmt: str, *args: Any) -> None:

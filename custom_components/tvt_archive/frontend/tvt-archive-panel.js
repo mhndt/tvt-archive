@@ -493,13 +493,14 @@ class TVTFramePlayer {
     this.audioQueue = replayAudio.concat(this.audioQueue);
     if (this.paused) this.stepOnce = 1;
     this._feedDecoder();
+    this._wake();
     return true;
   }
 
   step(direction) {
     if (this.ended && direction > 0 && !this.frames.length) return;
     if (!this.paused) this.pause();
-    if (direction > 0) { this.stepOnce += 1; this.flash("Next frame"); return; }
+    if (direction > 0) { this.stepOnce += 1; this._wake(); this.flash("Next frame"); return; }
     const current = this.positionPts;
     if (current === null) return;
     const chunks = this._chunks();
@@ -553,6 +554,7 @@ class TVTFramePlayer {
 
   _output(frame) {
     if (this.destroyed) { frame.close(); return; }
+    this._wake();
     if (this.discardBefore !== null) {
       if (frame.timestamp < this.discardBefore) { frame.close(); return; }
       this.discardBefore = null;
@@ -565,6 +567,7 @@ class TVTFramePlayer {
     this.frames = []; this.pending = []; this.audioQueue = []; this.arrivals = [];
     this.history = []; this.historyBytes = 0; this.audioHistory = []; this.discardBefore = null; this.paintedMax = -Infinity;
     this.stepOnce = this.paused ? 1 : 0;
+    this._wake();
     this.lastPts = null; this.rendered = 0; this.speed = null; this.needKey = true;
     try { if (this.decoder && this.decoder.state === "configured") this.decoder.reset(); } catch (_) {}
     if (this.decoder && this.decoder.state !== "closed" && this.sps && this.pps) { this.configured = false; this.configKey = null; this._configure(); }
@@ -575,10 +578,18 @@ class TVTFramePlayer {
     if (this.roomResolve && this.pending.length < PENDING_RESUME) { const resolve = this.roomResolve; this.roomResolve = null; resolve(); }
   }
 
+  _idle() { return (this.paused && !this.stepOnce) || (this.ended && !this._decodedCount()); }
+
+  _wake() { if (this.started && !this.destroyed && !this.timer) this.timer = setTimeout(() => this._tick(), 0); }
+
   _tick() {
+    this.timer = 0;
     if (this.destroyed) return;
-    // Keep timing active in background tabs.
-    this.timer = setTimeout(() => this._tick(), 8);
+    // A timer rather than rAF keeps timing active in background tabs; it sleeps while idle.
+    try { this._frame(); } finally { if (!this.destroyed && !this._idle()) this.timer = setTimeout(() => this._tick(), 8); }
+  }
+
+  _frame() {
     const now = performance.now();
     this._feedDecoder();
     if ((!this.paused || this.stepOnce) && this.frames.length) {
@@ -667,7 +678,7 @@ class TVTFramePlayer {
     if (!this.paused) return;
     this.paused = false; this.stepOnce = 0; this.element.classList.remove("paused");
     this.lastWall = performance.now(); this.audio?.resume().catch(() => {});
-    this._syncButtons(); this._state("playing");
+    this._syncButtons(); this._state("playing"); this._wake();
   }
 
   get fullscreen() { return Boolean(document.fullscreenElement) || this.element.classList.contains("fp-full"); }
@@ -744,6 +755,7 @@ class TVTArchivePanel extends HTMLElement {
     this._hass = null;
     this._loaded = false;
     this._entryId = null;
+    this._wanted = null;
     this._cameras = [];
     this._cameraId = null;
     this._camera = null;
@@ -836,20 +848,20 @@ class TVTArchivePanel extends HTMLElement {
     return this._hass.callApi(method, path.replace(/^\/api\//, ""), data);
   }
 
-  _stateKey() { return `tvt_archive_panel:${this._entryId || "default"}`; }
+  _stateKey() { return "tvt_archive_panel"; }
 
   _restoreState() {
     try {
       const value = JSON.parse(sessionStorage.getItem(this._stateKey()) || "null");
       if (!value || typeof value !== "object") return;
       if (/^\d{4}-\d{2}-\d{2}$/.test(value.date || "")) this._date = value.date;
-      if (typeof value.cameraId === "string") this._cameraId = value.cameraId;
+      if (typeof value.camera === "string") this._wanted = value.camera;
       if (["low","balanced","data_saver"].includes(value.recordingQuality || value.quality)) this._recordingQuality = "low";
       if ([1,2,4].includes(Number(value.zoom))) this._zoom = Number(value.zoom);
       if (Number.isFinite(Number(value.selectedSec))) this._selectedSec = Math.max(0, Math.min(86399, Number(value.selectedSec)));
       if (/^\d{2}:\d{2}:\d{2}$/.test(value.rangeStart || "")) this._rangeStart = value.rangeStart;
       if (/^\d{2}:\d{2}:\d{2}$/.test(value.rangeEnd || "")) this._rangeEnd = value.rangeEnd;
-      if (typeof value.downloadJobId === "string" && /^[a-f0-9]{32}$/.test(value.downloadJobId)) this._downloadJobId = value.downloadJobId;
+      if (typeof value.downloadJobId === "string" && /^[a-f0-9]{32}$/.test(value.downloadJobId)) { this._downloadJobId = value.downloadJobId; this._downloadEntryId = value.downloadEntry || null; }
       if (Number.isFinite(Number(value.downloadPercent))) this._downloadPercent = Math.max(0, Math.min(100, Math.round(Number(value.downloadPercent))));
     } catch (_) {}
   }
@@ -860,7 +872,7 @@ class TVTArchivePanel extends HTMLElement {
       const camera = params.get("camera");
       const date = params.get("date");
       const time = params.get("time");
-      if (camera) this._cameraId = camera;
+      if (camera) this._wanted = camera;
       if (/^\d{4}-\d{2}-\d{2}$/.test(date || "")) this._date = date;
       if (/^\d{2}:\d{2}(?::\d{2})?$/.test(time || "")) {
         this._selectedSec = clockToSec(time);
@@ -873,23 +885,20 @@ class TVTArchivePanel extends HTMLElement {
   _persistState() {
     try {
       sessionStorage.setItem(this._stateKey(), JSON.stringify({
-        date:this._date, cameraId:this._cameraId, recordingQuality:this._recordingQuality,
+        date:this._date, camera:this._entryId, recordingQuality:this._recordingQuality,
         zoom:this._zoom, selectedSec:this._selectedSec, rangeStart:this._rangeStart, rangeEnd:this._rangeEnd,
-        downloadJobId:this._downloadJobId, downloadPercent:this._downloadPercent,
+        downloadJobId:this._downloadJobId, downloadEntry:this._downloadEntryId, downloadPercent:this._downloadPercent,
       }));
     } catch (_) {}
   }
 
   async _bootstrap() {
     try {
-      const entries = await this._api("GET", "tvt_archive/entries");
-      if (!entries.entries?.length) throw new Error("No TVT Archive integration is configured");
-      this._entryId = this._panel?.config?.entry_id || entries.entries[0].entry_id;
       this._restoreState();
       this._applyNavigationParams();
       await this._loadCameras();
       this._persistState();
-      if (!this._cameras.length) throw new Error("No cameras are configured. Open Settings → Devices & services → TVT Archive → Configure.");
+      if (!this._cameras.length) throw new Error("No cameras are configured. Add one under Settings → Devices & services → TVT Archive.");
       await Promise.all([this._loadTimeline(), this._loadStatus()]);
       if (this._downloadJobId) {
         this._busy = true;
@@ -903,12 +912,17 @@ class TVTArchivePanel extends HTMLElement {
   }
 
   async _loadCameras() {
-    const payload = await this._api("GET", `tvt_archive/${this._entryId}/cameras`);
+    const payload = await this._api("GET", "tvt_archive/cameras");
     this._cameras = payload.cameras || [];
-    if (!this._cameraId || !this._cameras.some((camera) => camera.id === this._cameraId)) {
-      this._cameraId = this._cameras[0]?.id || null;
-    }
-    this._camera = this._cameras.find((camera) => camera.id === this._cameraId) || null;
+    const want = this._wanted ?? this._entryId;
+    this._wanted = null;
+    this._useCamera(this._cameras.find((camera) => camera.entry_id === want) || this._cameras.find((camera) => camera.id === want) || this._cameras[0]);
+  }
+
+  _useCamera(camera) {
+    this._camera = camera || null;
+    this._entryId = camera?.entry_id || null;
+    this._cameraId = camera?.id || null;
   }
 
   async _loadTimeline(refresh = false) {
@@ -1054,7 +1068,7 @@ class TVTArchivePanel extends HTMLElement {
     const selected = secToClock(this._selectedSec);
     const effectiveQuality = this._effectiveRecordingQuality();
     const values = this._statusValues();
-    const cameras = this._cameras.map((camera) => `<option value="${$esc(camera.id)}" ${camera.id === this._cameraId ? "selected" : ""}>${$esc(camera.name || camera.id)}</option>`).join("");
+    const cameras = this._cameras.map((camera) => `<option value="${$esc(camera.entry_id)}" ${camera.entry_id === this._entryId ? "selected" : ""}>${$esc(camera.name || camera.id)}</option>`).join("");
     const qualities = [
       ["original", "Original"],
       ["low", "Low (480p)"],
@@ -1132,11 +1146,10 @@ class TVTArchivePanel extends HTMLElement {
     const get = (id) => this.shadowRoot.getElementById(id);
     const zoom = get("zoom"); if (zoom) zoom.value = String(this._zoom);
     get("camera")?.addEventListener("change", async (event) => {
-      const cameraId = event.target.value;
+      const entryId = event.target.value;
       await this._stopPlaybackSession();
       this._resetDownloadResult();
-      this._cameraId = cameraId;
-      this._camera = this._cameras.find((camera) => camera.id === this._cameraId);
+      this._useCamera(this._cameras.find((camera) => camera.entry_id === entryId));
       this._timeline = null; this._status = null; this._mode = "recording"; this._persistState();
       await Promise.all([this._loadTimeline(), this._loadStatus()]);
     });
@@ -1743,7 +1756,7 @@ class TVTArchivePanel extends HTMLElement {
     this._error = "";
     this._updateDownloadUi();
     try {
-      const job = await this._api("DELETE", `tvt_archive/${this._entryId}/jobs/${jobId}`);
+      const job = await this._api("DELETE", `tvt_archive/${this._downloadEntryId || this._entryId}/jobs/${jobId}`);
       if (this._downloadJobId !== jobId) return;
       if (job.status === "cancelled") {
         this._finishCancelledDownload();
@@ -1783,6 +1796,7 @@ class TVTArchivePanel extends HTMLElement {
       this._render();
       const job = await this._api("POST", `tvt_archive/${this._entryId}/cameras/${this._cameraId}/jobs`, {start: isoFor(this._date, start), duration, gain_db: 0, quality: "original", kind: "download"});
       this._downloadJobId = job.id;
+      this._downloadEntryId = this._entryId;
       this._persistState();
       this._updateDownloadUi();
       await this._pollDownload(job.id);
@@ -1803,7 +1817,7 @@ class TVTArchivePanel extends HTMLElement {
 
   async _pollDownload(jobId) {
     try {
-      const job = await this._api("GET", `tvt_archive/${this._entryId}/jobs/${jobId}`);
+      const job = await this._api("GET", `tvt_archive/${this._downloadEntryId || this._entryId}/jobs/${jobId}`);
       if (this._downloadJobId !== jobId) return;
       if (job.status === "cancelled") {
         this._finishCancelledDownload();

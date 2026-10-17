@@ -13,7 +13,7 @@ Recordings are read directly from the camera over your LAN. Nothing leaves your 
 1. Add `https://github.com/mhndt/tvt-archive` to HACS as a custom Integration repository.
 2. Install TVT Archive and restart Home Assistant.
 3. Open Settings > Devices & services > Add integration > TVT Archive and choose **Built-in**.
-4. Enter your first camera.
+4. Enter your camera. Add more with Add device on the same page.
 
 For a manual install, copy `custom_components/tvt_archive` from the release ZIP into `config/custom_components` and restart Home Assistant.
 
@@ -40,13 +40,15 @@ cd tvt-archive
 
 The script prints the bridge URL and access token. Use `./setup.sh --vaapi` to enable VAAPI. Print the token again with `docker exec tvt-archive tvt-archive show-token`, and update with `git pull && docker compose pull && docker compose up -d`.
 
-Then add the integration and choose **Connect to the TVT Archive app**.
+Then add the integration and choose **TVT Archive app**.
 
 </details>
 
-## Upgrading from 0.9
+## Upgrading
 
-Existing setups that use the app keep working. To switch to the built-in bridge, delete the TVT Archive integration entry, add it again as Built-in, re-enter your cameras, and remove the app.
+From 1.0, each camera becomes its own entry on the first start. Entities, history, and motion sensor choices are kept.
+
+From 0.9, setups that use the app keep working. To switch to the built-in bridge, delete the TVT Archive entries, add your cameras again as Built-in, and remove the app.
 
 ## Configuration
 
@@ -58,7 +60,7 @@ Existing setups that use the app keep working. To switch to the built-in bridge,
 | Username, Password | Camera account with playback permission |
 | Recording audio | Auto, Always expect audio, or Disabled |
 
-Add, edit, or remove cameras and choose motion sensors under Settings > Devices & services > TVT Archive > Configure.
+Each camera is its own entry under Settings > Devices & services > TVT Archive. Reconfigure changes its address or login, and Configure chooses motion sensors. TVT cameras already set up through ONVIF are discovered.
 
 # Usage
 
@@ -96,7 +98,7 @@ Recordings also appear under Media > TVT Archive, with thumbnails and a Motion f
 
 ## Motion
 
-Motion comes from the camera when it records motion separately, otherwise from Home Assistant motion sensors on the same camera address, such as ONVIF. Choose sensors under Configure > Motion sensors.
+Motion comes from the camera when it records motion separately, otherwise from Home Assistant motion sensors on the same camera address, such as ONVIF. Choose sensors under the camera's Configure.
 
 ## Saving recordings
 
@@ -115,7 +117,7 @@ Each camera is added as a device with these entities:
 | `sensor.<camera>_latest_recording` | End of the latest recording |
 | `sensor.<camera>_sd_card` | Normal, No SD card, Unformatted, Formatting, or Error, with total and used GB |
 
-Sensors update every two minutes. Problems such as a missing SD card or a rejected camera login appear under Settings > Repairs.
+Sensors update every two minutes. A missing or failed SD card appears under Settings > Repairs, and a rejected camera login asks to re-authenticate.
 
 <details>
 <summary>Bridge settings</summary>

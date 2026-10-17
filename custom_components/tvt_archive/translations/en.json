@@ -2,72 +2,37 @@
   "config": {
     "step": {
       "user": {
-        "title": "Set up TVT Archive",
-        "description": "Run the bridge inside Home Assistant, or connect to the optional TVT Archive app or container.",
+        "title": "Add a TVT camera",
+        "description": "Use the bridge built into Home Assistant, or the optional TVT Archive app or container.",
         "menu_options": {
           "builtin": "Built-in (recommended)",
-          "remote": "Connect to the TVT Archive app"
+          "remote": "TVT Archive app"
         }
       },
       "remote": {
         "title": "Connect to the TVT Archive app",
-        "description": "Enter the address of the TVT Archive app or container and its access token.",
+        "description": "Enter the address of the TVT Archive app or container and its access token. The token can be left empty for an app that is already connected.",
         "data": {
           "url": "Bridge URL",
           "token": "Access token"
         }
       },
-      "camera": {
-        "title": "Add your first camera",
-        "description": "The camera is tested before it is saved.",
+      "pick": {
+        "title": "Choose a camera",
+        "description": "This bridge already knows these cameras.",
         "data": {
-          "name": "Camera name",
-          "host": "Address",
+          "camera_id": "Camera"
+        }
+      },
+      "adopt": {
+        "title": "Log in to {camera}",
+        "description": "Enter the camera's login. Home Assistant keeps it so the camera can be restored if the bridge loses its settings.",
+        "data": {
           "username": "Username",
-          "password": "Password",
-          "port": "Port",
-          "recording_audio": "Recording audio"
+          "password": "Password"
         }
       },
-      "reauth_confirm": {
-        "title": "Update access token",
-        "description": "The bridge rejected the stored access token. Print the current one with `docker exec tvt-archive tvt-archive show-token`.",
-        "data": {
-          "token": "Access token"
-        }
-      },
-      "hassio_confirm": {
-        "title": "TVT Archive app",
-        "description": "Set up Home Assistant to use the TVT Archive app?"
-      }
-    },
-    "error": {
-      "cannot_connect": "Could not connect or authenticate to the bridge",
-      "unknown": "Unexpected error",
-      "camera_connection_failed": "The bridge could not log in to or query this camera. Check its address, port, username, and password.",
-      "invalid_auth": "Invalid access token",
-      "camera_auth_failed": "The camera rejected this username or password."
-    },
-    "abort": {
-      "already_configured": "TVT Archive is already set up this way",
-      "cannot_connect": "Home Assistant could not connect to the TVT Archive bridge",
-      "reauth_successful": "Access token updated",
-      "builtin_failed": "The built-in bridge could not start. Check the Home Assistant log; ffmpeg must be installed."
-    },
-    "flow_title": "Integration"
-  },
-  "options": {
-    "step": {
-      "init": {
-        "title": "Manage TVT Archive",
-        "menu_options": {
-          "add_camera": "Add camera",
-          "edit_camera": "Edit camera",
-          "remove_camera": "Remove camera",
-          "motion": "Motion sensors"
-        }
-      },
-      "add_camera": {
+      "camera": {
         "title": "Add camera",
         "description": "The camera is tested before it is saved.",
         "data": {
@@ -79,14 +44,23 @@
           "recording_audio": "Recording audio"
         }
       },
-      "edit_camera": {
-        "title": "Choose a camera to edit",
+      "reauth_confirm": {
+        "title": "Update login for {camera}",
+        "description": "The camera rejected its username or password.",
         "data": {
-          "camera_id": "Camera"
+          "username": "Username",
+          "password": "Password"
         }
       },
-      "edit_camera_details": {
-        "title": "Edit camera",
+      "reauth_token": {
+        "title": "Update access token",
+        "description": "The bridge rejected the stored access token. Print the current one with `docker exec tvt-archive tvt-archive show-token`.",
+        "data": {
+          "token": "Access token"
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigure camera",
         "description": "Leave the password blank to keep it.",
         "data": {
           "name": "Camera name",
@@ -97,42 +71,40 @@
           "recording_audio": "Recording audio"
         }
       },
-      "remove_camera": {
-        "title": "Choose a camera to remove",
-        "data": {
-          "camera_id": "Camera"
-        }
-      },
-      "confirm_remove": {
-        "title": "Remove {camera_name}?",
-        "description": "This removes the camera from TVT Archive. It does not delete recordings from the camera or recorder.",
-        "data": {
-          "confirm": "Confirm removal"
-        }
-      },
-      "motion": {
-        "title": "Choose a camera",
-        "data": {
-          "camera_id": "Camera"
-        }
-      },
-      "motion_entities": {
+      "hassio_confirm": {
+        "title": "TVT Archive app",
+        "description": "Add a camera through the TVT Archive app?"
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not connect or authenticate to the bridge",
+      "unknown": "Unexpected error",
+      "invalid_auth": "Invalid access token",
+      "camera_connection_failed": "The bridge could not log in to or query this camera. Check its address, port, username, and password.",
+      "camera_auth_failed": "The camera rejected this username or password.",
+      "camera_busy": "Wait for this camera's playback or download to finish and try again.",
+      "already_configured": "Another entry already uses this camera address"
+    },
+    "abort": {
+      "already_configured": "This camera is already set up",
+      "already_in_progress": "This camera is already being set up",
+      "cannot_connect": "Home Assistant could not connect to the TVT Archive bridge",
+      "camera_not_found": "The camera is no longer configured on the bridge",
+      "reauth_successful": "Login updated",
+      "reconfigure_successful": "Camera updated",
+      "builtin_failed": "The built-in bridge could not start. Check the Home Assistant log; ffmpeg must be installed."
+    },
+    "flow_title": "{name}"
+  },
+  "options": {
+    "step": {
+      "init": {
         "title": "Motion sensors for {camera_name}",
         "description": "Shown on the timeline when the camera's recordings carry no motion events. Sensors from other integrations using the same address are preselected.",
         "data": {
           "motion": "Motion sensors"
         }
       }
-    },
-    "error": {
-      "camera_connection_failed": "The bridge could not log in to or query this camera. Check its address, port, username, and password.",
-      "camera_remove_failed": "The camera could not be removed. Wait for any active playback or download to finish and try again.",
-      "unknown": "Unexpected error",
-      "camera_auth_failed": "The camera rejected this username or password."
-    },
-    "abort": {
-      "cannot_connect": "Home Assistant could not connect to the TVT Archive bridge",
-      "camera_not_found": "The selected camera no longer exists"
     }
   },
   "entity": {
@@ -183,10 +155,6 @@
     "ffmpeg_missing": {
       "title": "TVT Archive needs ffmpeg",
       "description": "The built-in bridge could not find ffmpeg. Install ffmpeg on the Home Assistant host, or use the TVT Archive app instead."
-    },
-    "camera_login": {
-      "title": "{camera} rejected its login",
-      "description": "The username or password for {camera} is no longer accepted. Update it under Settings > Devices & services > TVT Archive > Configure > Edit camera."
     }
   },
   "services": {

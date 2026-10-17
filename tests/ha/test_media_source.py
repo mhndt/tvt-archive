@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock
 
-from common import CAMERA, TOKEN, URL
+from common import CAMERA, camera_entry
 from homeassistant.components.media_source import async_browse_media, async_resolve_media
 from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
-from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.tvt_archive.const import DOMAIN
 
@@ -27,9 +26,7 @@ async def test_browse_and_resolve(hass: HomeAssistant, api: AsyncMock) -> None:
         "created_at_unix": 1,
     }
     assert await async_setup_component(hass, "media_source", {})
-    entry = MockConfigEntry(
-        domain=DOMAIN, version=2, unique_id=URL, data={"url": URL, "token": TOKEN}
-    )
+    entry = camera_entry()
     entry.add_to_hass(hass)
     await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
