@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from typing import Any
 
@@ -44,6 +45,8 @@ from .local import (
     is_builtin,
 )
 from .motion import auto_motion_entities
+
+_LOGGER = logging.getLogger(__name__)
 
 NEW_CAMERA = "new"
 
@@ -112,6 +115,7 @@ class TVTArchiveConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._api = await async_local_bridge(self.hass).async_start()
             await self._api.health()
         except Exception:
+            _LOGGER.exception("Unexpected TVT Archive setup error")
             return self.async_abort(reason="builtin_failed")
         self._bridge = {CONF_MODE: MODE_BUILTIN}
         return await self.async_step_pick()
@@ -124,12 +128,13 @@ class TVTArchiveConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             token = str(user_input.get(CONF_TOKEN) or known.get(url.lower(), ""))
             api = TVTArchiveApi(async_get_clientsession(self.hass), url, token)
             try:
-                await api.health()
+                await api.cameras()
             except TVTArchiveAuthError:
                 errors["base"] = "invalid_auth"
             except TVTArchiveApiError:
                 errors["base"] = "cannot_connect"
             except Exception:
+                _LOGGER.exception("Unexpected TVT Archive setup error")
                 errors["base"] = "unknown"
             else:
                 self._api, self._bridge = api, {CONF_URL: url, CONF_TOKEN: token}
@@ -174,8 +179,9 @@ class TVTArchiveConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             async_get_clientsession(self.hass), self._bridge[CONF_URL], self._bridge[CONF_TOKEN]
         )
         try:
-            await api.health()
+            await api.cameras()
         except Exception:
+            _LOGGER.exception("Unexpected TVT Archive setup error")
             return self.async_abort(reason="cannot_connect")
         self._api = api
         return await self.async_step_pick()
@@ -249,6 +255,7 @@ class TVTArchiveConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except TVTArchiveApiError as error:
                 errors["base"] = _camera_error(error)
             except Exception:
+                _LOGGER.exception("Unexpected TVT Archive setup error")
                 errors["base"] = "unknown"
             else:
                 return self.async_create_entry(
@@ -285,6 +292,7 @@ class TVTArchiveConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except TVTArchiveApiError as error:
                 errors["base"] = _camera_error(error)
             except Exception:
+                _LOGGER.exception("Unexpected TVT Archive setup error")
                 errors["base"] = "unknown"
             else:
                 return self.async_create_entry(
@@ -313,7 +321,7 @@ class TVTArchiveConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 async_get_clientsession(self.hass), entry_data[CONF_URL], entry_data[CONF_TOKEN]
             )
             try:
-                await api.health()
+                await api.cameras()
             except TVTArchiveAuthError:
                 return await self.async_step_reauth_token()
             except Exception:  # noqa: BLE001
@@ -330,6 +338,7 @@ class TVTArchiveConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except TVTArchiveApiError as error:
                 errors["base"] = _camera_error(error)
             except Exception:
+                _LOGGER.exception("Unexpected TVT Archive setup error")
                 errors["base"] = "unknown"
             else:
                 return self.async_update_reload_and_abort(entry, data_updates=dict(user_input))
@@ -360,12 +369,13 @@ class TVTArchiveConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             token = str(user_input[CONF_TOKEN])
             api = TVTArchiveApi(async_get_clientsession(self.hass), entry.data[CONF_URL], token)
             try:
-                await api.health()
+                await api.cameras()
             except TVTArchiveAuthError:
                 errors["base"] = "invalid_auth"
             except TVTArchiveApiError:
                 errors["base"] = "cannot_connect"
             except Exception:
+                _LOGGER.exception("Unexpected TVT Archive setup error")
                 errors["base"] = "unknown"
             else:
                 for other in self._remote_entries():
@@ -398,6 +408,7 @@ class TVTArchiveConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 except TVTArchiveApiError as error:
                     errors["base"] = _camera_error(error)
                 except Exception:
+                    _LOGGER.exception("Unexpected TVT Archive setup error")
                     errors["base"] = "unknown"
                 else:
                     return self.async_update_reload_and_abort(

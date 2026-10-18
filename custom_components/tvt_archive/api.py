@@ -5,6 +5,8 @@ from urllib.parse import urljoin
 
 from aiohttp import ClientError, ClientResponse, ClientSession, ClientTimeout
 
+STREAM_TIMEOUT = ClientTimeout(total=None, sock_connect=15, sock_read=None)
+
 
 class TVTArchiveApiError(Exception):
     """Raised when the TVT Archive bridge rejects a request."""
@@ -47,16 +49,44 @@ class TVTArchiveApi:
             ) as response:
                 try:
                     data = await response.json(content_type=None)
-                except Exception:
-                    data = {"error": await response.text()}
+                except ValueError:
+                    data = await response.text()
         except (ClientError, TimeoutError) as error:
             raise TVTArchiveApiError(f"Bridge is unreachable: {error}") from error
+        if not isinstance(data, dict):
+            if response.status < 400:
+                raise TVTArchiveApiError("Bridge returned an unexpected response")
+            data = {"error": str(data or "")}
         if response.status >= 400:
-            message = str(data.get("error", f"Bridge returned HTTP {response.status}"))
+            message = str(data.get("error") or f"Bridge returned HTTP {response.status}")
             if response.status == 401:
                 raise TVTArchiveAuthError(message)
             raise TVTArchiveApiError(message)
         return data
+
+    async def _open(
+        self,
+        path: str,
+        *,
+        range_header: str | None = None,
+        params: dict[str, str] | None = None,
+        timeout: ClientTimeout = STREAM_TIMEOUT,
+    ) -> ClientResponse:
+        """Start a streamed response; the caller releases it."""
+        headers = self.headers.copy()
+        if range_header:
+            headers["Range"] = range_header
+        try:
+            response = await self.session.get(
+                self._url(path), headers=headers, params=params, timeout=timeout
+            )
+        except (ClientError, TimeoutError) as error:
+            raise TVTArchiveApiError(f"Bridge is unreachable: {error}") from error
+        if response.status >= 400:
+            text = await response.text()
+            response.release()
+            raise TVTArchiveApiError(text or f"Bridge returned HTTP {response.status}")
+        return response
 
     async def health(self) -> dict[str, Any]:
         return await self.request("GET", "/api/health")
@@ -87,20 +117,14 @@ class TVTArchiveApi:
             params={"date": date, "refresh": "1" if refresh else "0"},
         )
 
-    async def availability(self, camera_id: str, days: int = 45) -> dict[str, Any]:
-        return await self.request(
-            "GET", f"/api/cameras/{camera_id}/availability", params={"days": str(days)}
-        )
-
     async def thumbnail(self, camera_id: str, at: str) -> bytes:
-        async with self.session.get(
-            self._url(f"/api/cameras/{camera_id}/thumbnail/{at}"),
-            headers=self.headers,
-            timeout=self.timeout,
-        ) as response:
-            if response.status >= 400:
-                raise TVTArchiveApiError(await response.text())
+        response = await self._open(
+            f"/api/cameras/{camera_id}/thumbnail/{at}", timeout=self.timeout
+        )
+        try:
             return await response.read()
+        finally:
+            response.release()
 
     async def create_session(self, camera_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         return await self.request("POST", f"/api/cameras/{camera_id}/sessions", json_data=payload)
@@ -124,16 +148,7 @@ class TVTArchiveApi:
         return await self.request("DELETE", f"/api/streams/{session_id}")
 
     async def open_frames(self, session_id: str) -> ClientResponse:
-        response = await self.session.get(
-            self._url(f"/api/streams/{session_id}/frames"),
-            headers=self.headers,
-            timeout=ClientTimeout(total=None, sock_read=None),
-        )
-        if response.status >= 400:
-            text = await response.text()
-            response.release()
-            raise TVTArchiveApiError(text or f"Bridge returned HTTP {response.status}")
-        return response
+        return await self._open(f"/api/streams/{session_id}/frames")
 
     async def create_job(self, camera_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         return await self.request("POST", f"/api/cameras/{camera_id}/jobs", json_data=payload)
@@ -145,52 +160,18 @@ class TVTArchiveApi:
         return await self.request("DELETE", f"/api/jobs/{job_id}")
 
     async def open_player_script(self) -> ClientResponse:
-        response = await self.session.get(
-            self._url("/api/player/hls.js"),
-            headers=self.headers,
-            timeout=None,
-        )
-        if response.status >= 400:
-            text = await response.text()
-            response.release()
-            raise TVTArchiveApiError(text or f"Bridge returned HTTP {response.status}")
-        return response
+        return await self._open("/api/player/hls.js")
 
     async def open_hls_asset(
         self, session_id: str, asset: str, *, range_header: str | None = None
     ) -> ClientResponse:
-        headers = self.headers.copy()
-        if range_header:
-            headers["Range"] = range_header
-        response = await self.session.get(
-            self._url(f"/api/sessions/{session_id}/{asset}"),
-            headers=headers,
-            timeout=None,
-        )
-        if response.status >= 400:
-            text = await response.text()
-            response.release()
-            raise TVTArchiveApiError(text or f"Bridge returned HTTP {response.status}")
-        return response
+        return await self._open(f"/api/sessions/{session_id}/{asset}", range_header=range_header)
 
     async def open_file(
-        self,
-        job_id: str,
-        *,
-        range_header: str | None = None,
-        download: bool = False,
+        self, job_id: str, *, range_header: str | None = None, download: bool = False
     ) -> ClientResponse:
-        headers = self.headers.copy()
-        if range_header:
-            headers["Range"] = range_header
-        response = await self.session.get(
-            self._url(f"/api/jobs/{job_id}/file"),
-            headers=headers,
+        return await self._open(
+            f"/api/jobs/{job_id}/file",
+            range_header=range_header,
             params={"download": "1" if download else "0"},
-            timeout=None,
         )
-        if response.status >= 400:
-            text = await response.text()
-            response.release()
-            raise TVTArchiveApiError(text or f"Bridge returned HTTP {response.status}")
-        return response

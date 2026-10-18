@@ -6,6 +6,7 @@ import shutil
 from hashlib import sha256
 from pathlib import Path
 
+from homeassistant.components.frontend import async_remove_panel
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.components.panel_custom import async_register_panel
 from homeassistant.config_entries import SOURCE_IMPORT, ConfigEntry, ConfigEntryState
@@ -28,10 +29,10 @@ from .const import (
     CONF_MIGRATED_FROM,
     CONF_MOTION,
     DATA_FRONTEND_REGISTERED,
+    DATA_STATIC_REGISTERED,
     DATA_VIEWS_REGISTERED,
     DEFAULT_PORT,
     DOMAIN,
-    PANEL_LOGO_PATH,
     PANEL_MODULE_PATH,
     PANEL_URL_PATH,
 )
@@ -74,25 +75,15 @@ async def _async_register_frontend(hass: HomeAssistant) -> None:
         return
     # Claimed before awaiting; camera entries set up concurrently.
     domain_data[DATA_FRONTEND_REGISTERED] = True
-    base = Path(__file__).parent
-    panel_path = base / "frontend" / "tvt-archive-panel.js"
+    panel_path = Path(__file__).parent / "frontend" / "tvt-archive-panel.js"
     panel_bytes = await hass.async_add_executor_job(panel_path.read_bytes)
-    panel_digest = sha256(panel_bytes).hexdigest()[:12]
-    panel_module_url = f"{PANEL_MODULE_PATH}?v={panel_digest}"
-    await hass.http.async_register_static_paths(
-        [
-            StaticPathConfig(
-                PANEL_MODULE_PATH,
-                str(panel_path),
-                cache_headers=False,
-            ),
-            StaticPathConfig(
-                PANEL_LOGO_PATH,
-                str(base / "brand" / "icon.png"),
-                cache_headers=True,
-            ),
-        ]
-    )
+    panel_module_url = f"{PANEL_MODULE_PATH}?v={sha256(panel_bytes).hexdigest()[:12]}"
+    if not domain_data.get(DATA_STATIC_REGISTERED):
+        # Routes cannot be removed, so they outlive the panel.
+        domain_data[DATA_STATIC_REGISTERED] = True
+        await hass.http.async_register_static_paths(
+            [StaticPathConfig(PANEL_MODULE_PATH, str(panel_path), cache_headers=False)]
+        )
     await async_register_panel(
         hass,
         frontend_url_path=PANEL_URL_PATH,
@@ -262,6 +253,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    ir.async_delete_issue(hass, DOMAIN, f"sd_card_{entry.entry_id}")
+    if not any(e.entry_id != entry.entry_id for e in hass.config_entries.async_entries(DOMAIN)):
+        async_remove_panel(hass, PANEL_URL_PATH, warn_if_unknown=False)
+        hass.data.get(DOMAIN, {}).pop(DATA_FRONTEND_REGISTERED, None)
     camera_id = entry.data.get(CONF_CAMERA_ID)
     shared = any(
         e.entry_id != entry.entry_id and bridge_key(e.data) == bridge_key(entry.data)

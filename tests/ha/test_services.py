@@ -6,9 +6,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from common import CAMERA, camera_entry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ServiceValidationError
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import device_registry as dr
 
+from custom_components.tvt_archive.api import TVTArchiveApiError
 from custom_components.tvt_archive.const import DOMAIN
 
 
@@ -49,4 +50,18 @@ async def test_save_recording(hass: HomeAssistant, api: AsyncMock, tmp_path: Pat
     with pytest.raises(ServiceValidationError):
         await hass.services.async_call(
             DOMAIN, "save_recording", {"device_id": "nope", "duration": 60}, blocking=True
+        )
+
+
+async def test_save_recording_reports_bridge_errors(hass: HomeAssistant, api: AsyncMock) -> None:
+    api.cameras.return_value = {"cameras": [CAMERA]}
+    api.create_job.side_effect = TVTArchiveApiError("Camera is busy")
+    entry = camera_entry()
+    entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    device = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, f"{entry.entry_id}:front")})
+    with pytest.raises(HomeAssistantError, match="Camera is busy"):
+        await hass.services.async_call(
+            DOMAIN, "save_recording", {"device_id": device.id, "duration": 60}, blocking=True
         )

@@ -5,11 +5,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import voluptuous as vol
+from aiohttp import ClientError
 from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 
+from .api import TVTArchiveApiError
 from .const import DOMAIN
 
 RECORDING_LAG = timedelta(seconds=15)
@@ -35,6 +37,15 @@ def _camera(hass: HomeAssistant, device_id: str) -> tuple[dict, str]:
 
 
 async def _async_save(hass: HomeAssistant, call: ServiceCall) -> ServiceResponse:
+    try:
+        return await _async_export(hass, call)
+    except (TVTArchiveApiError, ClientError, OSError) as error:
+        raise HomeAssistantError(
+            f"The camera's bridge could not save the recording: {error}"
+        ) from error
+
+
+async def _async_export(hass: HomeAssistant, call: ServiceCall) -> ServiceResponse:
     data, camera_id = _camera(hass, call.data["device_id"])
     duration = call.data["duration"]
     # The bridge reads camera times as the host's local time.

@@ -130,6 +130,8 @@ class LocalBridge:
             return
         _LOGGER.warning("Built-in bridge exited with code %s; restarting", code)
         await asyncio.sleep(5)
+        if self._stopping or process is not self._process:
+            return
         try:
             await self.async_start()
         except Exception as error:  # noqa: BLE001

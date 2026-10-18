@@ -827,6 +827,7 @@ class TVTArchivePanel extends HTMLElement {
     // Capture phase: keep HA's single-key shortcuts from firing too.
     window.addEventListener("keydown", this._onKeyDown, true);
     this._render();
+    if (this._loaded) this._loadStatus();
     if (this._loaded && this._downloadJobId) {
       clearTimeout(this._pollTimer);
       this._busy = true;
@@ -932,10 +933,14 @@ class TVTArchivePanel extends HTMLElement {
       this._message = "Loading timeline…";
       if (!this._isPlaying()) this._render(); else this._updateStatusLine();
     }
+    const key = `${this._entryId}/${this._cameraId}/${this._date}`;
     try {
-      this._timeline = await this._api("GET", `tvt_archive/${this._entryId}/cameras/${this._cameraId}/timeline?date=${encodeURIComponent(this._date)}${refresh ? "&refresh=1" : ""}`);
+      const timeline = await this._api("GET", `tvt_archive/${this._entryId}/cameras/${this._cameraId}/timeline?date=${encodeURIComponent(this._date)}${refresh ? "&refresh=1" : ""}`);
+      if (key !== `${this._entryId}/${this._cameraId}/${this._date}`) return;
+      this._timeline = timeline;
       this._error = "";
     } catch (error) {
+      if (key !== `${this._entryId}/${this._cameraId}/${this._date}`) return;
       this._error = errorText(error);
     }
     if (showLoading) this._message = "";
@@ -950,10 +955,14 @@ class TVTArchivePanel extends HTMLElement {
 
   async _loadStatus(refresh = false) {
     if (!this._cameraId) return;
+    const entry = this._entryId;
     try {
-      this._status = await this._api("GET", `tvt_archive/${this._entryId}/cameras/${this._cameraId}/status${refresh ? "?refresh=1" : ""}`);
+      const status = await this._api("GET", `tvt_archive/${entry}/cameras/${this._cameraId}/status${refresh ? "?refresh=1" : ""}`);
+      if (entry !== this._entryId) return;
+      this._status = status;
       this._error = "";
     } catch (error) {
+      if (entry !== this._entryId) return;
       this._error = errorText(error);
     }
     if (this._isPlaying()) this._renderStatusOnly(); else this._render();

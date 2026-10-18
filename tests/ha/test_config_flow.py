@@ -130,12 +130,13 @@ async def test_remote_flow_reuses_a_known_token(hass: HomeAssistant, api: AsyncM
 
 async def test_remote_flow_errors(hass: HomeAssistant, api: AsyncMock) -> None:
     result = await _menu(hass, "remote")
-    api.health.side_effect = TVTArchiveAuthError("Missing or invalid access token")
+    # The bridge answers /api/health without a token; the camera list checks it.
+    api.cameras.side_effect = TVTArchiveAuthError("Missing or invalid access token")
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], {"url": URL, "token": "wrong"}
     )
     assert result["errors"] == {"base": "invalid_auth"}
-    api.health.side_effect = TVTArchiveApiError("Bridge returned HTTP 502")
+    api.cameras.side_effect = TVTArchiveApiError("Bridge returned HTTP 502")
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], {"url": URL, "token": TOKEN}
     )
@@ -162,7 +163,8 @@ async def test_reauth_updates_the_camera_login(hass: HomeAssistant, api: AsyncMo
 async def test_reauth_updates_the_bridge_token(hass: HomeAssistant, api: AsyncMock) -> None:
     entry = camera_entry()
     entry.add_to_hass(hass)
-    api.health.side_effect = [TVTArchiveAuthError("bad"), TVTArchiveAuthError("bad"), {}]
+    bad = TVTArchiveAuthError("Missing or invalid access token")
+    api.cameras.side_effect = [bad, bad, {"cameras": [CAMERA]}]
     result = await entry.start_reauth_flow(hass)
     assert result["step_id"] == "reauth_token"
     result = await hass.config_entries.flow.async_configure(result["flow_id"], {"token": "wrong"})

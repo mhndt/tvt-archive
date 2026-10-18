@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta
 
-from homeassistant.components.media_player import MediaClass, MediaType
+from homeassistant.components.media_player import BrowseError, MediaClass, MediaType
 from homeassistant.components.media_source import (
     BrowseMediaSource,
     MediaSource,
@@ -13,6 +13,7 @@ from homeassistant.components.media_source import (
 )
 from homeassistant.core import HomeAssistant
 
+from .api import TVTArchiveApiError
 from .const import DOMAIN
 from .http import _add_hls_url, _ha_motion
 
@@ -70,17 +71,20 @@ class TVTArchiveMediaSource(MediaSource):
             raise Unresolvable("Not a recording") from error
         data = self._data(entry_id)
         api = data["api"]
-        session = await api.create_session(
-            camera_id, {"start": start, "duration": int(seconds), "quality": "original"}
-        )
-        for _ in range(120):
-            if session.get("error"):
-                raise Unresolvable(str(session["error"]))
-            if session.get("playlist_ready"):
-                url = _add_hls_url(entry_id, data, session)["playlist_url"]
-                return PlayMedia(url, "application/x-mpegURL")
-            await asyncio.sleep(0.5)
-            session = await api.playback_session(session["id"])
+        try:
+            session = await api.create_session(
+                camera_id, {"start": start, "duration": int(seconds), "quality": "original"}
+            )
+            for _ in range(120):
+                if session.get("error"):
+                    raise Unresolvable(str(session["error"]))
+                if session.get("playlist_ready"):
+                    url = _add_hls_url(entry_id, data, session)["playlist_url"]
+                    return PlayMedia(url, "application/x-mpegURL")
+                await asyncio.sleep(0.5)
+                session = await api.playback_session(session["id"])
+        except TVTArchiveApiError as error:
+            raise Unresolvable(f"The camera could not play this recording: {error}") from error
         raise Unresolvable("The recording did not start in time")
 
     async def async_browse_media(self, item: MediaSourceItem) -> BrowseMediaSource:
@@ -108,7 +112,10 @@ class TVTArchiveMediaSource(MediaSource):
             ]
             return node
         if len(parts) == 3 or (len(parts) == 4 and parts[3] == "motion"):
-            clips = await self._clips(parts[0], data, parts[1], parts[2])
+            try:
+                clips = await self._clips(parts[0], data, parts[1], parts[2])
+            except TVTArchiveApiError as error:
+                raise BrowseError(f"The camera could not list recordings: {error}") from error
             motion_only = len(parts) == 4
             node = _node(item.identifier, f"{name} {parts[2]}" + (" motion" if motion_only else ""))
             node.children = [

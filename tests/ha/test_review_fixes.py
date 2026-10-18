@@ -4,10 +4,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from aiohttp import ClientConnectionError
-from common import BACK, CAMERA, TOKEN, URL
+from common import BACK, CAMERA, TOKEN, URL, camera_entry
 from homeassistant import config_entries
+from homeassistant.components.media_player import BrowseError
+from homeassistant.components.media_source import async_browse_media
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
+from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.tvt_archive.api import TVTArchiveApi, TVTArchiveApiError
@@ -96,3 +99,48 @@ async def test_discovery_waits_for_the_split(hass: HomeAssistant) -> None:
         await _async_scan(hass, [onvif])
     greet.assert_not_called()
     create.assert_not_called()
+
+
+async def test_unreachable_bridge_while_streaming() -> None:
+    session = MagicMock()
+    session.get = AsyncMock(side_effect=ClientConnectionError("refused"))
+    with pytest.raises(TVTArchiveApiError):
+        await TVTArchiveApi(session, URL, TOKEN).open_frames("a" * 32)
+
+
+async def test_non_json_answer_is_an_api_error() -> None:
+    response = MagicMock(status=200)
+    response.json = AsyncMock(side_effect=ValueError("not json"))
+    response.text = AsyncMock(return_value="<html>login</html>")
+    context = MagicMock()
+    context.__aenter__ = AsyncMock(return_value=response)
+    context.__aexit__ = AsyncMock(return_value=False)
+    session = MagicMock()
+    session.request.return_value = context
+    with pytest.raises(TVTArchiveApiError):
+        await TVTArchiveApi(session, URL, TOKEN).cameras()
+
+
+async def test_media_browser_reports_bridge_errors(hass: HomeAssistant, api: AsyncMock) -> None:
+    api.cameras.return_value = {"cameras": [CAMERA]}
+    api.status.return_value["availability"]["days_with_recordings"] = ["2026-08-23"]
+    api.timeline.side_effect = TVTArchiveApiError("Bridge is unreachable")
+    assert await async_setup_component(hass, "media_source", {})
+    entry = camera_entry()
+    entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    with pytest.raises(BrowseError):
+        await async_browse_media(hass, f"media-source://{DOMAIN}/{entry.entry_id}/front/2026-08-23")
+
+
+async def test_last_entry_removes_the_panel(hass: HomeAssistant, api: AsyncMock) -> None:
+    api.cameras.return_value = {"cameras": [CAMERA]}
+    entry = camera_entry()
+    entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert "tvt-archive" in hass.data["frontend_panels"]
+    await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done()
+    assert "tvt-archive" not in hass.data["frontend_panels"]

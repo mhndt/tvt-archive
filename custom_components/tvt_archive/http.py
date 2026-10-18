@@ -8,7 +8,7 @@ import time
 from datetime import date
 from typing import Any
 
-from aiohttp import web
+from aiohttp import ClientError, web
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
@@ -31,6 +31,16 @@ def _entry_data(hass: HomeAssistant, entry_id: str):
     return data
 
 
+async def _json_body(request: web.Request) -> dict[str, Any]:
+    try:
+        body = await request.json()
+    except ValueError as error:
+        raise web.HTTPBadRequest(text="Invalid JSON body") from error
+    if not isinstance(body, dict):
+        raise web.HTTPBadRequest(text="Invalid JSON body")
+    return body
+
+
 def _media_signature(key: bytes, job_id: str, expires: int, download: bool) -> str:
     payload = f"{job_id}:{expires}:{int(download)}".encode()
     return hmac.new(key, payload, hashlib.sha256).hexdigest()
@@ -48,7 +58,7 @@ def _frames_signature(key: bytes, entry_id: str, session_id: str, expires: int) 
 
 def _add_frames_url(entry_id: str, data: dict[str, Any], session: dict[str, Any]) -> dict[str, Any]:
     result = dict(session)
-    expires = int(result.get("created_at_unix", int(time.time()))) + _HLS_URL_TTL_SECONDS
+    expires = int(time.time()) + _HLS_URL_TTL_SECONDS
     signature = _frames_signature(data["media_key"], entry_id, result["id"], expires)
     result["frames_url"] = (
         f"/api/tvt_archive/frames/{entry_id}/{result['id']}/{expires}/{signature}"
@@ -79,7 +89,7 @@ def _add_media_urls(entry_id: str, data: dict[str, Any], job: dict[str, Any]) ->
 
 def _add_hls_url(entry_id: str, data: dict[str, Any], session: dict[str, Any]) -> dict[str, Any]:
     result = dict(session)
-    created_at = int(result.get("created_at_unix", int(time.time())))
+    created_at = int(time.time())
     player_expires = created_at + _PLAYER_URL_TTL_SECONDS
     player_signature = _player_signature(data["media_key"], entry_id, player_expires)
     result["player_script_url"] = (
@@ -108,20 +118,6 @@ async def _ha_motion(hass, entry_id, data, camera_id, day) -> list[dict[str, str
         return []
 
 
-class EntriesView(HomeAssistantView):
-    url = "/api/tvt_archive/entries"
-    name = "api:tvt_archive:entries"
-    requires_auth = True
-
-    async def get(self, request):
-        hass = request.app["hass"]
-        entries = []
-        for entry in hass.config_entries.async_entries(DOMAIN):
-            if entry.entry_id in hass.data.get(DOMAIN, {}):
-                entries.append({"entry_id": entry.entry_id, "title": entry.title})
-        return self.json({"entries": entries})
-
-
 class AllCamerasView(HomeAssistantView):
     url = "/api/tvt_archive/cameras"
     name = "api:tvt_archive:all_cameras"
@@ -138,15 +134,6 @@ class AllCamerasView(HomeAssistantView):
         return self.json({"cameras": cameras})
 
 
-class CamerasView(HomeAssistantView):
-    url = "/api/tvt_archive/{entry_id}/cameras"
-    name = "api:tvt_archive:cameras"
-    requires_auth = True
-
-    async def get(self, request, entry_id):
-        return self.json(await _entry_data(request.app["hass"], entry_id)["api"].cameras())
-
-
 class StatusView(HomeAssistantView):
     url = "/api/tvt_archive/{entry_id}/cameras/{camera_id}/status"
     name = "api:tvt_archive:status"
@@ -154,7 +141,11 @@ class StatusView(HomeAssistantView):
 
     async def get(self, request, entry_id, camera_id):
         data = _entry_data(request.app["hass"], entry_id)
-        return self.json(await data["api"].status(camera_id, request.query.get("refresh") == "1"))
+        try:
+            status = await data["api"].status(camera_id, request.query.get("refresh") == "1")
+        except TVTArchiveApiError as error:
+            raise web.HTTPBadGateway(text="TVT Archive request failed") from error
+        return self.json(status)
 
 
 class TimelineView(HomeAssistantView):
@@ -168,22 +159,15 @@ class TimelineView(HomeAssistantView):
             raise web.HTTPBadRequest(text="date is required")
         hass = request.app["hass"]
         data = _entry_data(hass, entry_id)
-        timeline = await data["api"].timeline(camera_id, date, request.query.get("refresh") == "1")
+        try:
+            timeline = await data["api"].timeline(
+                camera_id, date, request.query.get("refresh") == "1"
+            )
+        except TVTArchiveApiError as error:
+            raise web.HTTPBadGateway(text="TVT Archive request failed") from error
         if not timeline.get("events"):
             timeline["events"] = await _ha_motion(hass, entry_id, data, camera_id, date)
         return self.json(timeline)
-
-
-class AvailabilityView(HomeAssistantView):
-    url = "/api/tvt_archive/{entry_id}/cameras/{camera_id}/availability"
-    name = "api:tvt_archive:availability"
-    requires_auth = True
-
-    async def get(self, request, entry_id, camera_id):
-        data = _entry_data(request.app["hass"], entry_id)
-        return self.json(
-            await data["api"].availability(camera_id, int(request.query.get("days", "45")))
-        )
 
 
 class ThumbnailView(HomeAssistantView):
@@ -213,7 +197,7 @@ class CreateSessionView(HomeAssistantView):
     async def post(self, request, entry_id, camera_id):
         data = _entry_data(request.app["hass"], entry_id)
         try:
-            session = await data["api"].create_session(camera_id, await request.json())
+            session = await data["api"].create_session(camera_id, await _json_body(request))
         except TVTArchiveApiError as error:
             _LOGGER.warning("TVT Archive bridge request failed: %s", error)
             raise web.HTTPBadGateway(text="TVT Archive request failed") from error
@@ -252,7 +236,7 @@ class CreateStreamView(HomeAssistantView):
     async def post(self, request, entry_id, camera_id):
         data = _entry_data(request.app["hass"], entry_id)
         try:
-            session = await data["api"].create_stream(camera_id, await request.json())
+            session = await data["api"].create_stream(camera_id, await _json_body(request))
         except TVTArchiveApiError as error:
             _LOGGER.warning("TVT Archive bridge request failed: %s", error)
             raise web.HTTPBadGateway(text="TVT Archive request failed") from error
@@ -277,7 +261,7 @@ class StreamView(HomeAssistantView):
         return await self._respond(request, entry_id, lambda api: api.stream(session_id))
 
     async def post(self, request, entry_id, session_id):
-        payload = await request.json()
+        payload = await _json_body(request)
         return await self._respond(
             request, entry_id, lambda api: api.control_stream(session_id, payload)
         )
@@ -314,7 +298,7 @@ class FramesView(HomeAssistantView):
         try:
             async for chunk in upstream.content.iter_any():
                 await response.write(chunk)
-        except (ConnectionResetError, RuntimeError, ConnectionError):
+        except (ConnectionResetError, RuntimeError, ConnectionError, ClientError):
             pass
         finally:
             upstream.close()
@@ -344,8 +328,12 @@ class HLSLibraryView(HomeAssistantView):
         except TVTArchiveApiError as error:
             _LOGGER.warning("TVT Archive bridge request failed: %s", error)
             raise web.HTTPBadGateway(text="TVT Archive request failed") from error
-        body = await upstream.read()
-        upstream.release()
+        try:
+            body = await upstream.read()
+        except ClientError as error:
+            raise web.HTTPBadGateway(text="TVT Archive request failed") from error
+        finally:
+            upstream.release()
         return web.Response(
             body=body,
             content_type="application/javascript",
@@ -396,7 +384,7 @@ class HLSAssetView(HomeAssistantView):
             if not head_only:
                 async for chunk in upstream.content.iter_chunked(256 * 1024):
                     await response.write(chunk)
-        except (ConnectionResetError, RuntimeError):
+        except (ConnectionResetError, RuntimeError, ClientError):
             pass
         finally:
             upstream.release()
@@ -425,7 +413,7 @@ class CreateJobView(HomeAssistantView):
     async def post(self, request, entry_id, camera_id):
         data = _entry_data(request.app["hass"], entry_id)
         try:
-            job = await data["api"].create_job(camera_id, await request.json())
+            job = await data["api"].create_job(camera_id, await _json_body(request))
         except TVTArchiveApiError as error:
             _LOGGER.warning("TVT Archive bridge request failed: %s", error)
             raise web.HTTPBadGateway(text="TVT Archive request failed") from error
@@ -499,7 +487,7 @@ class MediaView(HomeAssistantView):
         try:
             async for chunk in upstream.content.iter_chunked(256 * 1024):
                 await response.write(chunk)
-        except (ConnectionResetError, RuntimeError):
+        except (ConnectionResetError, RuntimeError, ClientError):
             pass
         finally:
             upstream.release()
@@ -512,12 +500,9 @@ class MediaView(HomeAssistantView):
 
 def register_views(hass: HomeAssistant) -> None:
     for view in (
-        EntriesView(),
         AllCamerasView(),
-        CamerasView(),
         StatusView(),
         TimelineView(),
-        AvailabilityView(),
         ThumbnailView(),
         CreateSessionView(),
         SessionView(),
