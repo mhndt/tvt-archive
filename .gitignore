@@ -5,4 +5,3 @@ dist/
 .DS_Store
 .vscode/
 .idea/
-custom_components/tvt_archive/frontend/hls.min.js

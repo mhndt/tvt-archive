@@ -1,5 +1,5 @@
 name: TVT Archive
-version: "1.1.1"
+version: "1.1.2"
 slug: tvt_archive
 description: Optional bridge for the TVT Archive integration, with VAAPI encoding
 url: https://github.com/mhndt/tvt-archive
