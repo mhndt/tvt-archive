@@ -6,6 +6,8 @@ import re
 import sys
 from pathlib import Path
 
+from version_refs import version_lines
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -41,17 +43,15 @@ if hacs.get("name") != "TVT Archive":
 if hacs.get("zip_release") is not True or hacs.get("filename") != "tvt_archive.zip":
     fail("hacs.json must point to the release ZIP")
 
-required_version_references = {
-    "compose/compose.yaml": f"ghcr.io/mhndt/tvt-archive:{version}",
-    ".env.example": f"ghcr.io/mhndt/tvt-archive:{version}",
-    "compose/build-local.yaml": f"tvt-archive:{version}-local",
-    "setup.sh": f"ghcr.io/mhndt/tvt-archive:{version}",
-    "custom_components/tvt_archive/bridge/bridge.py": f"TVTArchiveBridge/{version}",
-    "addon/config.yaml": f'version: "{version}"',
-}
-for path, expected in required_version_references.items():
-    if expected not in read(path):
-        fail(f"{path} does not contain expected version reference {expected!r}")
+for path, expected_lines in version_lines(version).items():
+    lines = read(path).splitlines()
+    for expected in expected_lines:
+        if lines.count(expected) != 1:
+            fail(f"{path} must contain exactly one version line {expected!r}")
+
+# A broad version replacement once changed this IPv4 address along with the app.
+if re.findall(r"\bip -4 route get (\S+)", read("setup.sh")) != ["1.1.1.1"]:
+    fail("setup.sh route probe must stay 1.1.1.1; it is not an application version")
 
 component_root = ROOT / "custom_components"
 components = sorted(p.name for p in component_root.iterdir() if p.is_dir())

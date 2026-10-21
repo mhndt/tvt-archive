@@ -1,6 +1,6 @@
 # TVT Archive
 
-[![HACS](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration) [![Release](https://img.shields.io/github/v/release/mhndt/tvt-archive)](https://github.com/mhndt/tvt-archive/releases) [![CI](https://github.com/mhndt/tvt-archive/actions/workflows/ci.yml/badge.svg)](https://github.com/mhndt/tvt-archive/actions/workflows/ci.yml)
+[![HACS](https://img.shields.io/badge/HACS-Default-41BDF5.svg)](https://hacs.xyz/) [![Release](https://img.shields.io/github/v/release/mhndt/tvt-archive)](https://github.com/mhndt/tvt-archive/releases) [![CI](https://github.com/mhndt/tvt-archive/actions/workflows/ci.yml/badge.svg)](https://github.com/mhndt/tvt-archive/actions/workflows/ci.yml)
 
 Browse, play, and export recordings from a TVT camera's SD card in Home Assistant. The integration adds a Recordings panel to the sidebar with a day timeline, motion highlighting, and keyboard shortcuts, lists recordings in the Media browser, and adds entities for recording status, available footage, and the SD card.
 
@@ -10,8 +10,8 @@ Recordings are read directly from the camera over your LAN. Nothing leaves your 
 
 [![Open TVT Archive in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=mhndt&repository=tvt-archive&category=integration)
 
-1. Add `https://github.com/mhndt/tvt-archive` to HACS as a custom Integration repository.
-2. Install TVT Archive and restart Home Assistant.
+1. Open [HACS](https://hacs.xyz/) and search for **TVT Archive**, or use the button above.
+2. Download TVT Archive, then restart Home Assistant.
 3. Open Settings > Devices & services > Add integration > TVT Archive and choose **Built-in**.
 4. Enter your camera. Add more with Add device on the same page.
 
@@ -156,6 +156,20 @@ pytest -q
 ruff check . && ruff format --check .
 ./setup.sh --build-local
 ```
+
+## Updating the release version
+
+Use the targeted version bump script instead of a repository-wide search and replace:
+
+```bash
+python3 scripts/bump-version.py 1.1.4
+python3 scripts/check-version.py
+git diff
+```
+
+The script updates only the application version fields and image tags. It validates
+all existing references before writing, leaving IP addresses and dependency versions alone.
+Commit the reviewed changes before tagging the next release.
 
 # Contributing
 

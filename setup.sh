@@ -39,8 +39,8 @@ cat > .env <<ENV
 COMPOSE_FILE=$COMPOSE_FILE_VALUE
 TVT_ARCHIVE_HOST=${TVT_ARCHIVE_HOST:-0.0.0.0}
 TVT_ARCHIVE_PORT=${TVT_ARCHIVE_PORT:-8099}
-TVT_ARCHIVE_IMAGE=${TVT_ARCHIVE_IMAGE:-ghcr.io/mhndt/tvt-archive:1.1.2}
-TVT_ARCHIVE_LOCAL_IMAGE=${TVT_ARCHIVE_LOCAL_IMAGE:-tvt-archive:1.1.2-local}
+TVT_ARCHIVE_IMAGE=${TVT_ARCHIVE_IMAGE:-ghcr.io/mhndt/tvt-archive:1.1.3}
+TVT_ARCHIVE_LOCAL_IMAGE=${TVT_ARCHIVE_LOCAL_IMAGE:-tvt-archive:1.1.3-local}
 TVT_ARCHIVE_TOKEN=${TVT_ARCHIVE_TOKEN:-}
 TVT_ARCHIVE_ENCODER=$ENCODER
 TVT_ARCHIVE_DRI_DEVICE=$RENDER_DEVICE
@@ -66,6 +66,7 @@ for _ in $(seq 1 120); do
 done
 [[ "$status" == healthy ]] || { echo "tvt-archive did not become healthy" >&2; docker compose logs --tail=200 tvt-archive; exit 1; }
 
-LAN_IP="$(ip -4 route get 1.1.2.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}')"
+# Look up the local source address; this destination is not an app version.
+LAN_IP="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}')"
 echo "Bridge URL: http://${LAN_IP:-<docker-host-ip>}:${TVT_ARCHIVE_PORT:-8099}"
 echo "Access token: $(docker compose exec -T tvt-archive tvt-archive show-token)"

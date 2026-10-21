@@ -1,8 +1,8 @@
 services:
   tvt-archive:
-    image: ${TVT_ARCHIVE_LOCAL_IMAGE:-tvt-archive:1.1.2-local}
+    image: ${TVT_ARCHIVE_LOCAL_IMAGE:-tvt-archive:1.1.3-local}
     build:
       context: ..
       dockerfile: Dockerfile
       args:
-        APP_VERSION: "1.1.2"
+        APP_VERSION: "1.1.3"
