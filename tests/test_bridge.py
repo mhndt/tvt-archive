@@ -464,6 +464,14 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(calls["count"], 2)
         destination.unlink(missing_ok=True)
 
+    def test_growing_playlist_is_not_played_as_live(self) -> None:
+        playlist = b"#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\ns.m4s\n"
+        self.assertEqual(
+            bridge._hold_back(playlist, 600),
+            b"#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-SERVER-CONTROL:HOLD-BACK=660\n"
+            b"#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\ns.m4s\n",
+        )
+
     def test_hls_playlist_readiness_is_sticky(self) -> None:
         with tempfile.TemporaryDirectory(dir=bridge.WORK) as directory:
             session = bridge.PlaybackSession(

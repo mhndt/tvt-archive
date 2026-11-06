@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from common import BACK, CAMERA, TOKEN, URL, camera_entry
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
@@ -103,7 +104,9 @@ async def test_removing_an_entry_removes_its_camera(hass: HomeAssistant, api: As
     api.delete_camera.assert_awaited_once_with("front")
 
 
-async def test_bridge_entry_is_split_per_camera(hass: HomeAssistant, api: AsyncMock) -> None:
+async def test_bridge_entry_is_split_per_camera(
+    hass: HomeAssistant, api: AsyncMock, caplog: pytest.LogCaptureFixture
+) -> None:
     api.cameras.return_value = {"cameras": [CAMERA, BACK]}
     old = MockConfigEntry(
         domain=DOMAIN,
@@ -152,8 +155,10 @@ async def test_bridge_entry_is_split_per_camera(hass: HomeAssistant, api: AsyncM
     moved = entities.async_get("sensor.back_recorded_today")
     assert moved.config_entry_id == new.entry_id
     assert moved.unique_id == f"{new.entry_id}:back:recorded_today"
-    device = devices.async_get_device(identifiers={(DOMAIN, f"{new.entry_id}:back")})
-    assert device and device.config_entries == {new.entry_id}
+    device = dr.async_entries_for_config_entry(devices, new.entry_id)[0]
+    assert (DOMAIN, f"{new.entry_id}:back") in device.identifiers
+    assert device not in dr.async_entries_for_config_entry(devices, old.entry_id)
+    assert "device_registry." not in caplog.text
     kept = entities.async_get("sensor.front_recorded_today")
     assert kept.config_entry_id == old.entry_id
 

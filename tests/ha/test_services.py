@@ -29,7 +29,7 @@ async def test_save_recording(hass: HomeAssistant, api: AsyncMock, tmp_path: Pat
     entry.add_to_hass(hass)
     await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
-    device = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, f"{entry.entry_id}:front")})
+    device = dr.async_entries_for_config_entry(dr.async_get(hass), entry.entry_id)[0]
 
     result = await hass.services.async_call(
         DOMAIN,
@@ -60,7 +60,7 @@ async def test_save_recording_reports_bridge_errors(hass: HomeAssistant, api: As
     entry.add_to_hass(hass)
     await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
-    device = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, f"{entry.entry_id}:front")})
+    device = dr.async_entries_for_config_entry(dr.async_get(hass), entry.entry_id)[0]
     with pytest.raises(HomeAssistantError, match="Camera is busy"):
         await hass.services.async_call(
             DOMAIN, "save_recording", {"device_id": device.id, "duration": 60}, blocking=True

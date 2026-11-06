@@ -41,11 +41,6 @@ jobs:
       - name: Python and frontend tests
         run: bash tests/run-tests.sh
 
-      - name: Home Assistant tests
-        run: |
-          pip install pytest-homeassistant-custom-component home-assistant-frontend
-          pytest -q
-
       - name: Shell syntax
         run: bash -n setup.sh scripts/package-hacs.sh
 
@@ -78,6 +73,26 @@ jobs:
           name: tvt-archive-hacs
           path: dist/
           if-no-files-found: error
+
+  home-assistant:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14"]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Home Assistant tests
+        run: |
+          pip install pytest-homeassistant-custom-component home-assistant-frontend
+          pytest -q
 
   addon:
     runs-on: ubuntu-latest

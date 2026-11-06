@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import shutil
@@ -196,14 +197,22 @@ def _adopt(hass: HomeAssistant, entry: ConfigEntry) -> None:
                 new_unique_id=f"{entry.entry_id}:{camera_id}:{item.unique_id[len(prefix) :]}",
             )
     devices = dr.async_get(hass)
-    device = devices.async_get_device(identifiers={(DOMAIN, f"{old}:{camera_id}")})
+    identifier = (DOMAIN, f"{old}:{camera_id}")
+    device = next(
+        (d for d in dr.async_entries_for_config_entry(devices, old) if identifier in d.identifiers),
+        None,
+    )
     if device:
-        devices.async_update_device(
-            device.id,
-            add_config_entry_id=entry.entry_id,
-            new_identifiers={(DOMAIN, f"{entry.entry_id}:{camera_id}")},
-        )
-        devices.async_update_device(device.id, remove_config_entry_id=old)
+        identifiers = {(DOMAIN, f"{entry.entry_id}:{camera_id}")}
+        if "new_config_entry_id" in inspect.signature(devices.async_update_device).parameters:
+            devices.async_update_device(
+                device.id, new_config_entry_id=entry.entry_id, new_identifiers=identifiers
+            )
+        else:
+            devices.async_update_device(
+                device.id, add_config_entry_id=entry.entry_id, new_identifiers=identifiers
+            )
+            devices.async_update_device(device.id, remove_config_entry_id=old)
     data = dict(entry.data)
     data.pop(CONF_MIGRATED_FROM)
     hass.config_entries.async_update_entry(entry, data=data)

@@ -6,6 +6,9 @@
     "hassio",
     "recorder"
   ],
+  "categories": [
+    "security_safety.cameras"
+  ],
   "codeowners": [
     "@mhndt"
   ],
@@ -19,5 +22,5 @@
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/mhndt/tvt-archive/issues",
   "requirements": [],
-  "version": "1.1.4"
+  "version": "1.1.5"
 }

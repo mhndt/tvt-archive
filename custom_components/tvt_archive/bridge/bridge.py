@@ -45,7 +45,7 @@ from native9008 import (
     TVT9008Error,
 )
 
-APP_VERSION = "1.1.4"
+APP_VERSION = "1.1.5"
 BASE = Path(os.environ.get("TVT_ARCHIVE_BASE", "/opt/tvt-archive"))
 CONFIG_DIRECTORY = Path(
     os.environ.get(
@@ -1372,6 +1372,14 @@ def get_availability(camera_id: str, days: int) -> dict[str, Any]:
         result["available_history_seconds"] = 0
         result["available_history_hours"] = 0
     return result
+
+
+def _hold_back(playlist: bytes, seconds: int) -> bytes:
+    return playlist.replace(
+        b"#EXT-X-TARGETDURATION",
+        b"#EXT-X-SERVER-CONTROL:HOLD-BACK=%d\n#EXT-X-TARGETDURATION" % (seconds + 60),
+        1,
+    )
 
 
 WIFI_POLL_SECONDS = 900
@@ -3290,7 +3298,7 @@ def authorized(header: str) -> bool:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "TVTArchiveBridge/1.1.4"
+    server_version = "TVTArchiveBridge/1.1.5"
     timeout = 60
 
     def log_message(self, fmt: str, *args: Any) -> None:
@@ -3461,7 +3469,18 @@ class Handler(BaseHTTPRequestHandler):
             ".mp4": "video/mp4",
             ".m4s": "video/iso.segment",
         }[path.suffix]
-        cache = "no-store" if asset.endswith(".m3u8") else "private, max-age=3600, immutable"
+        if asset == "index.m3u8":
+            payload = _hold_back(path.read_bytes(), int(value.request.get("duration", 0)))
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Cache-Control", "no-store")
+            self._headers()
+            self.end_headers()
+            if not head_only:
+                self.wfile.write(payload)
+            return
+        cache = "private, max-age=3600, immutable"
         self._send_range(path, content_type, {"Cache-Control": cache}, head_only=head_only)
 
     def _route_get(self, *, head_only: bool = False) -> None:
