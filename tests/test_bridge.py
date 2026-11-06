@@ -11,7 +11,7 @@ import time
 import unittest
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "custom_components" / "tvt_archive" / "bridge"
@@ -247,6 +247,62 @@ class BridgeTests(unittest.TestCase):
             bridge.update_camera_definition("front_door", {"password": item["password"]})
         test.assert_called_once()
         self.assertNotIn(bridge._guard_key(item), bridge.AUTH_FAILURES)
+
+    def test_thumbnails_yield_to_viewers(self) -> None:
+        start = datetime(2026, 9, 5, 8, 0)
+        with patch.object(bridge, "_metadata_client") as client:
+            bridge.hold_thumbnails()
+            self.addCleanup(setattr, bridge, "thumbnail_hold_until", 0.0)
+            with self.assertRaises(bridge.ThumbnailBusy):
+                bridge.get_thumbnail("front_door", start)
+            bridge.thumbnail_hold_until = 0.0
+            stream = bridge.FrameSession(id="f" * 32, camera_id="front_door", request={})
+            stream.status = "playing"
+            with bridge.SESSIONS_LOCK:
+                bridge.FRAME_SESSIONS[stream.id] = stream
+            try:
+                with self.assertRaises(bridge.ThumbnailBusy):
+                    bridge.get_thumbnail("front_door", start)
+            finally:
+                with bridge.SESSIONS_LOCK:
+                    bridge.FRAME_SESSIONS.pop(stream.id, None)
+        client.assert_not_called()
+
+    def test_wifi_is_read_rarely_and_never_during_playback(self) -> None:
+        self.addCleanup(bridge.WIFI_READINGS.clear)
+        self.addCleanup(setattr, bridge, "thumbnail_hold_until", 0.0)
+        client = MagicMock()
+        client.wifi.return_value = {"quality": 84}
+        bridge.hold_thumbnails()
+        self.assertIsNone(bridge._wifi("front_door", client))
+        client.wifi.assert_not_called()
+        bridge.thumbnail_hold_until = 0.0
+        self.assertEqual(bridge._wifi("front_door", client), {"quality": 84})
+        client.wifi.return_value = {"quality": 10}
+        self.assertEqual(bridge._wifi("front_door", client), {"quality": 84})
+        client.wifi.assert_called_once()
+        now = time.monotonic()
+        with patch.object(bridge.time, "monotonic", return_value=now + 901):
+            self.assertEqual(bridge._wifi("front_door", client), {"quality": 10})
+        client.wifi.side_effect = OSError
+        with patch.object(bridge.time, "monotonic", return_value=now + 1900):
+            self.assertEqual(bridge._wifi("front_door", client), {"quality": 10})
+
+    def test_queued_hls_session_can_be_cancelled(self) -> None:
+        session = bridge.PlaybackSession(
+            id="c" * 32,
+            camera_id="front_door",
+            request={"start": "2026-09-05T08:00:00", "duration": 60},
+            work_directory=str(bridge.WORK / "cancelled"),
+        )
+        session.stop_event.set()
+        slot = bridge.camera_session_slot("front_door")
+        slot.acquire()
+        try:
+            bridge.generate_hls_session(session)
+        finally:
+            slot.release()
+        self.assertEqual(session.status, "stopped")
 
     def test_newest_viewer_stops_older_playback(self) -> None:
         old_stream = bridge.FrameSession(id="d" * 32, camera_id="front_door", request={})

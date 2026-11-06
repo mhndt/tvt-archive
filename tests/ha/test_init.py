@@ -43,6 +43,26 @@ async def test_entities_are_created(hass: HomeAssistant, api: AsyncMock) -> None
     assert hass.states.get("sensor.front_available_history").state == "76.9"
 
 
+async def test_wifi_sensor_only_appears_when_the_camera_has_wifi(
+    hass: HomeAssistant, api: AsyncMock
+) -> None:
+    entry = await _setup(hass, camera_entry())
+    coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
+    assert hass.states.get("sensor.front_wifi_signal") is None
+    api.status.return_value["wifi"] = {"quality": 84, "rate_mbps": 150, "channel": 9}
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    wifi = hass.states.get("sensor.front_wifi_signal")
+    assert wifi.state == "84"
+    assert wifi.attributes["unit_of_measurement"] == "%"
+    assert wifi.attributes["rate_mbps"] == 150
+    assert "ssid" not in wifi.attributes
+    del api.status.return_value["wifi"]
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert hass.states.get("sensor.front_wifi_signal").state == "unknown"
+
+
 async def test_bad_token_starts_reauth(hass: HomeAssistant, api: AsyncMock) -> None:
     api.cameras.side_effect = api.health.side_effect = TVTArchiveAuthError("bad")
     entry = await _setup(hass, camera_entry())

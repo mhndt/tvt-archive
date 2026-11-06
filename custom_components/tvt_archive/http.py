@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import logging
@@ -8,7 +9,9 @@ import time
 from datetime import date
 from typing import Any
 
+import voluptuous as vol
 from aiohttp import ClientError, web
+from homeassistant.components import websocket_api
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
@@ -498,7 +501,20 @@ class MediaView(HomeAssistantView):
         return response
 
 
+@websocket_api.websocket_command({vol.Required("type"): "tvt_archive/hold_thumbnails"})
+@websocket_api.async_response
+async def ws_hold_thumbnails(hass: HomeAssistant, connection, msg: dict[str, Any]) -> None:
+    apis = {
+        data["api"].base_url: data["api"]
+        for data in hass.data.get(DOMAIN, {}).values()
+        if isinstance(data, dict) and "api" in data
+    }
+    await asyncio.gather(*(api.hold_thumbnails() for api in apis.values()), return_exceptions=True)
+    connection.send_result(msg["id"])
+
+
 def register_views(hass: HomeAssistant) -> None:
+    websocket_api.async_register_command(hass, ws_hold_thumbnails)
     for view in (
         AllCamerasView(),
         StatusView(),

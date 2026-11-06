@@ -1,6 +1,6 @@
 # TVT Archive
 
-[![HACS](https://img.shields.io/badge/HACS-Default-41BDF5.svg)](https://hacs.xyz/) [![Release](https://img.shields.io/github/v/release/mhndt/tvt-archive)](https://github.com/mhndt/tvt-archive/releases) [![CI](https://github.com/mhndt/tvt-archive/actions/workflows/ci.yml/badge.svg)](https://github.com/mhndt/tvt-archive/actions/workflows/ci.yml)
+[![Home Assistant Marketplace](https://img.shields.io/badge/Home%20Assistant-Marketplace-41BDF5.svg)](https://www.home-assistant.io/integrations/marketplace/) [![Release](https://img.shields.io/github/v/release/mhndt/tvt-archive)](https://github.com/mhndt/tvt-archive/releases) [![CI](https://github.com/mhndt/tvt-archive/actions/workflows/ci.yml/badge.svg)](https://github.com/mhndt/tvt-archive/actions/workflows/ci.yml)
 
 Browse, play, and export recordings from a TVT camera's SD card in Home Assistant. The integration adds a Recordings panel to the sidebar with a day timeline, motion highlighting, and keyboard shortcuts, lists recordings in the Media browser, and adds entities for recording status, available footage, and the SD card.
 
@@ -8,14 +8,14 @@ Recordings are read directly from the camera over your LAN. Nothing leaves your 
 
 # Installation
 
-[![Open TVT Archive in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=mhndt&repository=tvt-archive&category=integration)
+[![Open TVT Archive in the Marketplace](https://my.home-assistant.io/badges/marketplace_repository.svg)](https://my.home-assistant.io/redirect/marketplace_repository/?owner=mhndt&repository=tvt-archive&category=integration)
 
-1. Open [HACS](https://hacs.xyz/) and search for **TVT Archive**, or use the button above.
-2. Download TVT Archive, then restart Home Assistant.
-3. Open Settings > Devices & services > Add integration > TVT Archive and choose **Built-in**.
+1. Open Settings > Marketplace and search for **TVT Archive**, or use the button above.
+2. Select Install. Setup opens by itself.
+3. Choose **Built-in**.
 4. Enter your camera. Add more with Add device on the same page.
 
-For a manual install, copy `custom_components/tvt_archive` from the release ZIP into `config/custom_components` and restart Home Assistant.
+Before Home Assistant 2026.11, download it from [HACS](https://hacs.xyz/), restart Home Assistant, and add it under Settings > Devices & services. For a manual install, copy `custom_components/tvt_archive` from the release ZIP into `config/custom_components` and restart Home Assistant.
 
 <details>
 <summary>Optional app or container</summary>
@@ -116,8 +116,9 @@ Each camera is added as a device with these entities:
 | `sensor.<camera>_oldest_recording` | Start of the oldest recording on the card |
 | `sensor.<camera>_latest_recording` | End of the latest recording |
 | `sensor.<camera>_sd_card` | Normal, No SD card, Unformatted, Formatting, or Error, with total and used GB |
+| `sensor.<camera>_wifi_signal` | WiFi signal, with link rate and channel. Only on cameras connected over WiFi |
 
-Sensors update every two minutes. A missing or failed SD card appears under Settings > Repairs, and a rejected camera login asks to re-authenticate.
+Sensors update every two minutes. WiFi signal updates every 15 minutes and never during playback, since reading it makes the camera scan for networks, which slows its connection for about two seconds. A missing or failed SD card appears under Settings > Repairs, and a rejected camera login asks to re-authenticate.
 
 <details>
 <summary>Bridge settings</summary>
@@ -156,20 +157,6 @@ pytest -q
 ruff check . && ruff format --check .
 ./setup.sh --build-local
 ```
-
-## Updating the release version
-
-Use the targeted version bump script instead of a repository-wide search and replace:
-
-```bash
-python3 scripts/bump-version.py 1.1.4
-python3 scripts/check-version.py
-git diff
-```
-
-The script updates only the application version fields and image tags. It validates
-all existing references before writing, leaving IP addresses and dependency versions alone.
-Commit the reviewed changes before tagging the next release.
 
 # Contributing
 

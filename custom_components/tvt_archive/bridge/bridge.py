@@ -45,7 +45,7 @@ from native9008 import (
     TVT9008Error,
 )
 
-APP_VERSION = "1.1.3"
+APP_VERSION = "1.1.4"
 BASE = Path(os.environ.get("TVT_ARCHIVE_BASE", "/opt/tvt-archive"))
 CONFIG_DIRECTORY = Path(
     os.environ.get(
@@ -1374,11 +1374,32 @@ def get_availability(camera_id: str, days: int) -> dict[str, Any]:
     return result
 
 
+WIFI_POLL_SECONDS = 900
+WIFI_READINGS: dict[str, tuple[float, dict[str, Any] | None]] = {}
+
+
+def _wifi(camera_id: str, client: TVT9008Client) -> dict[str, Any] | None:
+    checked, reading = WIFI_READINGS.get(camera_id, (None, None))
+    now = time.monotonic()
+    if _camera_in_use(camera_id) or (checked is not None and now - checked < WIFI_POLL_SECONDS):
+        return reading
+    try:
+        reading = client.wifi()
+    except TVT9008AuthError:
+        raise
+    except (OSError, EOFError, TimeoutError, TVT9008Error):
+        LOG.debug("WiFi read failed for %s", camera_id)
+    WIFI_READINGS[camera_id] = (now, reading)
+    return reading
+
+
 def get_status(camera_id: str, *, force: bool = False) -> dict[str, Any]:
+    wifi = None
     try:
         try:
             with metadata_lock(camera_id), _metadata_client(camera(camera_id)) as client:
                 sd_card = client.sd_card()
+                wifi = _wifi(camera_id, client)
         except TVT9008AuthError:
             raise
         except (OSError, EOFError, TimeoutError, TVT9008Error):
@@ -1395,6 +1416,7 @@ def get_status(camera_id: str, *, force: bool = False) -> dict[str, Any]:
             "timeline_today": today,
             "availability": availability,
             "sd_card": sd_card,
+            **({"wifi": wifi} if wifi else {}),
             "encoder": encoder_info(),
             "gop_seconds": _read_camera_capabilities(camera_id).get("gop_seconds"),
         }
@@ -1411,10 +1433,44 @@ def get_status(camera_id: str, *, force: bool = False) -> dict[str, Any]:
         }
 
 
+class ThumbnailBusy(Exception):
+    pass
+
+
+THUMBNAIL_HOLD_SECONDS = 15
+THUMBNAIL_LOCKS: collections.defaultdict[str, threading.Lock] = collections.defaultdict(
+    threading.Lock
+)
+thumbnail_hold_until = 0.0
+
+
+def hold_thumbnails() -> None:
+    global thumbnail_hold_until
+    thumbnail_hold_until = time.monotonic() + THUMBNAIL_HOLD_SECONDS
+
+
+def _camera_in_use(camera_id: str) -> bool:
+    if time.monotonic() < thumbnail_hold_until:
+        return True
+    now = time.time()
+    with SESSIONS_LOCK:
+        return any(
+            value.camera_id == camera_id and not value.finished()
+            for value in FRAME_SESSIONS.values()
+        ) or any(
+            value.camera_id == camera_id
+            and value.status in ("queued", "running", "playing")
+            and now - value.last_access < 6
+            for value in SESSIONS.values()
+        )
+
+
 def get_thumbnail(camera_id: str, start: dt.datetime | None) -> Path:
     """JPEG of the first keyframe at or after `start`; None means the latest recording."""
     item = camera(camera_id)
     if start is None:
+        if _camera_in_use(camera_id):
+            raise ThumbnailBusy
         latest = get_availability(camera_id, 2).get("latest")
         if not latest:
             raise KeyError("No recordings")
@@ -1424,9 +1480,15 @@ def get_thumbnail(camera_id: str, start: dt.datetime | None) -> Path:
     path = path_under(THUMBS, name)
     if path.exists():
         return path
-    with metadata_lock(camera_id):
+    lock = THUMBNAIL_LOCKS[camera_id]
+    while not lock.acquire(timeout=0.2):
+        if _camera_in_use(camera_id):
+            raise ThumbnailBusy
+    try:
         if path.exists():
             return path
+        if _camera_in_use(camera_id):
+            raise ThumbnailBusy
         frame = b""
         with _metadata_client(item) as client:
             client.send(
@@ -1436,7 +1498,7 @@ def get_thumbnail(camera_id: str, start: dt.datetime | None) -> Path:
             )
             client.wait_for(KIND_PLAYBACK_START_RESPONSE, FIRST_REQUEST_ID, 10.0)
             deadline = time.monotonic() + 10
-            while not frame and time.monotonic() < deadline:
+            while not frame and time.monotonic() < deadline and not _camera_in_use(camera_id):
                 try:
                     received = client.read_frame()
                 except TimeoutError:
@@ -1450,6 +1512,8 @@ def get_thumbnail(camera_id: str, start: dt.datetime | None) -> Path:
                     frame = payload
             client.stop_playback()
         if not frame:
+            if _camera_in_use(camera_id):
+                raise ThumbnailBusy
             raise KeyError("No recording at this time")
         jpeg = subprocess.run(
             [
@@ -1480,6 +1544,8 @@ def get_thumbnail(camera_id: str, start: dt.datetime | None) -> Path:
         temporary = path.with_suffix(".tmp")
         temporary.write_bytes(jpeg)
         os.replace(temporary, path)
+    finally:
+        lock.release()
     return path
 
 
@@ -2400,7 +2466,10 @@ def generate_hls_session(session: PlaybackSession) -> None:
     stop_feeders = threading.Event()
     session.phase = "Waiting for camera"
     lock = camera_session_slot(session.camera_id)
-    lock.acquire()
+    while not lock.acquire(timeout=0.5):
+        if session.stop_event.is_set():
+            session.status, session.phase, session.finished_at = "stopped", "Stopped", time.time()
+            return
     session.started_at = time.time()
     session.status = "running"
     session.phase = "Opening the camera archive"
@@ -3221,7 +3290,7 @@ def authorized(header: str) -> bool:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "TVTArchiveBridge/1.1.3"
+    server_version = "TVTArchiveBridge/1.1.4"
     timeout = 60
 
     def log_message(self, fmt: str, *args: Any) -> None:
@@ -3448,8 +3517,13 @@ class Handler(BaseHTTPRequestHandler):
             if match:
                 at = None if match.group(2) == "latest" else parse_local_timestamp(match.group(2))
                 cache = "private, max-age=600" if at is None else "private, max-age=604800"
+                try:
+                    thumbnail = get_thumbnail(match.group(1), at)
+                except ThumbnailBusy:
+                    self._error(503, "A viewer is using this camera", head_only=head_only)
+                    return
                 self._send_range(
-                    get_thumbnail(match.group(1), at),
+                    thumbnail,
                     "image/jpeg",
                     {"Cache-Control": cache},
                     head_only=head_only,
@@ -3524,6 +3598,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         path = parsed.path.rstrip("/")
         try:
+            if path == "/api/thumbnails/hold":
+                hold_thumbnails()
+                self._json({"held": True})
+                return
             if path == "/api/cameras":
                 self._json(add_camera_definition(self._read_json()), 201)
                 return

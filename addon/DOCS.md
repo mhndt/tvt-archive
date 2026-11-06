@@ -5,7 +5,7 @@ Optional. The TVT Archive integration includes a built-in bridge, so this app is
 ## Setup
 
 1. Start the app.
-2. Install TVT Archive from HACS and restart Home Assistant.
+2. Install TVT Archive from Settings > Marketplace.
 3. Open Settings > Devices & services and configure the discovered integration.
 
 The camera must be reachable from the Home Assistant host.

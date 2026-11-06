@@ -6,9 +6,38 @@ import re
 import sys
 from pathlib import Path
 
-from version_refs import version_lines
-
 ROOT = Path(__file__).resolve().parents[1]
+VERSION_RE = r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?"
+
+VERSION_LINES = {
+    "VERSION": ("@VERSION@",),
+    "custom_components/tvt_archive/manifest.json": ('  "version": "@VERSION@"',),
+    "addon/config.yaml": ('version: "@VERSION@"',),
+    "Dockerfile": ("ARG APP_VERSION=@VERSION@",),
+    ".env.example": ("TVT_ARCHIVE_IMAGE=ghcr.io/mhndt/tvt-archive:@VERSION@",),
+    "compose/compose.yaml": (
+        "    image: ${TVT_ARCHIVE_IMAGE:-ghcr.io/mhndt/tvt-archive:@VERSION@}",
+    ),
+    "compose/build-local.yaml": (
+        "    image: ${TVT_ARCHIVE_LOCAL_IMAGE:-tvt-archive:@VERSION@-local}",
+        '        APP_VERSION: "@VERSION@"',
+    ),
+    "setup.sh": (
+        "TVT_ARCHIVE_IMAGE=${TVT_ARCHIVE_IMAGE:-ghcr.io/mhndt/tvt-archive:@VERSION@}",
+        "TVT_ARCHIVE_LOCAL_IMAGE=${TVT_ARCHIVE_LOCAL_IMAGE:-tvt-archive:@VERSION@-local}",
+    ),
+    "custom_components/tvt_archive/bridge/bridge.py": (
+        'APP_VERSION = "@VERSION@"',
+        '    server_version = "TVTArchiveBridge/@VERSION@"',
+    ),
+}
+
+
+def version_lines(version: str) -> dict[str, tuple[str, ...]]:
+    return {
+        path: tuple(line.replace("@VERSION@", version) for line in lines)
+        for path, lines in VERSION_LINES.items()
+    }
 
 
 def fail(message: str) -> None:
@@ -19,8 +48,28 @@ def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
+def set_version(new: str) -> None:
+    if not re.fullmatch(VERSION_RE, new):
+        fail(f"not a supported version: {new!r}")
+    old_lines, new_lines = version_lines(read("VERSION").strip()), version_lines(new)
+    pending = {}
+    for path, lines in old_lines.items():
+        content = read(path)
+        for old, replacement in zip(lines, new_lines[path], strict=True):
+            content, count = re.subn(rf"(?m)^{re.escape(old)}$", replacement, content)
+            if count != 1:
+                fail(f"expected one version line in {path}: {old!r}")
+        pending[path] = content
+    for path, content in pending.items():
+        (ROOT / path).write_text(content, encoding="utf-8", newline="\n")
+
+
+if len(sys.argv) == 3 and sys.argv[1] == "--set":
+    set_version(sys.argv[2])
+    sys.argv = sys.argv[:1]
+
 version = read("VERSION").strip()
-if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", version):
+if not re.fullmatch(VERSION_RE, version):
     fail(f"VERSION is not a supported semantic version: {version!r}")
 if len(sys.argv) > 1 and sys.argv[1] != version:
     fail(f"tag/release version {sys.argv[1]!r} does not match VERSION {version!r}")

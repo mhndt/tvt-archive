@@ -144,3 +144,23 @@ async def test_last_entry_removes_the_panel(hass: HomeAssistant, api: AsyncMock)
     await hass.config_entries.async_remove(entry.entry_id)
     await hass.async_block_till_done()
     assert "tvt-archive" not in hass.data["frontend_panels"]
+
+
+async def test_panel_can_hold_thumbnails_over_the_websocket(
+    hass: HomeAssistant, api: AsyncMock, hass_ws_client
+) -> None:
+    api.cameras.return_value = {"cameras": [CAMERA, BACK]}
+    api.base_url = URL
+    for camera in (CAMERA, BACK):
+        entry = camera_entry(camera)
+        entry.add_to_hass(hass)
+        await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    client = await hass_ws_client(hass)
+    await client.send_json_auto_id({"type": "tvt_archive/hold_thumbnails"})
+    assert (await client.receive_json())["success"]
+    api.hold_thumbnails.assert_awaited_once()
+
+    api.hold_thumbnails.side_effect = TVTArchiveApiError("An older bridge")
+    await client.send_json_auto_id({"type": "tvt_archive/hold_thumbnails"})
+    assert (await client.receive_json())["success"]

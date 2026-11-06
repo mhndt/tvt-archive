@@ -827,7 +827,7 @@ class TVTArchivePanel extends HTMLElement {
     // Capture phase: keep HA's single-key shortcuts from firing too.
     window.addEventListener("keydown", this._onKeyDown, true);
     this._render();
-    if (this._loaded) this._loadStatus();
+    if (this._loaded) this._holdThumbnails().then(() => this._loadStatus());
     if (this._loaded && this._downloadJobId) {
       clearTimeout(this._pollTimer);
       this._busy = true;
@@ -893,8 +893,11 @@ class TVTArchivePanel extends HTMLElement {
     } catch (_) {}
   }
 
+  _holdThumbnails() { return this._hass.callWS({type: "tvt_archive/hold_thumbnails"}).catch(() => {}); }
+
   async _bootstrap() {
     try {
+      await this._holdThumbnails();
       this._restoreState();
       this._applyNavigationParams();
       await this._loadCameras();
@@ -1428,6 +1431,7 @@ class TVTArchivePanel extends HTMLElement {
 
   async _playRecording(automaticRetry = false) {
     if (this._busy) return;
+    this._holdThumbnails();
     if (!this._hasRecordingAt(this._selectedSec)) {
       this._error = "";
       this._message = "No recording at this time";

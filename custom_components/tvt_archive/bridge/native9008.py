@@ -514,6 +514,24 @@ class TVT9008Client:
             "used_gb": round(sizes["usedSize"] / 1024, 1) if "usedSize" in sizes else None,
         }
 
+    def wifi(self) -> dict[str, int | None] | None:
+        info = _strip_http(self.config_command("GetDeviceInfo").body).decode(errors="replace")
+        if not re.search(r"<supportWifi[^>]*>\s*true", info):
+            return None
+        text = _strip_http(self.config_command("GetWifiListInfo").body).decode(errors="replace")
+        for item in re.findall(r"<item(?:\s[^>]*)?>(.*?)</item>", text, re.S):
+            fields = dict(re.findall(r"<(\w+)[^>]*>\s*([^<]*?)\s*</\1>", item))
+            if fields.get("isConnected") in ("1", "true") and fields.get("quality", "").isdigit():
+                return {
+                    key: int(fields[tag]) if fields.get(tag, "").isdigit() else None
+                    for key, tag in (
+                        ("quality", "quality"),
+                        ("rate_mbps", "rates"),
+                        ("channel", "channel"),
+                    )
+                }
+        return None
+
     def record_types(self) -> tuple[str, ...]:
         # Some firmware returns unquoted attributes here, so skip the XML parser.
         text = _strip_http(self.config_command("GetRecordType").body).decode(errors="replace")

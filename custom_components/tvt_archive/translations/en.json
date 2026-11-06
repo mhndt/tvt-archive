@@ -126,6 +126,17 @@
       "latest_recording": {
         "name": "Latest recording"
       },
+      "wifi_signal": {
+        "name": "WiFi signal",
+        "state_attributes": {
+          "rate_mbps": {
+            "name": "Link rate"
+          },
+          "channel": {
+            "name": "Channel"
+          }
+        }
+      },
       "sd_card": {
         "name": "SD card",
         "state": {

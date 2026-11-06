@@ -5,10 +5,15 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorEntityDescription
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorEntityDescription,
+    SensorStateClass,
+)
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EntityCategory, UnitOfTime
-from homeassistant.core import HomeAssistant
+from homeassistant.const import PERCENTAGE, EntityCategory, UnitOfTime
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.util import dt as dt_util
 
@@ -20,6 +25,7 @@ from .entity import TVTArchiveEntity
 class TVTSensorDescription(SensorEntityDescription):
     value_fn: Callable[[dict[str, Any]], Any]
     attrs_fn: Callable[[dict[str, Any]], dict[str, Any]] | None = None
+    exists_fn: Callable[[dict[str, Any]], bool] = lambda _: True
     timestamp: bool = False
 
 
@@ -70,6 +76,19 @@ DESCRIPTIONS = (
             k: v for k, v in s.get("sd_card", {}).items() if k in ("total_gb", "used_gb")
         },
     ),
+    TVTSensorDescription(
+        key="wifi_signal",
+        translation_key="wifi_signal",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        native_unit_of_measurement=PERCENTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:wifi",
+        exists_fn=lambda s: "wifi" in s,
+        value_fn=lambda s: s.get("wifi", {}).get("quality"),
+        attrs_fn=lambda s: {
+            k: v for k, v in s.get("wifi", {}).items() if k in ("rate_mbps", "channel")
+        },
+    ),
 )
 
 
@@ -78,19 +97,32 @@ async def async_setup_entry(
 ) -> None:
     data = hass.data[DOMAIN][entry.entry_id]
     coordinator = data["coordinator"]
-    entities = []
-    for camera in coordinator.data.get("cameras", []):
-        for description in DESCRIPTIONS:
-            entities.append(
-                TVTArchiveSensor(
-                    coordinator,
-                    entry.entry_id,
-                    str(camera["id"]),
-                    str(camera.get("name", camera["id"])),
-                    description,
+    added: set[tuple[str, str]] = set()
+
+    @callback
+    def add_entities() -> None:
+        entities = []
+        for camera in coordinator.data.get("cameras", []):
+            camera_id = str(camera["id"])
+            status = coordinator.data.get("statuses", {}).get(camera_id, {})
+            for description in DESCRIPTIONS:
+                if (camera_id, description.key) in added or not description.exists_fn(status):
+                    continue
+                added.add((camera_id, description.key))
+                entities.append(
+                    TVTArchiveSensor(
+                        coordinator,
+                        entry.entry_id,
+                        camera_id,
+                        str(camera.get("name", camera_id)),
+                        description,
+                    )
                 )
-            )
-    async_add_entities(entities)
+        if entities:
+            async_add_entities(entities)
+
+    add_entities()
+    entry.async_on_unload(coordinator.async_add_listener(add_entities))
 
 
 class TVTArchiveSensor(TVTArchiveEntity, SensorEntity):

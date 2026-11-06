@@ -58,6 +58,44 @@ class NativePlaybackTests(unittest.TestCase):
             client.sd_card(), {"status": "no_sd_card", "total_gb": None, "used_gb": None}
         )
 
+    def test_wifi_reads_the_connected_network(self) -> None:
+        client = native9008.TVT9008Client("192.0.2.1", 9008, "user", "pass")
+        replies = {
+            "GetDeviceInfo": b'<config><supportWifi type="boolean">true</supportWifi></config>',
+            "GetWifiListInfo": (
+                b'<config><wifiList total="2" type="list"><itemType><ssid/><quality type="uint32"/>'
+                b"</itemType><item><ssid><![CDATA[other]]></ssid><channel>1</channel>"
+                b"<quality>99</quality><rates>300</rates><isConnected>0</isConnected></item>"
+                b"<item><ssid><![CDATA[mine]]></ssid><channel>9</channel><quality>84</quality>"
+                b"<rates>150</rates><isConnected>1</isConnected></item></wifiList></config>"
+            ),
+        }
+        client.config_command = lambda name: native9008.InnerFrame(0, 0, 3, replies[name])
+        self.assertEqual(client.wifi(), {"quality": 84, "rate_mbps": 150, "channel": 9})
+
+        replies["GetWifiListInfo"] = b'<config><wifiList total="0" type="list"/></config>'
+        self.assertIsNone(client.wifi())
+
+        replies["GetWifiListInfo"] = b'<response status="failed" errorCode="499"/>'
+        self.assertIsNone(client.wifi())
+
+    def test_wifi_skips_devices_without_it(self) -> None:
+        client = native9008.TVT9008Client("192.0.2.1", 9008, "user", "pass")
+        for info in (
+            b'<config><supportWifi type="boolean">false</supportWifi></config>',
+            b"<config><model>wired</model></config>",
+            b'<response status="failed" errorCode="499"/>',
+        ):
+            asked = []
+
+            def command(name, info=info, asked=asked):
+                asked.append(name)
+                return native9008.InnerFrame(0, 0, 3, info)
+
+            client.config_command = command
+            self.assertIsNone(client.wifi())
+            self.assertEqual(asked, ["GetDeviceInfo"])
+
     def test_record_types_tolerate_unquoted_attributes(self) -> None:
         client = native9008.TVT9008Client("192.0.2.1", 9008, "user", "pass")
         reply = (
