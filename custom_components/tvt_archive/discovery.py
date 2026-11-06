@@ -41,7 +41,7 @@ async def async_greets(host: str, port: int = DEFAULT_PORT, timeout: float = 3) 
 async def _async_scan(hass: HomeAssistant, entries: Iterable[ConfigEntry]) -> None:
     current = hass.config_entries.async_entries(DOMAIN)
     if any(CONF_CAMERA_ID not in e.data for e in current if e.source != "ignore"):
-        return  # Pre-1.1 entries own their cameras until they are split.
+        return
     known = {e.unique_id for e in current}
     for entry in entries:
         host = entry.data.get(CONF_HOST)

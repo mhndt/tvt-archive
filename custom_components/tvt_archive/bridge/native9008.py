@@ -61,11 +61,11 @@ EXPECTED_AUDIO_BYTES = 320
 
 
 class TVT9008Error(RuntimeError):
-    """Raised for transport or protocol failures."""
+    pass
 
 
 class TVT9008AuthError(TVT9008Error, ValueError):
-    """Raised when the camera rejects the username or password."""
+    pass
 
 
 @dataclass

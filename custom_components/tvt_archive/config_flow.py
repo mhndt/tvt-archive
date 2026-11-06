@@ -220,7 +220,8 @@ class TVTArchiveConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             shared = [e for e in self._async_current_entries() if bridge_key(e.data) == key]
             used = {str(e.data.get(CONF_CAMERA_ID)) for e in shared}
             if any(CONF_CAMERA_ID not in e.data for e in shared):
-                used.update(str(c["id"]) for c in cameras)  # Not split yet, so all taken.
+                # Not split yet, so all taken.
+                used.update(str(c["id"]) for c in cameras)
             self._orphans = {str(c["id"]): c for c in cameras if str(c["id"]) not in used}
             if not self._orphans or self._defaults:
                 return await self.async_step_camera()
@@ -324,7 +325,7 @@ class TVTArchiveConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 await api.cameras()
             except TVTArchiveAuthError:
                 return await self.async_step_reauth_token()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
         return await self.async_step_reauth_confirm()
 
@@ -345,7 +346,7 @@ class TVTArchiveConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         else:
             try:
                 camera = await self._entry_camera(entry)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 return self.async_abort(reason="cannot_connect")
             self._defaults = {CONF_USERNAME: camera.get(CONF_USERNAME, "admin")}
         return self.async_show_form(
@@ -421,7 +422,7 @@ class TVTArchiveConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         else:
             try:
                 camera = await self._entry_camera(entry)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 return self.async_abort(reason="cannot_connect")
             if not camera:
                 return self.async_abort(reason="camera_not_found")

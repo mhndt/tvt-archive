@@ -37,7 +37,6 @@ if any(name.startswith("custom_components/") for name in names): raise SystemExi
 if "frontend/hls.min.js" not in names: raise SystemExit("HACS package is missing frontend/hls.min.js")
 if "brand/icon.png" not in names or "brand/logo.png" not in names: raise SystemExit("HACS package is missing local integration brand assets")
 
-# What HACS installs has to match what is in the repository.
 import subprocess
 
 tracked = subprocess.run(

@@ -98,7 +98,6 @@ for path, expected_lines in version_lines(version).items():
         if lines.count(expected) != 1:
             fail(f"{path} must contain exactly one version line {expected!r}")
 
-# A broad version replacement once changed this IPv4 address along with the app.
 if re.findall(r"\bip -4 route get (\S+)", read("setup.sh")) != ["1.1.1.1"]:
     fail("setup.sh route probe must stay 1.1.1.1; it is not an application version")
 

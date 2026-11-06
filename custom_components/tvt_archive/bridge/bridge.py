@@ -1584,7 +1584,7 @@ def playback_video_mode(camera_id: str) -> str:
 
 
 def video_args(quality: str, mode: str, gop: int | None = None) -> tuple[list[str], list[str]]:
-    """Build ffmpeg video args; gop is in frames."""
+    """gop is in frames."""
     if mode == "copy":
         return [], ["-c:v", "copy"]
     if mode == "vaapi":
@@ -2729,7 +2729,6 @@ def _drain(client: TVT9008Client, seconds: float, stop: threading.Event) -> None
 
 
 def _range_body(start: dt.datetime, stop: dt.datetime) -> bytes:
-    # mktime assumes the bridge and camera share a timezone.
     return TVT9008Client._playback_body(
         int(time.mktime(start.timetuple())), int(time.mktime(stop.timetuple()))
     )

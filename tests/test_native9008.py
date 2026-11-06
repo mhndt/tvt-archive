@@ -219,12 +219,12 @@ class NativePlaybackTests(unittest.TestCase):
     def _capture_client(self, frames):
         client = native9008.TVT9008Client("camera", 9008, "user", "password")
         sent: list[tuple[int, int, bytes]] = []
-        client.send = lambda kind, request_id, body=b"": sent.append((kind, request_id, body))  # type: ignore[method-assign]
+        client.send = lambda kind, request_id, body=b"": sent.append((kind, request_id, body))
         client.wait_for = lambda kind, request_id, timeout: native9008.InnerFrame(
             kind, request_id or 0, 3, b""
-        )  # type: ignore[method-assign]
+        )
         iterator = iter(frames)
-        client.read_frame = lambda: next(iterator)  # type: ignore[method-assign]
+        client.read_frame = lambda: next(iterator)
         return client, sent
 
     def test_continuation_follows_the_bag_end_marker(self) -> None:
@@ -269,7 +269,7 @@ class NativePlaybackTests(unittest.TestCase):
                 time.sleep(0.05)
                 raise TimeoutError("timed out") from None
 
-        client.read_frame = read_frame  # type: ignore[method-assign]
+        client.read_frame = read_frame
         with tempfile.TemporaryDirectory() as directory:
             summary = client.capture(start, 6, Path(directory))
         kinds = [kind for kind, _, _ in sent]
@@ -278,10 +278,10 @@ class NativePlaybackTests(unittest.TestCase):
 
     def test_midstream_video_stall_raises_timeout(self) -> None:
         client = native9008.TVT9008Client("camera", 9008, "user", "password")
-        client.send = lambda *args, **kwargs: None  # type: ignore[method-assign]
+        client.send = lambda *args, **kwargs: None
         client.wait_for = lambda kind, request_id, timeout: native9008.InnerFrame(
             kind, request_id or 0, 3, b""
-        )  # type: ignore[method-assign]
+        )
 
         start = datetime(2026, 7, 30, 6, 49, 14)
         start_epoch = int(time.mktime(start.timetuple()))
@@ -294,7 +294,7 @@ class NativePlaybackTests(unittest.TestCase):
                 return video_frame(start_epoch * 1_000_000)
             raise native9008.socket.timeout()
 
-        client.read_frame = read_frame  # type: ignore[method-assign]
+        client.read_frame = read_frame
         original = native9008.NATIVE_VIDEO_STALL_SECONDS
         native9008.NATIVE_VIDEO_STALL_SECONDS = 0.02
         try:
@@ -332,12 +332,12 @@ class NativePlaybackTests(unittest.TestCase):
 
         fake = FakeSocket()
         original = native9008.socket.create_connection
-        native9008.socket.create_connection = lambda *args, **kwargs: fake  # type: ignore[assignment]
+        native9008.socket.create_connection = lambda *args, **kwargs: fake
         try:
             client = native9008.TVT9008Client("camera", 9008, "user", "password")
             client.wait_for = lambda *args, **kwargs: (_ for _ in ()).throw(
                 RuntimeError("login failed")
-            )  # type: ignore[method-assign]
+            )
             with self.assertRaisesRegex(RuntimeError, "login failed"):
                 client.connect()
             self.assertTrue(fake.closed)
@@ -346,7 +346,7 @@ class NativePlaybackTests(unittest.TestCase):
             client = native9008.TVT9008Client("camera", 9008, "user", "password")
             client.wait_for = lambda *args, **kwargs: native9008.InnerFrame(
                 native9008.KIND_LOGIN_FAILED, native9008.LOGIN_REQUEST_ID, 3, b"\x02\x00\x00\x00"
-            )  # type: ignore[method-assign]
+            )
             with self.assertRaisesRegex(native9008.TVT9008AuthError, r"code 2"):
                 client.connect()
         finally:

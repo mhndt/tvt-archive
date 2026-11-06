@@ -9,11 +9,11 @@ STREAM_TIMEOUT = ClientTimeout(total=None, sock_connect=15, sock_read=None)
 
 
 class TVTArchiveApiError(Exception):
-    """Raised when the TVT Archive bridge rejects a request."""
+    pass
 
 
 class TVTArchiveAuthError(TVTArchiveApiError):
-    """Raised when the bridge rejects the access token."""
+    pass
 
 
 class TVTArchiveApi:

@@ -60,7 +60,7 @@ From 0.9, setups that use the app keep working. To switch to the built-in bridge
 | Username, Password | Camera account with playback permission |
 | Recording audio | Auto, Always expect audio, or Disabled |
 
-Each camera is its own entry under Settings > Devices & services > TVT Archive. Reconfigure changes its address or login, and Configure chooses motion sensors. TVT cameras already set up through ONVIF are discovered.
+Each camera is its own entry under Settings > Devices & services > TVT Archive. Reconfigure changes its address or login, and Configure chooses motion sensors.
 
 # Usage
 

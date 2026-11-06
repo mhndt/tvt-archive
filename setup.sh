@@ -66,7 +66,7 @@ for _ in $(seq 1 120); do
 done
 [[ "$status" == healthy ]] || { echo "tvt-archive did not become healthy" >&2; docker compose logs --tail=200 tvt-archive; exit 1; }
 
-# Look up the local source address; this destination is not an app version.
+# Find the local source address.
 LAN_IP="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}')"
 echo "Bridge URL: http://${LAN_IP:-<docker-host-ip>}:${TVT_ARCHIVE_PORT:-8099}"
 echo "Access token: $(docker compose exec -T tvt-archive tvt-archive show-token)"

@@ -65,7 +65,6 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if entry.version > 3:
         return False
-    # Version 2 entries held a whole bridge; setup splits them per camera.
     hass.config_entries.async_update_entry(entry, version=3)
     return True
 
@@ -126,7 +125,6 @@ def _read_json(path: Path) -> dict:
 
 
 async def _async_split(hass: HomeAssistant, entry: ConfigEntry, api: TVTArchiveApi) -> bool:
-    """Turn a pre-1.1 bridge entry into one entry per camera."""
     try:
         cameras = (await api.cameras()).get("cameras", [])
     except TVTArchiveAuthError as error:
@@ -185,7 +183,7 @@ async def _async_split(hass: HomeAssistant, entry: ConfigEntry, api: TVTArchiveA
 
 
 def _adopt(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Move a split camera's entities and device over from the old bridge entry."""
+    """Move a split camera's entities and device over from the bridge entry it was split from."""
     old, camera_id = entry.data[CONF_MIGRATED_FROM], entry.data[CONF_CAMERA_ID]
     prefix = f"{old}:{camera_id}:"
     entities = er.async_get(hass)
@@ -255,7 +253,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         return False
     hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
-    # Frontend stays registered across reloads.
     if is_builtin(entry.data) and not _builtin_in_use(hass, entry):
         await async_local_bridge(hass).async_stop()
     return True
@@ -281,7 +278,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     try:
         api = await async_bridge_api(hass, entry.data)
         await api.delete_camera(str(camera_id))
-    except Exception as error:  # noqa: BLE001
+    except Exception as error:
         _LOGGER.warning("Could not remove %s from the bridge: %s", entry.title, error)
     if is_builtin(entry.data) and not _builtin_in_use(hass, entry):
         await async_local_bridge(hass).async_stop()

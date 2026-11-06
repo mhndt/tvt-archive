@@ -116,7 +116,7 @@ async def _ha_motion(hass, entry_id, data, camera_id, day) -> list[dict[str, str
         configured = auto_motion_entities(hass, host)
     try:
         return await async_motion_events(hass, configured, date.fromisoformat(day))
-    except Exception as error:  # noqa: BLE001
+    except Exception as error:
         _LOGGER.debug("Motion history unavailable: %s", error)
         return []
 

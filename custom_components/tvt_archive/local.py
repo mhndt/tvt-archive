@@ -111,7 +111,7 @@ class LocalBridge:
                     raise RuntimeError(f"bridge exited with code {process.returncode}")
                 try:
                     await self.api.health()
-                except Exception:  # noqa: BLE001
+                except Exception:
                     await asyncio.sleep(0.2)
                 else:
                     return self.api
@@ -134,7 +134,7 @@ class LocalBridge:
             return
         try:
             await self.async_start()
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:
             _LOGGER.error("Built-in bridge could not restart: %s", error)
 
     async def _async_on_stop(self, _: Event) -> None:
