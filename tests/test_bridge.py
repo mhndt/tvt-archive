@@ -464,6 +464,133 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(calls["count"], 2)
         destination.unlink(missing_ok=True)
 
+    def test_video_follows_the_cameras_clock_evenly(self) -> None:
+        jitter = [0, 13_000, -11_000, 7_000, -5_000, 15_000, -15_000, 3_000]
+        stamps = [i * 40_000 + jitter[i % len(jitter)] for i in range(400)]
+        pts = self._fed_pts(stamps, 27.25)
+        steps = [b - a for a, b in zip(pts[100:-1], pts[101:], strict=True)]
+        self.assertLess(max(abs(step - 3600) for step in steps), 90)
+        self.assertLess(abs(pts[-1] - (stamps[-1] - stamps[0]) * 9 / 100), 1800)
+
+    def test_frame_clock_keeps_recording_time(self) -> None:
+        jitter = [0, 13_000, -11_000, 7_000, -5_000, 15_000, -15_000, 3_000]
+        stamps = [1_790_000_000_000_000 + i * 40_000 + jitter[i % 8] for i in range(300)]
+        clock = bridge.FrameClock()
+        times = [clock.time(stamp) for stamp in stamps]
+        self.assertEqual(times[0], stamps[0])
+        self.assertTrue(clock.follows(stamps[-1] + 40_000))
+        self.assertFalse(clock.follows(stamps[-1] + 3_000_000))
+        self.assertLess(
+            max(abs(b - a - 40_000) for a, b in zip(times[100:-1], times[101:], strict=True)), 1000
+        )
+        self.assertLess(abs(times[-1] - stamps[-1]), 20_000)
+
+    def test_panel_audio_plays_back_to_back(self) -> None:
+        jitter = [0, 13_000, -11_000, 7_000, -5_000, 15_000, -15_000, 3_000]
+        base = 1_790_000_000_000_000
+        stamps = [base + i * 40_000 + jitter[i % 8] for i in range(1, 400)]
+        session = bridge.FrameSession("s", "c", {})
+        times = [bridge._audio_time(session, stamp, 40_000) for stamp in [base + 74_000, *stamps]]
+        steps = [b - a for a, b in zip(times, times[1:], strict=False)]
+        self.assertEqual(sum(step != 40_000 for step in steps), 1)
+        self.assertLess(abs(times[-1] - base - 399 * 40_000), 5_000)
+        later = bridge._audio_time(session, times[-1] + 9_000_000, 40_000)
+        self.assertEqual(later, times[-1] + 9_000_000)
+
+    def test_recording_gaps_are_closed(self) -> None:
+        stamps = [i * 40_000 for i in range(60)]
+        stamps += [stamps[-1] + 8_000_000 + i * 40_000 for i in range(20)]
+        pts = self._fed_pts(stamps, 25.0)
+        self.assertTrue(all(1800 <= b - a <= 5400 for a, b in zip(pts, pts[1:], strict=False)))
+
+    def test_repeated_timestamps_still_advance(self) -> None:
+        self.assertEqual(
+            self._fed_pts([1_000_000, 1_000_000, 1_040_000, 1_040_000, 1_000_000], 25.0),
+            [0, 3600, 7200, 10800, 14400],
+        )
+        self.assertEqual(self._fed_pts([0, 0, 0, 0, 0], 20.0), [0, 4500, 9000, 13500, 18000])
+
+    def _fed_pts(self, stamps: list[int], fps: float) -> list[int]:
+        frames = [
+            (b"\x00\x00\x01\x09" + bytes([i & 0xFF]) * (100 + i % 7 * 700), i)
+            for i in range(len(stamps))
+        ]
+        with tempfile.TemporaryDirectory() as folder:
+            video, index = Path(folder) / "video.h264", Path(folder) / "video.index"
+            video.write_bytes(b"".join(frame for frame, _ in frames))
+            index.write_bytes(
+                b"".join(
+                    bridge.VIDEO_INDEX.pack(len(frame), stamp)
+                    for (frame, _), stamp in zip(frames, stamps, strict=True)
+                )
+            )
+            read_fd, write_fd = os.pipe()
+            captured: list[bytes] = []
+            reader = threading.Thread(
+                target=lambda: captured.append(os.fdopen(read_fd, "rb").read()), daemon=True
+            )
+            reader.start()
+            process = MagicMock()
+            process.poll.return_value = 0
+            bridge._feed_timed_video(video, index, write_fd, process, threading.Event(), fps)
+            reader.join(5)
+        stream = captured[0]
+        self.assertEqual(len(stream) % bridge.TS_PACKET, 0)
+        packets = [stream[i : i + 188] for i in range(0, len(stream), 188)]
+        self.assertTrue(all(packet[0] == 0x47 for packet in packets))
+        pts = []
+        payload = bytearray()
+        counters = []
+        for packet in packets:
+            if (packet[1] & 0x1F) << 8 | packet[2] != bridge.TS_VIDEO_PID:
+                continue
+            counters.append(packet[3] & 0x0F)
+            start = 4 + (packet[4] + 1 if packet[3] & 0x20 else 0)
+            body = packet[start:]
+            if packet[1] & 0x40:
+                self.assertEqual(body[:4], b"\x00\x00\x01\xe0")
+                t = body[9:14]
+                pts.append(
+                    (t[0] >> 1 & 7) << 30 | t[1] << 22 | (t[2] >> 1) << 15 | t[3] << 7 | t[4] >> 1
+                )
+                body = body[14:]
+            payload += body
+        self.assertEqual(bytes(payload), b"".join(frame for frame, _ in frames))
+        self.assertEqual(counters, [i & 0x0F for i in range(len(counters))])
+        return pts
+
+    def test_newest_thumbnail_goes_first(self) -> None:
+        gate = bridge._NewestFirst()
+        first = datetime(2026, 9, 5, 12, 0)
+        gate.acquire(first, lambda: False)
+        order: list[int] = []
+
+        def wait(hour: int) -> None:
+            gate.acquire(datetime(2026, 9, 5, hour, 0), lambda: False)
+            order.append(hour)
+            gate.release()
+
+        threads = [threading.Thread(target=wait, args=(hour,)) for hour in (3, 9, 6)]
+        for thread in threads:
+            thread.start()
+        deadline = time.monotonic() + 5
+        while len(gate.waiting) < 3 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        gate.release()
+        for thread in threads:
+            thread.join(5)
+        self.assertEqual(order, [9, 6, 3])
+
+    def test_waiting_thumbnail_gives_way_to_a_viewer(self) -> None:
+        gate = bridge._NewestFirst()
+        gate.acquire(datetime(2026, 9, 5, 12, 0), lambda: False)
+        with self.assertRaises(bridge.ThumbnailBusy):
+            gate.acquire(datetime(2026, 9, 5, 13, 0), lambda: True)
+        self.assertEqual(gate.waiting, [])
+        gate.release()
+        gate.acquire(datetime(2026, 9, 5, 14, 0), lambda: False)
+        gate.release()
+
     def test_growing_playlist_is_not_played_as_live(self) -> None:
         playlist = b"#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\ns.m4s\n"
         self.assertEqual(

@@ -45,6 +45,7 @@ NATIVE_CAPTURE_DEADLINE_FACTOR = max(
     2.0, min(float(os.environ.get("TVT_ARCHIVE_NATIVE_CAPTURE_DEADLINE_FACTOR", "6")), 10.0)
 )
 KIND_RECORDED_MEDIA = 0x01000C05
+VIDEO_INDEX = struct.Struct("<IQ")
 
 LOGIN_REQUEST_ID = 0x00000105
 CONFIG_REQUEST_ID = 0x0000FFFF
@@ -620,6 +621,7 @@ class TVT9008Client:
     ) -> CaptureSummary:
         output_directory.mkdir(parents=True, exist_ok=True)
         video_path = output_directory / "video.h264"
+        index_path = output_directory / "video.index"
         audio_path = output_directory / "audio.alaw"
         timing_path = output_directory / "timing.json"
         summary_path = output_directory / "summary.json"
@@ -674,6 +676,7 @@ class TVT9008Client:
         write_timing()
         with (
             video_path.open("wb", buffering=0) as video,
+            index_path.open("wb", buffering=0) as index,
             audio_path.open("wb", buffering=0) as audio,
         ):
             while time.monotonic() < deadline:
@@ -717,6 +720,7 @@ class TVT9008Client:
                 media_type, payload, timestamp_us, keyframe = self._extract_media(frame)
                 if media_type == "video":
                     video.write(payload)
+                    index.write(VIDEO_INDEX.pack(len(payload), timestamp_us))
                     last_video_wall = time.monotonic()
                     summary.video_frames += 1
                     summary.video_bytes += len(payload)

@@ -40,12 +40,13 @@ from native9008 import (
     KIND_RECORDED_MEDIA,
     MEDIA_HEADER_SIZE,
     REC_TYPES,
+    VIDEO_INDEX,
     TVT9008AuthError,
     TVT9008Client,
     TVT9008Error,
 )
 
-APP_VERSION = "1.1.6"
+APP_VERSION = "1.1.7"
 BASE = Path(os.environ.get("TVT_ARCHIVE_BASE", "/opt/tvt-archive"))
 CONFIG_DIRECTORY = Path(
     os.environ.get(
@@ -546,6 +547,11 @@ class FrameSession:
     video_floor_us: int = 0
     audio_floor_us: int = 0
     audio_us: int = 0
+    video_clock: FrameClock | None = None
+    audio_next: int = 0
+    audio_offsets: collections.deque = dataclasses.field(
+        default_factory=lambda: collections.deque(maxlen=TIMING_WINDOW), repr=False
+    )
     stop_event: threading.Event = dataclasses.field(default_factory=threading.Event, repr=False)
     ready: threading.Condition = dataclasses.field(default_factory=threading.Condition, repr=False)
     queue: collections.deque = dataclasses.field(default_factory=collections.deque, repr=False)
@@ -1446,9 +1452,34 @@ class ThumbnailBusy(Exception):
 
 
 THUMBNAIL_HOLD_SECONDS = 15
-THUMBNAIL_LOCKS: collections.defaultdict[str, threading.Lock] = collections.defaultdict(
-    threading.Lock
-)
+
+
+class _NewestFirst:
+    def __init__(self) -> None:
+        self.changed = threading.Condition()
+        self.busy = False
+        self.waiting: list[dt.datetime] = []
+
+    def acquire(self, start: dt.datetime, give_up: Callable[[], bool]) -> None:
+        with self.changed:
+            self.waiting.append(start)
+            try:
+                while self.busy or start != max(self.waiting):
+                    if give_up():
+                        raise ThumbnailBusy
+                    self.changed.wait(0.2)
+                self.busy = True
+            finally:
+                self.waiting.remove(start)
+                self.changed.notify_all()
+
+    def release(self) -> None:
+        with self.changed:
+            self.busy = False
+            self.changed.notify_all()
+
+
+THUMBNAIL_LOCKS: collections.defaultdict[str, _NewestFirst] = collections.defaultdict(_NewestFirst)
 thumbnail_hold_until = 0.0
 
 
@@ -1489,9 +1520,7 @@ def get_thumbnail(camera_id: str, start: dt.datetime | None) -> Path:
     if path.exists():
         return path
     lock = THUMBNAIL_LOCKS[camera_id]
-    while not lock.acquire(timeout=0.2):
-        if _camera_in_use(camera_id):
-            raise ThumbnailBusy
+    lock.acquire(start, lambda: _camera_in_use(camera_id))
     try:
         if path.exists():
             return path
@@ -2128,6 +2157,165 @@ def _write_pipe_bytes(fd: int, payload: bytes, stop: threading.Event) -> bool:
     return not stop.is_set()
 
 
+def _ts_crc(data: bytes) -> bytes:
+    crc = 0xFFFFFFFF
+    for byte in data:
+        crc ^= byte << 24
+        for _ in range(8):
+            crc = (crc << 1 ^ 0x04C11DB7 if crc & 0x80000000 else crc << 1) & 0xFFFFFFFF
+    return crc.to_bytes(4, "big")
+
+
+def _ts_section(pid: int, section: bytes) -> bytes:
+    body = section + _ts_crc(section)
+    head = bytes((0x47, 0x40 | pid >> 8, pid & 0xFF, 0x10, 0))
+    return head + body + b"\xff" * (TS_PACKET - len(head) - len(body))
+
+
+TS_PACKET = 188
+TS_VIDEO_PID = 0x100
+TS_TABLES = _ts_section(0, bytes.fromhex("00b00d0001c100000001f000")) + _ts_section(
+    0x1000,
+    bytes.fromhex("02b0120001c10000e100f0001be100f000"),
+)
+TS_TABLE_INTERVAL = 25
+MAX_FRAME_GAP_US = 2_000_000
+TIMING_WINDOW = 50
+
+
+class FrameClock:
+    def __init__(self, step: float = 0.0) -> None:
+        self.step = step
+        self.clock = self.position = 0.0
+        self.origin = 0
+        self.last: int | None = None
+        self.recent = collections.deque(
+            (i * step for i in range(-TIMING_WINDOW if step else 0, 1)), maxlen=TIMING_WINDOW + 1
+        )
+
+    def follows(self, stamp: int) -> bool:
+        return self.last is not None and abs(stamp - self.last) <= MAX_FRAME_GAP_US
+
+    def time(self, stamp: int) -> int:
+        if self.last is None:
+            self.origin = stamp
+        else:
+            gap = stamp - self.last
+            self.clock += gap if 0 < gap <= MAX_FRAME_GAP_US else self.step
+            self.recent.append(self.clock)
+            self.step = (self.recent[-1] - self.recent[0]) / (len(self.recent) - 1)
+            error = self.clock - self.position - self.step
+            self.position += max(
+                self.step / 2, self.step + error / min(len(self.recent), TIMING_WINDOW)
+            )
+        self.last = stamp
+        return self.origin + round(self.position)
+
+
+def _ts_frame(frame: bytes, pts: int, counter: int) -> tuple[bytes, int]:
+    stamp = bytes(
+        (
+            0x21 | (pts >> 29 & 0x0E),
+            pts >> 22 & 0xFF,
+            0x01 | (pts >> 14 & 0xFE),
+            pts >> 7 & 0xFF,
+            0x01 | (pts << 1 & 0xFE),
+        )
+    )
+    data = memoryview(b"\x00\x00\x01\xe0\x00\x00\x80\x80\x05" + stamp + frame)
+    out = bytearray()
+    first = True
+    while data:
+        field = b""
+        if first:
+            base = pts & 0x1FFFFFFFF
+            field = b"\x10" + (base << 15 | 0x7E00).to_bytes(6, "big")
+        room = TS_PACKET - 4
+        used = len(field) + 1 if field else 0
+        take = min(len(data), room - used)
+        pad = room - used - take
+        if pad:
+            if field:
+                field += b"\xff" * pad
+            elif pad == 1:
+                field, used = None, 1
+            else:
+                field = b"\x00" + b"\xff" * (pad - 2)
+        out += bytes(
+            (
+                0x47,
+                (0x40 if first else 0) | TS_VIDEO_PID >> 8,
+                TS_VIDEO_PID & 0xFF,
+                (0x30 if field is None or field else 0x10) | counter,
+            )
+        )
+        if field is None:
+            out.append(0)
+        elif field:
+            out.append(len(field))
+            out += field
+        out += data[:take]
+        data = data[take:]
+        counter = (counter + 1) & 0x0F
+        first = False
+    return bytes(out), counter
+
+
+def _feed_timed_video(
+    source: Path,
+    index: Path,
+    write_fd: int,
+    capture_process: subprocess.Popen[bytes],
+    stop_event: threading.Event,
+    source_fps: float,
+) -> None:
+    def send(data: bytes) -> bool:
+        view = memoryview(data)
+        while view and not stop_event.is_set():
+            try:
+                view = view[os.write(write_fd, view) :]
+            except OSError:
+                return False
+        return not view
+
+    try:
+        while not index.exists() and capture_process.poll() is None and not stop_event.wait(0.02):
+            pass
+        if not index.exists():
+            return
+        with source.open("rb", buffering=0) as video, index.open("rb", buffering=0) as frames:
+            pending = b""
+            frame_count = counter = 0
+            timing = FrameClock(1_000_000 / source_fps)
+            while not stop_event.is_set():
+                pending += frames.read(VIDEO_INDEX.size * 64) or b""
+                if len(pending) < VIDEO_INDEX.size:
+                    if capture_process.poll() is not None and not frames.read(1):
+                        break
+                    stop_event.wait(0.02)
+                    continue
+                size, stamp = VIDEO_INDEX.unpack_from(pending)
+                pending = pending[VIDEO_INDEX.size :]
+                frame = b""
+                while len(frame) < size:
+                    chunk = video.read(size - len(frame))
+                    if chunk:
+                        frame += chunk
+                    elif stop_event.wait(0.01):
+                        return
+                position = timing.time(stamp) - timing.origin
+                head = TS_TABLES if not frame_count % TS_TABLE_INTERVAL else b""
+                frame_count += 1
+                packets, counter = _ts_frame(frame, position * 9 // 100, counter)
+                if not send(head + packets):
+                    return
+    finally:
+        try:
+            os.close(write_fd)
+        except OSError:
+            pass
+
+
 def _feed_expected_archive_audio(
     source: Path,
     directory: Path,
@@ -2375,13 +2563,8 @@ def _hls_command(video_input: str, audio_input: str | None, session: PlaybackSes
         *pre_input,
         "-thread_queue_size",
         "512",
-        "-r",
-        f"{session.source_fps:.6f}",
-        # Raw H.264 has no timestamps; ffmpeg 8 otherwise holds audio back forever.
-        "-bsf:v",
-        f"setts=ts=N/({session.source_fps:.6f}*TB)",
         "-f",
-        "h264",
+        "mpegts",
         "-i",
         video_input,
     ]
@@ -2404,7 +2587,7 @@ def _hls_command(video_input: str, audio_input: str | None, session: PlaybackSes
         ]
     else:
         command += ["-map", "0:v:0", "-an"]
-    command += video_output
+    command += [*video_output, "-fps_mode", "passthrough", "-enc_time_base:v", "-1"]
     if audio_input is not None:
         filters: list[str] = []
         total_offset = (
@@ -2596,8 +2779,15 @@ def generate_hls_session(session: PlaybackSession) -> None:
             assert session.capture_process is not None
             feeder_threads.append(
                 threading.Thread(
-                    target=_feed_growing_file,
-                    args=(video_path, video_write, session.capture_process, stop_feeders),
+                    target=_feed_timed_video,
+                    args=(
+                        video_path,
+                        directory / "video.index",
+                        video_write,
+                        session.capture_process,
+                        stop_feeders,
+                        session.source_fps,
+                    ),
                     name=f"{session.camera_id}-hls-video",
                     daemon=True,
                 )
@@ -2820,6 +3010,8 @@ def _switch_stream(session: FrameSession, transcoder: Transcoder | None) -> None
         session.pending_target = None
         session.seek_reconnects = 0
         session.video_floor_us = session.audio_floor_us = 0
+        session.video_clock = None
+        session.audio_next = 0
         session.queue.clear()
         session.delivered = session.rendered = 0
         session.bag_pending = False
@@ -3052,17 +3244,36 @@ def _pump_frames(
                 session.first_us = pts_us
             session.media_us = max(session.media_us, pts_us - session.first_us)
             session.position_us = pts_us
+            if session.video_clock is None or not session.video_clock.follows(pts_us):
+                session.video_clock = FrameClock()
+            shown_us = session.video_clock.time(pts_us)
             if transcoder is not None:
-                transcoder.feed(payload, pts_us, keyframe)
+                transcoder.feed(payload, shown_us, keyframe)
             else:
                 session.push(
                     REC_VIDEO,
-                    frame_record(REC_VIDEO, KEYFRAME_FLAG if keyframe else 0, pts_us, payload),
+                    frame_record(REC_VIDEO, KEYFRAME_FLAG if keyframe else 0, shown_us, payload),
                 )
         elif media_type == "audio":
             session.has_audio = True
-            session.audio_us = pts_us
-            session.push(REC_AUDIO, frame_record(REC_AUDIO, 0, pts_us, payload))
+            heard_us = _audio_time(session, pts_us, len(payload) * 1_000_000 // ALAW_SAMPLE_RATE)
+            session.push(REC_AUDIO, frame_record(REC_AUDIO, 0, heard_us, payload))
+
+
+def _audio_time(session: FrameSession, pts_us: int, length_us: int) -> int:
+    offsets = session.audio_offsets
+    if abs(pts_us - session.audio_next) > MAX_FRAME_GAP_US:
+        session.audio_next = pts_us
+        offsets.clear()
+    session.audio_us = pts_us
+    offsets.append(pts_us - session.audio_next)
+    drift = sum(offsets) / len(offsets)
+    if len(offsets) == TIMING_WINDOW and abs(drift) > length_us:
+        session.audio_next += round(drift)
+        offsets.clear()
+    heard_us = session.audio_next
+    session.audio_next += length_us
+    return heard_us
 
 
 def run_frame_session(session: FrameSession) -> None:
@@ -3297,7 +3508,7 @@ def authorized(header: str) -> bool:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "TVTArchiveBridge/1.1.6"
+    server_version = "TVTArchiveBridge/1.1.7"
     timeout = 60
 
     def log_message(self, fmt: str, *args: Any) -> None:
