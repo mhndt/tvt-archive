@@ -13,6 +13,7 @@ from homeassistant.helpers import device_registry as dr
 
 from .api import TVTArchiveApiError
 from .const import DOMAIN
+from .coordinator import camera_zone
 
 RECORDING_LAG = timedelta(seconds=15)
 
@@ -48,12 +49,12 @@ async def _async_save(hass: HomeAssistant, call: ServiceCall) -> ServiceResponse
 async def _async_export(hass: HomeAssistant, call: ServiceCall) -> ServiceResponse:
     data, camera_id = _camera(hass, call.data["device_id"])
     duration = call.data["duration"]
-    # The bridge reads camera times as the host's local time.
+    zone = camera_zone(data["coordinator"].data.get("statuses", {}).get(camera_id, {}))
     start: datetime = call.data.get("start") or (
-        datetime.now() - RECORDING_LAG - timedelta(seconds=duration)
+        datetime.now(zone) - RECORDING_LAG - timedelta(seconds=duration)
     )
     if start.tzinfo:
-        start = start.astimezone().replace(tzinfo=None)
+        start = start.astimezone(zone).replace(tzinfo=None)
     api = data["api"]
     job = await api.create_job(
         camera_id, {"start": start.isoformat(timespec="seconds"), "duration": duration}

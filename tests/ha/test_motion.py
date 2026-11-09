@@ -7,7 +7,9 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.tvt_archive.motion import _ranges, auto_motion_entities
+from custom_components.tvt_archive.bridge.native9008 import posix_zone
+from custom_components.tvt_archive.coordinator import camera_zone
+from custom_components.tvt_archive.motion import _local, _ranges, auto_motion_entities
 
 
 async def test_motion_sensors_follow_the_camera_address(hass: HomeAssistant) -> None:
@@ -52,3 +54,10 @@ def test_ranges_clip_to_the_day() -> None:
         (start + timedelta(minutes=60), start + timedelta(minutes=61)),
         (start + timedelta(minutes=1430), stop),
     ]
+
+
+def test_motion_times_use_the_camera_zone() -> None:
+    moment = datetime(2026, 11, 8, 21, 52, 12, tzinfo=dt_util.UTC)
+    assert _local(moment, camera_zone({"time_zone": "EET-2"})) == "2026-11-08T23:52:12"
+    assert camera_zone({}) is dt_util.get_default_time_zone()
+    assert camera_zone({"time_zone": "EET-2"}) is posix_zone("EET-2")

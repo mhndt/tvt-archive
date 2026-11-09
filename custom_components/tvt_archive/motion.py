@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, tzinfo
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -44,14 +44,14 @@ def _ranges(states: list[Any], start: datetime, stop: datetime) -> list[tuple[da
 
 
 async def async_motion_events(
-    hass: HomeAssistant, entity_ids: list[str], day: date
+    hass: HomeAssistant, entity_ids: list[str], day: date, zone: tzinfo
 ) -> list[dict[str, str]]:
     if not entity_ids or "recorder" not in hass.config.components:
         return []
     from homeassistant.components.recorder import get_instance, history
 
-    start = datetime.combine(day, time.min).astimezone()
-    stop = min(start + timedelta(days=1), datetime.now().astimezone())
+    start = datetime.combine(day, time.min, zone)
+    stop = min(datetime.combine(day + timedelta(days=1), time.min, zone), datetime.now(zone))
     if stop <= start:
         return []
     states = await get_instance(hass).async_add_executor_job(
@@ -72,8 +72,10 @@ async def async_motion_events(
             merged[-1][1] = max(merged[-1][1], end)
         elif end > begin:
             merged.append([begin, end])
-    return [{"start": _local(b), "stop": _local(e), "type": "motion"} for b, e in merged]
+    return [
+        {"start": _local(b, zone), "stop": _local(e, zone), "type": "motion"} for b, e in merged
+    ]
 
 
-def _local(value: datetime) -> str:
-    return value.astimezone().replace(tzinfo=None).isoformat(timespec="seconds")
+def _local(value: datetime, zone: tzinfo) -> str:
+    return value.astimezone(zone).replace(tzinfo=None).isoformat(timespec="seconds")

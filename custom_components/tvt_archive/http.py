@@ -17,6 +17,7 @@ from homeassistant.core import HomeAssistant
 
 from .api import TVTArchiveApiError
 from .const import CONF_MOTION, DOMAIN
+from .coordinator import camera_zone
 from .motion import async_motion_events, auto_motion_entities
 
 _LOGGER = logging.getLogger(__name__)
@@ -115,7 +116,10 @@ async def _ha_motion(hass, entry_id, data, camera_id, day) -> list[dict[str, str
         host = next((c.get("host") for c in cameras if str(c.get("id")) == camera_id), None)
         configured = auto_motion_entities(hass, host)
     try:
-        return await async_motion_events(hass, configured, date.fromisoformat(day))
+        status = data["coordinator"].data.get("statuses", {}).get(camera_id, {})
+        return await async_motion_events(
+            hass, configured, date.fromisoformat(day), camera_zone(status)
+        )
     except Exception as error:
         _LOGGER.debug("Motion history unavailable: %s", error)
         return []

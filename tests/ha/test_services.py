@@ -53,6 +53,27 @@ async def test_save_recording(hass: HomeAssistant, api: AsyncMock, tmp_path: Pat
         )
 
 
+async def test_save_recording_converts_to_camera_time(hass: HomeAssistant, api: AsyncMock) -> None:
+    api.status.return_value = {**api.status.return_value, "time_zone": "EET-2"}
+    api.create_job.return_value = {"id": "j" * 32, "status": "error", "error": "stop here"}
+    entry = camera_entry()
+    entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    device = dr.async_entries_for_config_entry(dr.async_get(hass), entry.entry_id)[0]
+    with pytest.raises(HomeAssistantError):
+        await hass.services.async_call(
+            DOMAIN,
+            "save_recording",
+            {"device_id": device.id, "start": "2026-11-08T21:52:12+00:00", "duration": 60},
+            blocking=True,
+            return_response=True,
+        )
+    api.create_job.assert_awaited_once_with(
+        "front", {"start": "2026-11-08T23:52:12", "duration": 60}
+    )
+
+
 async def test_save_recording_reports_bridge_errors(hass: HomeAssistant, api: AsyncMock) -> None:
     api.cameras.return_value = {"cameras": [CAMERA]}
     api.create_job.side_effect = TVTArchiveApiError("Camera is busy")

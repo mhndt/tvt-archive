@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import functools
+import io
 import json
 import os
 import re
@@ -12,9 +14,10 @@ import threading
 import time
 import uuid
 import xml.etree.ElementTree as ET
+import zoneinfo
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import BinaryIO
 from xml.sax.saxutils import escape
@@ -355,6 +358,56 @@ def _strip_http(payload: bytes) -> bytes:
     return payload[separator + 4 :].rstrip(b"\x00") if separator >= 0 else payload.rstrip(b"\x00")
 
 
+@functools.lru_cache(maxsize=32)
+def posix_zone(rule: str) -> tzinfo:
+    block = b"TZif2" + bytes(15) + struct.pack(">6llBBx", 0, 0, 0, 0, 1, 1, 0, 0, 0)
+    return zoneinfo.ZoneInfo.from_file(io.BytesIO(block + block + f"\n{rule}\n".encode()))
+
+
+def _posix_offset(seconds: int) -> str:
+    return f"{'-' if seconds > 0 else ''}{abs(seconds) // 3600}:{abs(seconds) // 60 % 60:02}"
+
+
+def _valid_rule(rule: str) -> bool:
+    try:
+        return bool(rule) and "\n" not in rule and bool(posix_zone(rule))
+    except ValueError:
+        return False
+
+
+def clock_rule(fields: dict[str, str], now: float) -> str | None:
+    zone = fields.get("timeZone", "")
+    match = re.match(r"(?:<[^>]+>|[A-Za-z]+)[+-]?\d+(?::\d+){0,2}", zone)
+    standard = match.group() if match else zone
+    dst = zone if "," in zone else None
+    if not dst and _valid_rule(standard) and fields.get("startTime") and fields.get("endTime"):
+        base = int(posix_zone(standard).utcoffset(datetime(2001, 1, 1)).total_seconds())
+        shift = int(fields.get("offSet") or 60) * 60
+        dst = (
+            f"{standard}DST{_posix_offset(base + shift)},{fields['startTime']},{fields['endTime']}"
+        )
+    rules = [rule for rule in (dst, standard) if rule and _valid_rule(rule)]
+    if fields.get("daylightSwitch", "").lower() in ("0", "false", "off"):
+        rules.reverse()
+    try:
+        clock = datetime.strptime(fields["currentTime"], "%Y-%m-%d %H:%M:%S")
+    except (KeyError, ValueError):
+        return rules[0] if rules else None
+    offset = (clock - datetime.fromtimestamp(now, UTC).replace(tzinfo=None)).total_seconds()
+
+    def error(rule: str) -> float:
+        return abs(
+            datetime.fromtimestamp(now, posix_zone(rule)).utcoffset().total_seconds() - offset
+        )
+
+    best = min(rules, key=error, default=None)
+    if best and error(best) < 1800:
+        return best
+    if abs(offset) <= 14 * 3600:
+        return f"CAM{_posix_offset(round(offset / 900) * 900)}"
+    return best
+
+
 def _local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
@@ -532,6 +585,11 @@ class TVT9008Client:
                     )
                 }
         return None
+
+    def clock_rule(self) -> str | None:
+        text = _strip_http(self.config_command("GetDateAndTime").body).decode(errors="replace")
+        fields = re.findall(r"<(\w+)[^>]*>\s*(?:<!\[CDATA\[)?([^<\]]*?)(?:\]\]>)?\s*</\1>", text)
+        return clock_rule(dict(fields), time.time())
 
     def record_types(self) -> tuple[str, ...]:
         # Some firmware returns unquoted attributes here, so skip the XML parser.

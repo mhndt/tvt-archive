@@ -15,9 +15,9 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE, EntityCategory, UnitOfTime
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
+from .coordinator import camera_zone
 from .entity import TVTArchiveEntity
 
 
@@ -139,11 +139,7 @@ class TVTArchiveSensor(TVTArchiveEntity, SensorEntity):
         if not self.entity_description.timestamp or not value:
             return value
         parsed = datetime.fromisoformat(str(value))
-        if parsed.tzinfo is None:
-            zone = dt_util.get_time_zone(self.coordinator.hass.config.time_zone)
-            if zone is not None:
-                parsed = parsed.replace(tzinfo=zone)
-        return parsed
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=camera_zone(self.status))
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:

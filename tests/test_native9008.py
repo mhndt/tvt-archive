@@ -6,7 +6,8 @@ import sys
 import tempfile
 import time
 import unittest
-from datetime import datetime, timedelta
+import unittest.mock
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 APP = Path(__file__).resolve().parents[1] / "custom_components" / "tvt_archive" / "bridge"
@@ -36,6 +37,72 @@ class NativePlaybackTests(unittest.TestCase):
         xml = native9008._search_xml(start, start + timedelta(hours=1), ("motion", "a<b"))
         self.assertIn(b"<item>motion</item><item>a&lt;b</item>", xml)
         self.assertNotIn(b"schedule", xml)
+
+    def test_clock_rule_matches_the_camera_clock(self) -> None:
+        fields = {
+            "timeZone": "EET-2",
+            "startTime": "M4.5.5/0",
+            "endTime": "M10.5.5/0",
+            "offSet": "60",
+            "daylightSwitch": "2",
+        }
+        dst = "EET-2DST-3:00,M4.5.5/0,M10.5.5/0"
+
+        def rule(local: str, utc: str, **changes: str) -> str | None:
+            now = datetime.fromisoformat(utc).replace(tzinfo=UTC).timestamp()
+            return native9008.clock_rule({**fields, "currentTime": local, **changes}, now)
+
+        self.assertEqual(rule("2026-11-09 02:52:13", "2026-11-09 00:52:14"), dst)
+        self.assertEqual(rule("2026-07-09 03:52:13", "2026-07-09 00:52:14"), dst)
+        self.assertEqual(rule("2026-07-09 02:52:13", "2026-07-09 00:52:14"), "EET-2")
+        self.assertEqual(
+            rule("2026-07-09 02:52:13", "2026-07-09 00:52:14", daylightSwitch="0"), "EET-2"
+        )
+        self.assertEqual(
+            rule("2026-11-09 08:52:13", "2026-11-09 00:52:14", timeZone="GMT+08:00"), "CAM-8:00"
+        )
+        self.assertEqual(rule("2000-01-01 00:00:09", "2026-11-09 00:52:14"), dst)
+        self.assertEqual(native9008.clock_rule({"timeZone": "EET-2"}, 0), "EET-2")
+        self.assertEqual(
+            rule("2026-11-09 02:52:13", "2026-11-09 00:52:14", daylightSwitch="false"), "EET-2"
+        )
+        full = "EET-2EEST,M3.5.0/3,M10.5.0/4"
+        nvms = {"timeZone": full, "currentTime": "2026-07-09 03:52:13", "daylightSwitch": "true"}
+        summer = datetime(2026, 7, 9, 0, 52, 14, tzinfo=UTC).timestamp()
+        self.assertEqual(native9008.clock_rule(nvms, summer), full)
+        winter = {**nvms, "currentTime": "2026-11-09 02:52:13", "daylightSwitch": "false"}
+        self.assertEqual(native9008.clock_rule(winter, summer + 123 * 86400), "EET-2")
+        self.assertIsNone(native9008.clock_rule({}, 0))
+        zone = native9008.posix_zone(dst)
+        for local, offset in (
+            ("2026-04-24 00:30", 7200),
+            ("2026-04-24 01:30", 10800),
+            ("2026-10-30 00:30", 7200),
+        ):
+            self.assertEqual(
+                datetime.fromisoformat(local).replace(tzinfo=zone).utcoffset(),
+                timedelta(seconds=offset),
+            )
+
+    def test_clock_rule_reads_date_and_time(self) -> None:
+        body = (
+            b'<?xml version="1.0" encoding="UTF-8"?><config version="1.7"><time><timezoneInfo>'
+            b'<timeZone type="string" maxLen="127"><![CDATA[EET-2]]></timeZone>'
+            b'<startTime type="string" maxLen="64"><![CDATA[M4.5.5/0]]></startTime>'
+            b'<endTime type="string" maxLen="64"><![CDATA[M10.5.5/0]]></endTime>'
+            b'<offSet type="uint16" min="30" max="120">60</offSet>'
+            b'<daylightSwitch type="uint32">2</daylightSwitch></timezoneInfo><synchronizeInfo>'
+            b'<currentTime type="string"><![CDATA[2026-11-09 02:52:13]]></currentTime>'
+            b"</synchronizeInfo></time></config>"
+        )
+        client = native9008.TVT9008Client("camera", 9008, "admin", "secret")
+        client.config_command = lambda name: native9008.InnerFrame(0, 0, 0, body)
+        now = datetime(2026, 11, 9, 0, 52, 14, tzinfo=UTC).timestamp()
+        with unittest.mock.patch.object(native9008.time, "time", return_value=now):
+            self.assertEqual(client.clock_rule(), "EET-2DST-3:00,M4.5.5/0,M10.5.5/0")
+        failed = b'<?xml version="1.0"?><config version="1.0" status="failed" errorCode="499"/>'
+        client.config_command = lambda name: native9008.InnerFrame(0, 0, 0, failed)
+        self.assertIsNone(client.clock_rule())
 
     def test_sd_card_status(self) -> None:
         client = native9008.TVT9008Client("192.0.2.1", 9008, "user", "pass")

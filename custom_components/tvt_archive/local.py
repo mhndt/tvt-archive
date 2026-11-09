@@ -86,6 +86,7 @@ class LocalBridge:
                 TVT_ARCHIVE_TOKEN=self.token,
                 TVT_ARCHIVE_CONFIG_DIRECTORY=str(self.config_dir),
                 TVT_ARCHIVE_HLS_JS=str(_HLS_JS),
+                TZ=self.hass.config.time_zone,
                 STATE_DIRECTORY=str(scratch / "state"),
                 CACHE_DIRECTORY=str(scratch / "cache"),
                 PYTHONUNBUFFERED="1",

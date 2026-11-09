@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import timedelta, tzinfo
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -10,11 +10,19 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .api import TVTArchiveApi, TVTArchiveApiError, TVTArchiveAuthError
+from .bridge.native9008 import posix_zone
 from .const import CONF_CAMERA_ID, CONF_RECORDING_AUDIO, DEFAULT_PORT, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def camera_zone(status: dict[str, Any]) -> tzinfo:
+    rule = status.get("time_zone")
+    return posix_zone(rule) if rule else dt_util.get_default_time_zone()
+
 
 SD_CARD_PROBLEMS = {
     "no_sd_card": "no SD card",

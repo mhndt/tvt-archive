@@ -3,13 +3,14 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import struct
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -250,6 +251,8 @@ class BridgeTests(unittest.TestCase):
 
     def test_thumbnails_yield_to_viewers(self) -> None:
         start = datetime(2026, 9, 5, 8, 0)
+        bridge.CLOCKS["front_door"] = (float("inf"), None)
+        self.addCleanup(bridge.CLOCKS.clear)
         with patch.object(bridge, "_metadata_client") as client:
             bridge.hold_thumbnails()
             self.addCleanup(setattr, bridge, "thumbnail_hold_until", 0.0)
@@ -266,6 +269,24 @@ class BridgeTests(unittest.TestCase):
             finally:
                 with bridge.SESSIONS_LOCK:
                     bridge.FRAME_SESSIONS.pop(stream.id, None)
+        client.assert_not_called()
+
+    def test_thumbnail_cache_follows_the_camera_zone(self) -> None:
+        start = datetime(2026, 11, 8, 23, 52, 12)
+        epoch = int(datetime(2026, 11, 8, 21, 52, 12, tzinfo=UTC).timestamp())
+        bridge.THUMBS.mkdir(parents=True, exist_ok=True)
+        cached = bridge.THUMBS / f"front_door-{epoch}.jpg"
+        cached.write_bytes(b"jpeg")
+        self.addCleanup(cached.unlink)
+        self.addCleanup(bridge.CLOCKS.clear)
+        self.addCleanup(setattr, bridge, "thumbnail_hold_until", 0.0)
+        bridge.CLOCKS["front_door"] = (float("inf"), "EET-2")
+        with patch.object(bridge, "_metadata_client") as client:
+            self.assertEqual(bridge.get_thumbnail("front_door", start), cached)
+            bridge.CLOCKS["front_door"] = (float("inf"), "UTC0")
+            bridge.hold_thumbnails()
+            with self.assertRaises(bridge.ThumbnailBusy):
+                bridge.get_thumbnail("front_door", start)
         client.assert_not_called()
 
     def test_wifi_is_read_rarely_and_never_during_playback(self) -> None:
@@ -315,8 +336,15 @@ class BridgeTests(unittest.TestCase):
             bridge.FRAME_SESSIONS[old_stream.id] = old_stream
             bridge.SESSIONS[old_hls.id] = old_hls
         try:
+            with patch.object(bridge, "NATIVE_SESSION_LIMIT", 2):
+                bridge._stop_viewers("front_door")
+                self.assertTrue(old_stream.stop_event.is_set())
+                self.assertFalse(old_hls.stop_event.is_set())
+                self.assertEqual(old_stream.stop_reason, "Camera in use")
+                old_stream.status = "stopped"
+                bridge._stop_viewers("front_door")
+                self.assertFalse(old_hls.stop_event.is_set())
             bridge._stop_viewers("front_door")
-            self.assertTrue(old_stream.stop_event.is_set())
             self.assertTrue(old_hls.stop_event.is_set())
         finally:
             with bridge.SESSIONS_LOCK:
@@ -367,6 +395,33 @@ class BridgeTests(unittest.TestCase):
         self.assertTrue(bridge.access_unit_is_keyframe(units[0]))
         self.assertFalse(bridge.access_unit_is_keyframe(units[1]))
 
+    def test_quiet_stream_notices_a_closed_viewer(self) -> None:
+        stream = bridge.FrameSession(id="e" * 32, camera_id="front_door", request={})
+        stream.status = "playing"
+        with bridge.SESSIONS_LOCK:
+            bridge.FRAME_SESSIONS[stream.id] = stream
+        self.addCleanup(bridge.FRAME_SESSIONS.pop, stream.id, None)
+        written: list[bytes] = []
+
+        class Closed:
+            def write(self, data: bytes) -> None:
+                written.append(data)
+                if len(written) > 1:
+                    raise BrokenPipeError
+
+            def flush(self) -> None:
+                pass
+
+        handler = object.__new__(bridge.Handler)
+        handler.wfile = Closed()
+        handler.send_response = handler.send_header = lambda *args: None
+        handler.end_headers = handler._headers = lambda: None
+        with patch.object(bridge, "STREAM_PING_SECONDS", 0):
+            handler._serve_frames(stream.id)
+        self.assertEqual(written[0], bridge.frame_record(bridge.REC_IDLE, 0, 0))
+        self.assertEqual(stream.readers, 0)
+        self.assertGreater(stream.reader_left, 0)
+
     def test_frame_stream_counts_as_camera_use(self) -> None:
         stream = bridge.FrameSession(id="a" * 32, camera_id="front_door", request={})
         with bridge.SESSIONS_LOCK:
@@ -411,7 +466,29 @@ class BridgeTests(unittest.TestCase):
         for month in (1, 7):
             stamp = int(datetime(2026, month, 15, 12).timestamp() * 1_000_000)
             expected = datetime.fromtimestamp(stamp / 1_000_000).astimezone().utcoffset()
-            self.assertEqual(bridge.utc_offset_at(stamp), int(expected.total_seconds()))
+            self.assertEqual(bridge.utc_offset_at(stamp, None), int(expected.total_seconds()))
+        cairo = native9008.posix_zone("EET-2DST-3:00,M4.5.5/0,M10.5.5/0")
+        for month, offset in ((1, 7200), (7, 10800)):
+            stamp = int(datetime(2026, month, 15, 12, tzinfo=UTC).timestamp() * 1_000_000)
+            self.assertEqual(bridge.utc_offset_at(stamp, cairo), offset)
+
+    def test_camera_times_use_the_camera_zone(self) -> None:
+        zone = native9008.posix_zone("EET-2")
+        body = bridge._range_body(datetime(2026, 11, 8, 23, 52, 12), datetime(2026, 11, 9), zone)
+        start, stop = struct.unpack_from("<QQ", body, 12)
+        self.assertEqual(start, int(datetime(2026, 11, 8, 21, 52, 12, tzinfo=UTC).timestamp()))
+        self.assertEqual(stop - start, 468)
+        self.addCleanup(bridge.CLOCKS.clear)
+        with patch.object(bridge, "_metadata_client") as client:
+            client.return_value.__enter__.return_value.clock_rule.return_value = "EET-2"
+            self.assertEqual(bridge.camera_rule("front_door"), "EET-2")
+            self.assertEqual(bridge.camera_rule("front_door"), "EET-2")
+            client.return_value.__enter__.return_value.clock_rule.side_effect = TimeoutError
+            bridge.CLOCKS["front_door"] = (0.0, "EET-2")
+            self.assertEqual(bridge.camera_rule("front_door"), "EET-2")
+        self.assertEqual(client.call_count, 2)
+        env = bridge.capture_environment(bridge.camera("front_door"), "EET-2")
+        self.assertEqual(env["TZ"], "EET-2")
 
     def test_importing_the_bridge_does_not_drop_privileges(self) -> None:
         probe = (
@@ -623,6 +700,24 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(out[out.index("-g") + 1], "25")
         self.assertIn("-force_key_frames", out)
         self.assertIn("-sc_threshold", out)
+
+    def test_hls_encode_declares_the_measured_frame_rate(self) -> None:
+        session = bridge.PlaybackSession(
+            "d" * 32, "front_door", {"duration": 60, "quality": "original", "gain_db": 0}, "/tmp"
+        )
+        session.source_fps = 27.6
+        for mode, metadata in (
+            ("software", "h264_metadata=tick_rate=55.200:level=auto"),
+            ("vaapi", "h264_metadata=tick_rate=55.200:level=auto"),
+            ("copy", None),
+        ):
+            session.video = mode
+            command = bridge._hls_command("pipe:3", None, session)
+            self.assertEqual(command[command.index("-enc_time_base:v") + 1], "1/90000")
+            if metadata is None:
+                self.assertNotIn("-bsf:v", command)
+            else:
+                self.assertEqual(command[command.index("-bsf:v") + 1], metadata)
 
     def test_timing_probe_uses_reported_fps_and_audio_without_waiting_full_legacy_deadline(
         self,
