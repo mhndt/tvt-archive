@@ -260,6 +260,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     ir.async_delete_issue(hass, DOMAIN, f"sd_card_{entry.entry_id}")
+    ir.async_delete_issue(hass, DOMAIN, f"camera_stalled_{entry.entry_id}")
     if not any(e.entry_id != entry.entry_id for e in hass.config_entries.async_entries(DOMAIN)):
         async_remove_panel(hass, PANEL_URL_PATH, warn_if_unknown=False)
         hass.data.get(DOMAIN, {}).pop(DATA_FRONTEND_REGISTERED, None)

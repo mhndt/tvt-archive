@@ -163,6 +163,10 @@
       "title": "{camera} has a problem with its SD card",
       "description": "{camera} reports {state}, so its recordings are unavailable. Check or replace the card in the camera's settings."
     },
+    "camera_stalled": {
+      "title": "{camera} stopped answering logins",
+      "description": "{camera} accepts connections but no longer answers logins, so its recordings can't be read. {detail}."
+    },
     "ffmpeg_missing": {
       "title": "TVT Archive needs ffmpeg",
       "description": "The built-in bridge could not find ffmpeg. Install ffmpeg on the Home Assistant host, or use the TVT Archive app instead."

@@ -24,6 +24,8 @@ def camera_zone(status: dict[str, Any]) -> tzinfo:
     return posix_zone(rule) if rule else dt_util.get_default_time_zone()
 
 
+STALL_NOTICE = timedelta(minutes=10)
+
 SD_CARD_PROBLEMS = {
     "no_sd_card": "no SD card",
     "unformatted": "an unformatted SD card",
@@ -77,6 +79,23 @@ class TVTArchiveCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 },
             )
         elif state:
+            ir.async_delete_issue(self.hass, DOMAIN, issue)
+        issue = f"camera_stalled_{self.config_entry.entry_id}"
+        since = dt_util.parse_datetime(status.get("login_stalled", {}).get("since", ""))
+        if since and dt_util.utcnow() - since >= STALL_NOTICE:
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                issue,
+                is_fixable=False,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key="camera_stalled",
+                translation_placeholders={
+                    "camera": str(camera.get("name", self.camera_id)),
+                    "detail": str(status.get("error", "")),
+                },
+            )
+        elif not since:
             ir.async_delete_issue(self.hass, DOMAIN, issue)
         return {"cameras": [camera], "statuses": {self.camera_id: status}}
 

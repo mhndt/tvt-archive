@@ -238,6 +238,44 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(attempts, ["bad", "new"])
         bridge.AUTH_FAILURES.clear()
 
+    def test_camera_connection_is_reused_until_it_breaks(self) -> None:
+        self.addCleanup(bridge.SHARED_CLIENTS.clear)
+        with patch.object(bridge, "_metadata_client") as client:
+            client.return_value.timed_out = False
+            for _ in range(3):
+                with bridge.camera_client("front_door") as used:
+                    used.sd_card()
+            self.assertEqual(client.call_count, 1)
+            with self.assertRaises(EOFError), bridge.camera_client("front_door"):
+                raise EOFError
+            client.return_value.close.assert_called_once()
+            with bridge.camera_client("front_door") as used:
+                used.timed_out = True
+            with bridge.camera_client("front_door"):
+                pass
+            self.assertEqual(client.call_count, 3)
+            bridge.SHARED_CLIENTS["front_door"].used -= bridge.SHARED_IDLE_SECONDS + 1
+            bridge.close_idle_clients()
+            self.assertIsNone(bridge.SHARED_CLIENTS["front_door"].client)
+
+    def test_stalled_camera_is_reported(self) -> None:
+        self.addCleanup(bridge.STALLS.clear)
+        item = bridge.camera("front_door")
+
+        def stall(client):
+            raise native9008.TVT9008LoginStalled("Camera did not answer the login")
+
+        with patch.object(native9008.TVT9008Client, "connect", stall):
+            for _ in range(2):
+                with self.assertRaises(TimeoutError):
+                    bridge._metadata_client(item).connect()
+        status = bridge._stall_status("front_door")
+        self.assertIn("restart it", status["error"])
+        self.assertEqual(set(status["login_stalled"]), {"since"})
+        with patch.object(native9008.TVT9008Client, "connect"):
+            bridge._metadata_client(item).connect()
+        self.assertEqual(bridge._stall_status("front_door"), {})
+
     def test_reentered_login_is_tested_again(self) -> None:
         item = bridge.camera("front_door")
         bridge.AUTH_FAILURES[bridge._guard_key(item)] = time.time()
@@ -479,14 +517,16 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(start, int(datetime(2026, 11, 8, 21, 52, 12, tzinfo=UTC).timestamp()))
         self.assertEqual(stop - start, 468)
         self.addCleanup(bridge.CLOCKS.clear)
+        self.addCleanup(bridge.SHARED_CLIENTS.clear)
         with patch.object(bridge, "_metadata_client") as client:
-            client.return_value.__enter__.return_value.clock_rule.return_value = "EET-2"
+            client.return_value.timed_out = False
+            client.return_value.clock_rule.return_value = "EET-2"
             self.assertEqual(bridge.camera_rule("front_door"), "EET-2")
             self.assertEqual(bridge.camera_rule("front_door"), "EET-2")
-            client.return_value.__enter__.return_value.clock_rule.side_effect = TimeoutError
+            client.return_value.clock_rule.side_effect = TimeoutError
             bridge.CLOCKS["front_door"] = (0.0, "EET-2")
             self.assertEqual(bridge.camera_rule("front_door"), "EET-2")
-        self.assertEqual(client.call_count, 2)
+        self.assertEqual(client.call_count, 1)
         env = bridge.capture_environment(bridge.camera("front_door"), "EET-2")
         self.assertEqual(env["TZ"], "EET-2")
 

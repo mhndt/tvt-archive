@@ -253,7 +253,7 @@ const FRAME_PLAYER_SUPPORTED = typeof VideoDecoder === "function" && typeof Enco
 const REC_INFO = 0, REC_VIDEO = 1, REC_AUDIO = 2, REC_MARK = 3, REC_END = 4;
 const DECODED_MAX = 8, PENDING_MAX = 600, PENDING_RESUME = 400, GAP_COLLAPSE_US = 3e6;
 const HISTORY_MAX_CHUNKS = 1500, HISTORY_MAX_BYTES = 64 * 1024 * 1024, AUDIO_HISTORY_US = 70e6;
-const SEEK_STEP_SECONDS = 10, ARROW_STEP_SECONDS = 5, VOLUME_STEP = 0.05, FRAME_SECONDS = 0.04;
+const SEEK_STEP_SECONDS = 10, ARROW_STEP_SECONDS = 5, VOLUME_STEP = 0.05, FRAME_SECONDS = 0.04, SEEK_SETTLE_MS = 300;
 const ICONS = {
   play: "M8,5.14V19.14L19,12.14L8,5.14Z",
   pause: "M14,19H18V5H14M6,19H10V5H6V19Z",
@@ -790,6 +790,7 @@ class TVTArchivePanel extends HTMLElement {
     this._framePlayer = null;
     this._seekGeneration = null;
     this._queuedSeekSec = null;
+    this._seekTimer = null;
     this._seekTargetSec = null;
     this._paintedTicks = 0;
     this._onKeyDown = (event) => this._handleKey(event);
@@ -992,7 +993,7 @@ class TVTArchivePanel extends HTMLElement {
       const status = await this._api("GET", `tvt_archive/${entry}/cameras/${this._cameraId}/status${refresh ? "?refresh=1" : ""}`);
       if (entry !== this._entryId) return;
       this._status = status;
-      this._error = "";
+      this._error = status.error || "";
     } catch (error) {
       if (entry !== this._entryId) return;
       this._error = errorText(error);
@@ -1440,6 +1441,8 @@ class TVTArchivePanel extends HTMLElement {
     clearTimeout(this._sessionPollTimer);
     clearTimeout(this._streamPollTimer);
     clearInterval(this._progressTimer);
+    clearTimeout(this._seekTimer);
+    this._seekTimer = null;
     const stops = [];
     const stream = this._stream;
     this._stream = null;
@@ -1542,10 +1545,9 @@ class TVTArchivePanel extends HTMLElement {
     this._error = ""; this._message = ""; this._updateStatusLine();
     this._moveMarker(seconds);
     this._setClock(secToClock(seconds));
-    if (this._seekGeneration !== null) {
-      this._queuedSeekSec = seconds;
-      return;
-    }
+    clearTimeout(this._seekTimer);
+    this._seekTimer = null;
+    this._queuedSeekSec = null;
     this._seekGeneration = player.generation;
     this._seekTargetSec = seconds;
     try {
@@ -1555,6 +1557,11 @@ class TVTArchivePanel extends HTMLElement {
       this._queuedSeekSec = null;
       this._handlePlaybackFailure(errorText(error));
     }
+  }
+
+  _sendQueuedSeek() {
+    this._seekTimer = null;
+    if (this._queuedSeekSec !== null) this._seekStream(this._queuedSeekSec);
   }
 
   _recordedTarget(target, direction) {
@@ -1578,11 +1585,11 @@ class TVTArchivePanel extends HTMLElement {
     this._seekStreak = {total, at: now};
     const label = `${total > 0 ? "+" : "−"}${Math.abs(total)} s`;
     const pts = player.positionPts;
-    if (seconds < 0 && this._seekGeneration === null && pts !== null && player.rewindTo(pts + seconds * 1e6)) {
+    if (seconds < 0 && this._seekGeneration === null && this._queuedSeekSec === null && pts !== null && player.rewindTo(pts + seconds * 1e6)) {
       player.flash(label);
       return;
     }
-    const pendingTarget = this._seekGeneration !== null ? (this._queuedSeekSec ?? this._seekTargetSec) : null;
+    const pendingTarget = this._queuedSeekSec ?? (this._seekGeneration !== null ? this._seekTargetSec : null);
     const base = pendingTarget ?? this._playedSecondsOfDay();
     const target = this._recordedTarget(Math.max(0, Math.min(86399, Math.round(base + seconds))), seconds);
     if (target === null) { player.flash(seconds > 0 ? "No later recording today" : "No earlier recording today"); return; }
@@ -1590,7 +1597,13 @@ class TVTArchivePanel extends HTMLElement {
     this._resetDownloadResult();
     this._selectTime(target);
     this._updateSelection();
-    if (this._canSeek()) this._seekStream(target);
+    if (this._canSeek()) {
+      this._moveMarker(target);
+      this._setClock(secToClock(target));
+      this._queuedSeekSec = target;
+      clearTimeout(this._seekTimer);
+      this._seekTimer = setTimeout(() => this._sendQueuedSeek(), SEEK_SETTLE_MS);
+    }
     else this._playRecording();
   }
 
@@ -1675,13 +1688,8 @@ class TVTArchivePanel extends HTMLElement {
     if (this._seekGeneration !== null) {
       if (player.generation === this._seekGeneration) return;
       this._seekGeneration = null;
-      if (this._queuedSeekSec !== null) {
-        const seconds = this._queuedSeekSec;
-        this._queuedSeekSec = null;
-        this._seekStream(seconds);
-        return;
-      }
     }
+    if (this._queuedSeekSec !== null) return;
     const seconds = player.secondsOfDay;
     this._paintedTicks = (this._paintedTicks + 1) % 5;
     if (seconds != null && (this._paintedTicks === 0 || player.paused)) {

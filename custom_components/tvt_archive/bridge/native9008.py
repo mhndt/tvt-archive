@@ -72,6 +72,10 @@ class TVT9008AuthError(TVT9008Error, ValueError):
     pass
 
 
+class TVT9008LoginStalled(TVT9008Error, TimeoutError):
+    pass
+
+
 @dataclass
 class InnerFrame:
     kind: int
@@ -441,6 +445,7 @@ class TVT9008Client:
         self._send_lock = threading.Lock()
         self._heartbeat_stop = threading.Event()
         self._heartbeat_thread: threading.Thread | None = None
+        self.timed_out = False
 
     def __enter__(self) -> TVT9008Client:
         self.connect()
@@ -470,9 +475,14 @@ class TVT9008Client:
             self.send(
                 KIND_LOGIN_REQUEST, LOGIN_REQUEST_ID, _login_body(self.username, self.password, key)
             )
-            reply = self.wait_for(
-                (KIND_LOGIN_RESPONSE, KIND_LOGIN_FAILED), LOGIN_REQUEST_ID, self.timeout
-            )
+            try:
+                reply = self.wait_for(
+                    (KIND_LOGIN_RESPONSE, KIND_LOGIN_FAILED), LOGIN_REQUEST_ID, self.timeout
+                )
+            except TimeoutError as error:
+                raise TVT9008LoginStalled(
+                    "Camera accepted the connection but did not answer the login"
+                ) from error
             if reply.kind == KIND_LOGIN_FAILED:
                 code = struct.unpack_from("<I", reply.body)[0] if len(reply.body) >= 4 else 0
                 raise TVT9008AuthError(f"Camera rejected the login (code {code})")
@@ -536,6 +546,7 @@ class TVT9008Client:
                 continue
             if request_id is None or frame.request_id == request_id:
                 return frame
+        self.timed_out = True
         raise TimeoutError(f"Timed out waiting for kind 0x{kinds[0]:08X}")
 
     def config_command(self, name: str, extra: bytes = b"") -> InnerFrame:

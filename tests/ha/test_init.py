@@ -44,6 +44,26 @@ async def test_entities_are_created(hass: HomeAssistant, api: AsyncMock) -> None
     assert hass.states.get("sensor.front_available_history").state == "76.9"
 
 
+async def test_stalled_camera_is_reported_after_ten_minutes(
+    hass: HomeAssistant, api: AsyncMock
+) -> None:
+    from homeassistant.util import dt as dt_util
+
+    entry = await _setup(hass, camera_entry())
+    coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
+    issue = f"camera_stalled_{entry.entry_id}"
+    status = api.status.return_value
+    status["error"] = "The camera stopped answering logins"
+    for minutes, expected in ((2, False), (11, True)):
+        since = dt_util.utcnow() - dt_util.dt.timedelta(minutes=minutes)
+        status["login_stalled"] = {"since": since.isoformat()}
+        await coordinator.async_refresh()
+        assert bool(ir.async_get(hass).async_get_issue(DOMAIN, issue)) is expected
+    del status["login_stalled"]
+    await coordinator.async_refresh()
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue) is None
+
+
 async def test_wifi_sensor_only_appears_when_the_camera_has_wifi(
     hass: HomeAssistant, api: AsyncMock
 ) -> None:

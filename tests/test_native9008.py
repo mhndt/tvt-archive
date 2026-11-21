@@ -419,6 +419,49 @@ class NativePlaybackTests(unittest.TestCase):
         finally:
             native9008.socket.create_connection = original
 
+    def test_unanswered_login_is_a_stall(self) -> None:
+        class FakeSocket:
+            def __init__(self) -> None:
+                self.closed = False
+                self.greeted = False
+
+            def setsockopt(self, *args) -> None:
+                return None
+
+            def settimeout(self, *args) -> None:
+                return None
+
+            def recv(self, size: int) -> bytes:
+                if self.greeted:
+                    time.sleep(0.01)
+                    return native9008.OUTER_MAGIC + b"\x00\x00\x00\x00"
+                self.greeted = True
+                greeting = bytearray(native9008.HEAD_SIZE)
+                greeting[:4] = native9008.HEAD_MAGIC
+                greeting[native9008.KEY_OFFSET : native9008.KEY_OFFSET + 4] = b"abcd"
+                return bytes(greeting)
+
+            def sendall(self, data: bytes) -> None:
+                return None
+
+            def shutdown(self, how: int) -> None:
+                return None
+
+            def close(self) -> None:
+                self.closed = True
+
+        fake = FakeSocket()
+        with unittest.mock.patch.object(
+            native9008.socket, "create_connection", lambda *args, **kwargs: fake
+        ):
+            client = native9008.TVT9008Client("camera", 9008, "user", "password", timeout=0.2)
+            with self.assertRaises(native9008.TVT9008LoginStalled) as caught:
+                client.connect()
+        self.assertIsInstance(caught.exception, TimeoutError)
+        self.assertTrue(client.timed_out)
+        self.assertTrue(fake.closed)
+        self.assertIsNone(client.sock)
+
 
 if __name__ == "__main__":
     unittest.main()

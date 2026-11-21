@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import collections
 import concurrent.futures
+import contextlib
 import dataclasses
 import datetime as dt
 import errno
@@ -10,6 +11,7 @@ import functools
 import hashlib
 import hmac
 import ipaddress
+import itertools
 import json
 import logging
 import os
@@ -28,7 +30,7 @@ import traceback
 import urllib.parse
 import urllib.request
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -44,10 +46,11 @@ from native9008 import (
     TVT9008AuthError,
     TVT9008Client,
     TVT9008Error,
+    TVT9008LoginStalled,
     posix_zone,
 )
 
-APP_VERSION = "1.1.9"
+APP_VERSION = "1.2.0"
 BASE = Path(os.environ.get("TVT_ARCHIVE_BASE", "/opt/tvt-archive"))
 CONFIG_DIRECTORY = Path(
     os.environ.get(
@@ -805,8 +808,14 @@ def _guard_key(item: dict[str, Any]) -> tuple[str, int, str, str]:
     )
 
 
+STALLS: dict[tuple[str, int], float] = {}
+
+
 class _GuardedClient(TVT9008Client):
     """Holds off after a rejected login so the camera does not lock the account."""
+
+    def __init__(self, item: dict[str, Any]) -> None:
+        super().__init__(*_guard_key(item), timeout=8.0)
 
     def connect(self) -> None:
         key = (self.host, self.port, self.username, self.password)
@@ -817,16 +826,97 @@ class _GuardedClient(TVT9008Client):
         except TVT9008AuthError:
             AUTH_FAILURES[key] = time.time()
             raise
+        except TVT9008LoginStalled:
+            STALLS.setdefault((self.host, self.port), time.time())
+            raise
+        STALLS.pop((self.host, self.port), None)
 
 
 def _metadata_client(item: dict[str, Any]) -> TVT9008Client:
-    return _GuardedClient(
-        str(item.get("connect_host", item["host"])),
-        int(item.get("connect_port", item.get("port", 9008))),
-        str(item["username"]),
-        str(item["password"]),
-        timeout=8.0,
-    )
+    return _GuardedClient(item)
+
+
+def camera_stall(camera_id: str) -> float | None:
+    host, port, _, _ = _guard_key(camera(camera_id))
+    return STALLS.get((host, port))
+
+
+SHARED_IDLE_SECONDS = 300
+
+
+@dataclasses.dataclass
+class _SharedClient:
+    lock: threading.RLock = dataclasses.field(default_factory=threading.RLock)
+    client: TVT9008Client | None = None
+    key: tuple[str, int, str, str] | None = None
+    used: float = 0.0
+
+    def drop(self) -> None:
+        if self.client is not None:
+            self.client.close()
+        self.client = None
+
+
+SHARED_CLIENTS: dict[str, _SharedClient] = {}
+SHARED_LOCK = threading.Lock()
+
+
+def _connected(client: TVT9008Client) -> bool:
+    sock = client.sock
+    if sock is None:
+        return False
+    timeout = sock.gettimeout()
+    sock.settimeout(0)
+    try:
+        return sock.recv(1, socket.MSG_PEEK) != b""
+    except BlockingIOError:
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.settimeout(timeout)
+
+
+@contextlib.contextmanager
+def camera_client(camera_id: str) -> Iterator[TVT9008Client]:
+    item = camera(camera_id)
+    key = _guard_key(item)
+    with SHARED_LOCK:
+        shared = SHARED_CLIENTS.setdefault(camera_id, _SharedClient())
+    with shared.lock:
+        if shared.client is not None and (
+            shared.key != key
+            or time.monotonic() - shared.used > SHARED_IDLE_SECONDS
+            or not _connected(shared.client)
+        ):
+            shared.drop()
+        if shared.client is None:
+            client = _metadata_client(item)
+            client.connect()
+            shared.client, shared.key = client, key
+        client = shared.client
+        try:
+            yield client
+        except BaseException:
+            shared.drop()
+            raise
+        finally:
+            shared.used = time.monotonic()
+            if client.timed_out:
+                shared.drop()
+
+
+def close_idle_clients() -> None:
+    with SHARED_LOCK:
+        idle = list(SHARED_CLIENTS.values())
+    for shared in idle:
+        if shared.client is None or not shared.lock.acquire(blocking=False):
+            continue
+        try:
+            if time.monotonic() - shared.used > SHARED_IDLE_SECONDS:
+                shared.drop()
+        finally:
+            shared.lock.release()
 
 
 CLOCKS: dict[str, tuple[float, str | None]] = {}
@@ -837,7 +927,7 @@ def camera_rule(camera_id: str) -> str | None:
     if time.monotonic() < expires:
         return rule
     try:
-        with _metadata_client(camera(camera_id)) as client:
+        with camera_client(camera_id) as client:
             rule = client.clock_rule() or rule
         CLOCKS[camera_id] = (time.monotonic() + 3600, rule)
     except (OSError, EOFError, TimeoutError, TVT9008Error):
@@ -1316,7 +1406,7 @@ def search_window(
     cache_name: str | None = None,
     ttl: int = 60,
 ) -> dict[str, Any]:
-    item = camera(camera_id)
+    camera(camera_id)
     camera_index = camera_index_directory(camera_id)
     camera_index.mkdir(parents=True, exist_ok=True)
     cache_path = (
@@ -1338,7 +1428,7 @@ def search_window(
         if cache_path and cache_path.exists() and time.time() - cache_path.stat().st_mtime < ttl:
             return json.loads(cache_path.read_text(encoding="utf-8"))
         try:
-            with _metadata_client(item) as client:
+            with camera_client(camera_id) as client:
                 types = _read_camera_capabilities(camera_id).get("record_types")
                 if not types:
                     try:
@@ -1441,11 +1531,23 @@ def _wifi(camera_id: str, client: TVT9008Client) -> dict[str, Any] | None:
     return reading
 
 
+def _stall_status(camera_id: str) -> dict[str, Any]:
+    since = camera_stall(camera_id)
+    if since is None:
+        return {}
+    return {
+        "error": "The camera stopped answering logins; restart it",
+        "login_stalled": {
+            "since": dt.datetime.fromtimestamp(since, dt.UTC).isoformat(timespec="seconds")
+        },
+    }
+
+
 def get_status(camera_id: str, *, force: bool = False) -> dict[str, Any]:
     wifi = None
     try:
         try:
-            with metadata_lock(camera_id), _metadata_client(camera(camera_id)) as client:
+            with metadata_lock(camera_id), camera_client(camera_id) as client:
                 sd_card = client.sd_card()
                 wifi = _wifi(camera_id, client)
         except TVT9008AuthError:
@@ -1468,6 +1570,7 @@ def get_status(camera_id: str, *, force: bool = False) -> dict[str, Any]:
             "encoder": encoder_info(),
             "gop_seconds": _read_camera_capabilities(camera_id).get("gop_seconds"),
             "time_zone": camera_rule(camera_id),
+            **_stall_status(camera_id),
         }
     except Exception as error:
         LOG.exception("Status failed for %s", camera_id)
@@ -1479,6 +1582,7 @@ def get_status(camera_id: str, *, force: bool = False) -> dict[str, Any]:
             "timeline_today": {},
             "availability": {},
             "encoder": encoder_info(),
+            **_stall_status(camera_id),
         }
 
 
@@ -1487,6 +1591,7 @@ class ThumbnailBusy(Exception):
 
 
 THUMBNAIL_HOLD_SECONDS = 15
+THUMBNAIL_REQUEST_IDS = itertools.cycle(range(0x1000, 0x8000))
 
 
 class _NewestFirst:
@@ -1541,7 +1646,7 @@ def _camera_in_use(camera_id: str) -> bool:
 
 def get_thumbnail(camera_id: str, start: dt.datetime | None) -> Path:
     """JPEG of the first keyframe at or after `start`; None means the latest recording."""
-    item = camera(camera_id)
+    camera(camera_id)
     if start is None:
         if _camera_in_use(camera_id):
             raise ThumbnailBusy
@@ -1563,13 +1668,14 @@ def get_thumbnail(camera_id: str, start: dt.datetime | None) -> Path:
         if _camera_in_use(camera_id):
             raise ThumbnailBusy
         frame = b""
-        with _metadata_client(item) as client:
+        request_id = next(THUMBNAIL_REQUEST_IDS)
+        with camera_client(camera_id) as client:
             client.send(
                 KIND_PLAYBACK_START,
-                FIRST_REQUEST_ID,
+                request_id,
                 _range_body(start, start + dt.timedelta(seconds=60), zone),
             )
-            client.wait_for(KIND_PLAYBACK_START_RESPONSE, FIRST_REQUEST_ID, 10.0)
+            client.wait_for(KIND_PLAYBACK_START_RESPONSE, request_id, 10.0)
             deadline = time.monotonic() + 10
             while not frame and time.monotonic() < deadline and not _camera_in_use(camera_id):
                 try:
@@ -1577,6 +1683,8 @@ def get_thumbnail(camera_id: str, start: dt.datetime | None) -> Path:
                 except TimeoutError:
                     continue
                 if received is None or received.kind != KIND_RECORDED_MEDIA:
+                    continue
+                if received.request_id != request_id:
                     continue
                 if received.body[:2] == b"\x00\x00" and received.body[3:4] == b"\x03":
                     break
@@ -3265,7 +3373,7 @@ def _pump_frames(
         if frame is None or frame.kind != KIND_RECORDED_MEDIA:
             continue
         if frame.request_id != session.request_id:
-            if frame.request_id != session.pending_request_id:
+            if frame.request_id != session.pending_request_id or session.seek_to is not None:
                 continue
             _switch_stream(session, transcoder)
         body = frame.body
@@ -3539,6 +3647,7 @@ def cleanup_loop() -> None:
         try:
             clean_cache()
             clean_sessions()
+            close_idle_clients()
         except Exception:
             LOG.exception("Background cleanup failed")
         time.sleep(30)
@@ -3581,7 +3690,7 @@ def authorized(header: str) -> bool:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "TVTArchiveBridge/1.1.9"
+    server_version = "TVTArchiveBridge/1.2.0"
     timeout = 60
 
     def log_message(self, fmt: str, *args: Any) -> None:
