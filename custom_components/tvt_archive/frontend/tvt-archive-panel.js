@@ -872,6 +872,7 @@ class TVTArchivePanel extends HTMLElement {
     clearTimeout(this._statusTimer);
     clearTimeout(this._streamPollTimer);
     this._stopPlaybackSession(false);
+    this._hass?.callWS({type: "tvt_archive/hold_thumbnails", seconds: 0}).catch(() => {});
   }
 
   async _api(method, path, data) {

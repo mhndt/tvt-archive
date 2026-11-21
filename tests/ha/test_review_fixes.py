@@ -159,7 +159,10 @@ async def test_panel_can_hold_thumbnails_over_the_websocket(
     client = await hass_ws_client(hass)
     await client.send_json_auto_id({"type": "tvt_archive/hold_thumbnails"})
     assert (await client.receive_json())["success"]
-    api.hold_thumbnails.assert_awaited_once()
+    api.hold_thumbnails.assert_awaited_once_with(None)
+    await client.send_json_auto_id({"type": "tvt_archive/hold_thumbnails", "seconds": 0})
+    assert (await client.receive_json())["success"]
+    api.hold_thumbnails.assert_awaited_with(0.0)
 
     api.hold_thumbnails.side_effect = TVTArchiveApiError("An older bridge")
     await client.send_json_auto_id({"type": "tvt_archive/hold_thumbnails"})

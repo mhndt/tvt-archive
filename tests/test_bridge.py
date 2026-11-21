@@ -291,7 +291,10 @@ class BridgeTests(unittest.TestCase):
         start = datetime(2026, 9, 5, 8, 0)
         bridge.CLOCKS["front_door"] = (float("inf"), None)
         self.addCleanup(bridge.CLOCKS.clear)
-        with patch.object(bridge, "_metadata_client") as client:
+        with (
+            patch.object(bridge, "_metadata_client") as client,
+            patch.object(bridge, "THUMBNAIL_WAIT_SECONDS", 0.3),
+        ):
             bridge.hold_thumbnails()
             self.addCleanup(setattr, bridge, "thumbnail_hold_until", 0.0)
             with self.assertRaises(bridge.ThumbnailBusy):
@@ -309,6 +312,31 @@ class BridgeTests(unittest.TestCase):
                     bridge.FRAME_SESSIONS.pop(stream.id, None)
         client.assert_not_called()
 
+    def test_thumbnails_wait_out_a_hold_but_not_a_live_viewer(self) -> None:
+        self.addCleanup(setattr, bridge, "thumbnail_hold_until", 0.0)
+        bridge.hold_thumbnails()
+        give_up = bridge._yield_to_viewers("front_door")
+        released = threading.Timer(0.3, bridge.hold_thumbnails, args=(0,))
+        released.start()
+        began = time.monotonic()
+        bridge._wait_for_camera("front_door", give_up)
+        self.assertLess(time.monotonic() - began, 2)
+        stream = bridge.FrameSession(id="e" * 32, camera_id="front_door", request={})
+        stream.status = "playing"
+        with bridge.SESSIONS_LOCK:
+            bridge.FRAME_SESSIONS[stream.id] = stream
+        try:
+            give_up = bridge._yield_to_viewers("front_door")
+            self.assertFalse(give_up())
+            stream.last_access += 1
+            began = time.monotonic()
+            with self.assertRaises(bridge.ThumbnailBusy):
+                bridge._wait_for_camera("front_door", give_up)
+            self.assertLess(time.monotonic() - began, 1)
+        finally:
+            with bridge.SESSIONS_LOCK:
+                bridge.FRAME_SESSIONS.pop(stream.id, None)
+
     def test_thumbnail_cache_follows_the_camera_zone(self) -> None:
         start = datetime(2026, 11, 8, 23, 52, 12)
         epoch = int(datetime(2026, 11, 8, 21, 52, 12, tzinfo=UTC).timestamp())
@@ -319,7 +347,10 @@ class BridgeTests(unittest.TestCase):
         self.addCleanup(bridge.CLOCKS.clear)
         self.addCleanup(setattr, bridge, "thumbnail_hold_until", 0.0)
         bridge.CLOCKS["front_door"] = (float("inf"), "EET-2")
-        with patch.object(bridge, "_metadata_client") as client:
+        with (
+            patch.object(bridge, "_metadata_client") as client,
+            patch.object(bridge, "THUMBNAIL_WAIT_SECONDS", 0.3),
+        ):
             self.assertEqual(bridge.get_thumbnail("front_door", start), cached)
             bridge.CLOCKS["front_door"] = (float("inf"), "UTC0")
             bridge.hold_thumbnails()

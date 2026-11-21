@@ -117,8 +117,9 @@ class TVTArchiveApi:
             params={"date": date, "refresh": "1" if refresh else "0"},
         )
 
-    async def hold_thumbnails(self) -> dict[str, Any]:
-        return await self.request("POST", "/api/thumbnails/hold")
+    async def hold_thumbnails(self, seconds: float | None = None) -> dict[str, Any]:
+        body = None if seconds is None else {"seconds": seconds}
+        return await self.request("POST", "/api/thumbnails/hold", json_data=body)
 
     async def thumbnail(self, camera_id: str, at: str) -> bytes:
         response = await self._open(

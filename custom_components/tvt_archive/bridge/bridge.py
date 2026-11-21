@@ -50,7 +50,7 @@ from native9008 import (
     posix_zone,
 )
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 BASE = Path(os.environ.get("TVT_ARCHIVE_BASE", "/opt/tvt-archive"))
 CONFIG_DIRECTORY = Path(
     os.environ.get(
@@ -1591,6 +1591,7 @@ class ThumbnailBusy(Exception):
 
 
 THUMBNAIL_HOLD_SECONDS = 15
+THUMBNAIL_WAIT_SECONDS = 20
 THUMBNAIL_REQUEST_IDS = itertools.cycle(range(0x1000, 0x8000))
 
 
@@ -1623,9 +1624,10 @@ THUMBNAIL_LOCKS: collections.defaultdict[str, _NewestFirst] = collections.defaul
 thumbnail_hold_until = 0.0
 
 
-def hold_thumbnails() -> None:
+def hold_thumbnails(seconds: float = THUMBNAIL_HOLD_SECONDS) -> None:
     global thumbnail_hold_until
-    thumbnail_hold_until = time.monotonic() + THUMBNAIL_HOLD_SECONDS
+    seconds = max(0.0, min(float(seconds), THUMBNAIL_HOLD_SECONDS))
+    thumbnail_hold_until = time.monotonic() + seconds
 
 
 def _camera_in_use(camera_id: str) -> bool:
@@ -1644,12 +1646,54 @@ def _camera_in_use(camera_id: str) -> bool:
         )
 
 
+def _viewer_seen(camera_id: str) -> float:
+    now = time.time()
+    with SESSIONS_LOCK:
+        frames = [
+            value.last_access
+            for value in FRAME_SESSIONS.values()
+            if value.camera_id == camera_id and not value.finished()
+        ]
+        streams = [
+            value.last_access
+            for value in SESSIONS.values()
+            if value.camera_id == camera_id
+            and value.status in ("queued", "running", "playing")
+            and now - value.last_access < 6
+        ]
+    return max(frames + streams, default=0.0)
+
+
+def _yield_to_viewers(camera_id: str) -> Callable[[], bool]:
+    blocked = None
+    seen = _viewer_seen(camera_id)
+
+    def give_up() -> bool:
+        nonlocal blocked, seen
+        if not _camera_in_use(camera_id):
+            blocked, seen = None, _viewer_seen(camera_id)
+            return False
+        blocked = blocked or time.monotonic()
+        if time.monotonic() - blocked > THUMBNAIL_WAIT_SECONDS:
+            return True
+        return _viewer_seen(camera_id) > seen
+
+    return give_up
+
+
+def _wait_for_camera(camera_id: str, give_up: Callable[[], bool]) -> None:
+    while _camera_in_use(camera_id):
+        if give_up():
+            raise ThumbnailBusy
+        time.sleep(0.2)
+
+
 def get_thumbnail(camera_id: str, start: dt.datetime | None) -> Path:
     """JPEG of the first keyframe at or after `start`; None means the latest recording."""
     camera(camera_id)
+    give_up = _yield_to_viewers(camera_id)
     if start is None:
-        if _camera_in_use(camera_id):
-            raise ThumbnailBusy
+        _wait_for_camera(camera_id, give_up)
         latest = get_availability(camera_id, 2).get("latest")
         if not latest:
             raise KeyError("No recordings")
@@ -1661,12 +1705,11 @@ def get_thumbnail(camera_id: str, start: dt.datetime | None) -> Path:
     if path.exists():
         return path
     lock = THUMBNAIL_LOCKS[camera_id]
-    lock.acquire(start, lambda: _camera_in_use(camera_id))
+    lock.acquire(start, give_up)
     try:
         if path.exists():
             return path
-        if _camera_in_use(camera_id):
-            raise ThumbnailBusy
+        _wait_for_camera(camera_id, give_up)
         frame = b""
         request_id = next(THUMBNAIL_REQUEST_IDS)
         with camera_client(camera_id) as client:
@@ -3690,7 +3733,7 @@ def authorized(header: str) -> bool:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "TVTArchiveBridge/1.2.0"
+    server_version = "TVTArchiveBridge/1.2.1"
     timeout = 60
 
     def log_message(self, fmt: str, *args: Any) -> None:
@@ -4020,7 +4063,8 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path.rstrip("/")
         try:
             if path == "/api/thumbnails/hold":
-                hold_thumbnails()
+                body = self._read_json() if int(self.headers.get("Content-Length", "0")) else {}
+                hold_thumbnails(body.get("seconds", THUMBNAIL_HOLD_SECONDS))
                 self._json({"held": True})
                 return
             if path == "/api/cameras":
